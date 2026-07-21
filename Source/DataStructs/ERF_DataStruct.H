@@ -3,6 +3,8 @@
 
 #include <string>
 #include <iostream>
+#include <cmath>
+#include <limits>
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_Print.H>
@@ -452,8 +454,15 @@ struct SolverChoice {
         pp.query("poisson_abstol", poisson_abstol);
         pp.query("poisson_reltol", poisson_reltol);
 #ifdef AMREX_USE_FLOAT
-        poisson_abstol = amrex::max(poisson_abstol,amrex::Real(1e-6));
-        poisson_reltol = amrex::max(poisson_reltol,amrex::Real(1e-6));
+        // Single-precision iterative Poisson solves (MLMG on terrain-following
+        // grids) cannot drive the relative residual down to 1e-6; the achievable
+        // floor is O(sqrt(machine epsilon)) ~ 3.4e-4. Clamp the tolerances to that
+        // floor so the solver converges at its best attainable accuracy instead
+        // of running to max_iter and aborting. Double precision keeps 1e-8.
+        const amrex::Real sp_poisson_tol_floor =
+            std::sqrt(std::numeric_limits<amrex::Real>::epsilon());
+        poisson_abstol = amrex::max(poisson_abstol, sp_poisson_tol_floor);
+        poisson_reltol = amrex::max(poisson_reltol, sp_poisson_tol_floor);
 #endif
         for (int lev = 0; lev <= max_level; lev++) {
             if (anelastic[lev] != 0)
