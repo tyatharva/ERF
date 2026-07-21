@@ -70,3 +70,7 @@ build_*.log
 *~
 \#*\#
 .#*
+
+# Single-precision workflow build/install dirs
+/build/
+/install/

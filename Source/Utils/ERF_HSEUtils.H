@@ -595,7 +595,12 @@ Real compute_p_k_in_zone (Real &p_k, const Real p_k_minus_1, Real &theta_k, Real
     Real delta_p_k;
 
 #ifdef AMREX_USE_FLOAT
-    Real eps = Real(1e-6);
+    // Forward-difference step for the pressure Newton solve. In single precision
+    // the ULP of p_k (~1e5 Pa) is ~0.008, so a fixed 1e-6 step is lost to rounding
+    // ((p_k+eps)==p_k), F_prime collapses to zero and delta_p_k = -F/F_prime
+    // divides by zero. Scale the step off sqrt(machine epsilon) and |p_k| so that
+    // p_k+eps stays representable (the classic optimal forward-difference step).
+    Real eps = std::sqrt(std::numeric_limits<Real>::epsilon()) * std::abs(p_k);
 #else
     Real eps = Real(1e-10);
 #endif
@@ -613,7 +618,12 @@ Real compute_p_k_in_zone (Real &p_k, const Real p_k_minus_1, Real &theta_k, Real
         p_k            = p_k + delta_p_k;
     }
 
-    if (std::fabs(delta_p_k) > TOL) {
+    // Relative convergence check: delta_p_k is an increment on p_k (~1e5 Pa),
+    // whose representable resolution floor is |p_k|*epsilon. An absolute TOL on
+    // this increment is unreachable in single precision, so scale TOL by |p_k|.
+    // (The loop runs a fixed number of iterations, so this gate never affects the
+    // computed p_k -- only whether we abort -- and leaves double precision as-is.)
+    if (std::fabs(delta_p_k) > TOL * std::abs(p_k)) {
         amrex::Abort("Newton Raphson for pressure could not converge");
     }
 
