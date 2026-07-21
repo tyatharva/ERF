@@ -23,6 +23,15 @@ void ERF::build_fft_solvers (int lev)
         }
     }
 
+    // Building the single-precision FFT plans below JIT-compiles cuFFT kernels
+    // inside libnvidia-ptxjitcompiler, whose internal floating-point math can
+    // raise a spurious FE_INVALID. With amrex.fpe_trap_invalid enabled that
+    // becomes a fatal SIGFPE during plan construction, even though ERF's own
+    // arithmetic is fine. Scope the FP-exception traps off around plan setup
+    // only and restore the caller's settings immediately afterward, so real
+    // FPEs elsewhere are still trapped. (Third-party JIT issue, not ERF math.)
+    auto prev_fpe = amrex::disableFPExcept(amrex::FPExcept::all);
+
     if ( (solverChoice.mesh_type == MeshType::ConstantDz )  ||
          (solverChoice.mesh_type == MeshType::StretchedDz) )
     {
@@ -108,6 +117,9 @@ void ERF::build_fft_solvers (int lev)
             }
         } // isub
     } // constant or stretched dz
+
+    // Restore the caller's FP-exception trapping now that plan setup is done.
+    amrex::setFPExcept(prev_fpe);
 }
 
 /**
