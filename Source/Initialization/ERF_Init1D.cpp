@@ -71,8 +71,14 @@ ERF::initHSE (int lev)
     if (all_boxes_touch_bottom || lev > 0) {
 
         // Initial r_hse may or may not be in HSE -- defined in ERF_Prob.cpp
+        // HindCast over terrain (mesh_type != ConstantDz) uses the terrain-aware
+        // dry HSE base state below, matching what the other real-data init types
+        // (WRFInput, Metgrid) do; the moist constant-dz column is kept for flat
+        // HindCast runs (e.g. hurricanes over ocean) to preserve their behavior.
+        // In both cases the actual atmospheric state comes from the weather data.
         if ( (solverChoice.init_type == InitType::MoistBaseState) ||
-             (solverChoice.init_type == InitType::HindCast) )
+             ((solverChoice.init_type == InitType::HindCast) &&
+              (solverChoice.mesh_type == MeshType::ConstantDz)) )
         {
             AMREX_ALWAYS_ASSERT(solverChoice.mesh_type == MeshType::ConstantDz);
             prob->erf_init_dens_hse_moist(r_hse, z_phys_nd[lev], geom[lev]);

@@ -1,0 +1,224 @@
+# ============================================================================
+#  ERF INPUTS -- Channel Islands hindcast
+#  Domain: 512 x 256 km @ 1.3333 km, 48 vertical levels to 20 km
+#  Init:   HindCast from ERA5 (3-hourly). ERF is its own OSSE truth.
+#  Phase 1: test output -- SLM land model, radiation off (fastest first run).
+#
+#  AUDITED against Source/ (this fork). Corrections are marked [CORRECTED].
+# ============================================================================
+
+erf.prob_name = "HindCast"
+
+# ---------------------------------------------------------------------------
+#  INITIALIZATION  (HindCast pathway, ERA5)
+#  [CORRECTED] erf.hindcast_IC_filename removed -- that parameter does not
+#  exist in this fork (the HindCast.rst doc is stale). The IC is built by
+#  WeatherDataInterpolation, which scans hindcast_boundary_data_dir for .bin
+#  files and interpolates at start_datetime. The first .bin frame must match
+#  start_datetime.
+# ---------------------------------------------------------------------------
+erf.init_type = "HindCast"
+erf.hindcast_boundary_data_dir    = "ERA5Data_3D"
+erf.hindcast_data_interval_in_hrs = 3.0
+erf.hindcast_lateral_forcing      = true
+
+# [ADDED] Surface forcing from ERA5 (erftools Output/Surface). The domain is
+# mostly ocean; without this, water-surface temperatures have no data source.
+erf.hindcast_surface_bcs      = true
+erf.hindcast_surface_data_dir = "ERA5Data_Surface"
+
+# Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
+# whole 192 km N-S extent (2x120 > 192); 30 km (30 cells at dx=1 km) keeps
+# ~65% of the domain sponge-free while still relaxing smoothly to ERA5.
+erf.hindcast_lateral_sponge_strength = 0.3
+erf.hindcast_lateral_sponge_length   = 30000      # m
+
+# Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
+erf.hindcast_zhi_sponge_damping  = true
+erf.hindcast_zhi_sponge_strength = 0.3
+erf.hindcast_zhi_sponge_length   = 5000.0         # m (top 5 km)
+
+# ---------------------------------------------------------------------------
+#  GOVERNING EQUATIONS  (compressible)
+# ---------------------------------------------------------------------------
+erf.anelastic = 0
+
+# ---------------------------------------------------------------------------
+#  PROBLEM SIZE & GEOMETRY
+#  Domain: 384 x 192 km @ exactly 1 km, anchored at NE corner (34.5, -117.2).
+#  Coordinates are in the erftools LCC frame for ERA5 area
+#  36.0,-123.25,31.25,-115.25 :
+#    +proj=lcc +lat_1=32.041667 +lat_2=35.208333 +lat_0=33.625000
+#    +lon_0=-119.250000 +datum=WGS84 +units=m
+#  The box sits ~163-173 km inside the ERA5 data box on all sides (ERF
+#  requires only 4*dx; erftools' own guidance is 150 km). Do NOT replace with
+#  domain_extents.txt values -- the domain here is exact by construction.
+# ---------------------------------------------------------------------------
+geometry.prob_lo     = -195790.23 -93110.31     0.0
+geometry.prob_hi     =  188209.77  98889.69 20000.0
+amr.n_cell           = 384    192    48
+geometry.is_periodic = 0 0 0
+
+# Lateral faces: Outflow (features exit; ERA5 sponge does the coupling).
+# (BC strings are case-insensitive in ERF; these all verified accepted.)
+xlo.type = "Outflow"
+xhi.type = "Outflow"
+ylo.type = "Outflow"
+yhi.type = "Outflow"
+
+# Bottom: surface-layer (MOST) -- required by MYNN-EDMF. Top: slip wall + sponge.
+zlo.type = "surface_layer"
+zhi.type = "SlipWall"
+
+# MOST / surface-layer configuration.
+# [CORRECTED] flux_type bulk_coeff -> moeng. With bulk_coeff this fork
+# *requires* erf.most.surf_temp and erf.most.surf_moist (pp.get -> hard abort
+# if absent), and fixed Cd/Ch/Cq with a fixed surface temperature is wrong for
+# a diurnal hindcast anyway. moeng is the standard MOST similarity closure and
+# takes its surface state from the land model / hindcast surface data.
+erf.most.z0             = 0.1     # land roughness; ocean handled by Charnock internally
+erf.most.zref           = 25.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
+erf.most.average_policy = 1
+erf.surface_layer.flux_type = moeng
+# [CORRECTED] removed erf.most.Cd/Ch/Cq -- only read (and required) for bulk_coeff.
+
+# ---------------------------------------------------------------------------
+#  TERRAIN
+#  [ADDED] A terrain file is REQUIRED for real terrain: without
+#  erf.terrain_file_name, ERF silently falls back to the problem's custom
+#  terrain -- which is FLAT for the generic executable. No Channel Islands,
+#  no San Gabriels. Generate the file with dem_to_erf_terrain.py (this dir):
+#  plain format (nx, ny, x[], y[], z[] with index i*ny+j), meters in the same
+#  LCC plane as the erftools ERA5 data. (The _USGS reader path has an
+#  out-of-bounds indexing bug in this fork -- do not use it; see notes.)
+# ---------------------------------------------------------------------------
+erf.terrain_file_name = "channel_islands_terrain.txt"
+erf.terrain_type      = StaticFittedMesh
+erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
+
+# ---------------------------------------------------------------------------
+#  VERTICAL GRID  (48 surface-clustered levels; 49 face heights to 20 km)
+#  [CORRECTED] The original tail (17000 17800 18500 19100 19550 19800 19920
+#  19980 20000) had dz *shrinking* from ~1385 m at 15.8 km down to 20 m at the
+#  model top -- inverted stretching. 20-60 m cells at 17-20 km buy nothing
+#  physically (they sit inside the damping layer) and throttle the adaptive dt
+#  through the vertical advective CFL wherever gravity-wave w is nonzero.
+#  Replaced with a uniform ~462 m tail above 15.8 km; the transition sits
+#  entirely inside the top sponge (>15 km), which damps any wave reflection.
+# ---------------------------------------------------------------------------
+erf.terrain_z_levels = 0.0 25.0 55.0 90.0 130.0 175.0 226.0 283.0 347.0 419.0 \
+                       500.0 590.0 691.0 804.0 930.0 1071.0 1228.0 1403.0 1598.0 1815.0 \
+                       2056.0 2323.0 2620.0 2949.0 3313.0 3716.0 4162.0 4655.0 5199.0 5799.0 \
+                       6460.0 7186.0 7982.0 8853.0 9803.0 10836.0 11955.0 13162.0 14458.0 15843.0 \
+                       16305.0 16767.0 17229.0 17691.0 18152.0 18614.0 19076.0 19538.0 20000.0
+
+# ---------------------------------------------------------------------------
+#  TIME STEPPING  (CFL-adaptive: ERF auto-computes the slow dt each step from
+#  the advective/acoustic CFL. Slightly conservative CFL for downslope jets.
+#  init_shrink eases the first (violent) step; change_max caps dt growth.)
+# ---------------------------------------------------------------------------
+erf.substepping_type = "Implicit"
+erf.cfl              = 0.7        # slow-step CFL target (auto dt)
+erf.substepping_cfl  = 1.0        # acoustic substep CFL target
+erf.init_shrink      = 0.1        # first step at 10% to survive IC adjustment
+erf.change_max       = 1.1        # dt may grow at most 10% per step
+erf.w_damping        = true
+erf.w_damping_const  = 0.3
+
+# ---------------------------------------------------------------------------
+#  RUN LENGTH  (UTC datetimes aligned to ERA5 frames -- FILL from erftools date.
+#  Format must be "YYYY-MM-DD HH:MM:SS" (or HH:MM); verified in ERF.cpp.)
+#  Keep FIRST test short (e.g. +2 h) to confirm it runs.
+# ---------------------------------------------------------------------------
+start_datetime = "YYYY-MM-DD HH:00:00"
+stop_datetime  = "YYYY-MM-DD HH:00:00"
+max_step = 100000                 # safety cap; datetime governs the stop
+
+# ---------------------------------------------------------------------------
+#  ADVECTION  (WENOZ5; horiz and vert MUST match for WENO)
+# ---------------------------------------------------------------------------
+erf.dycore_horiz_adv_type    = "WENOZ5"
+erf.dycore_vert_adv_type     = "WENOZ5"
+erf.dryscal_horiz_adv_type   = "WENOZ5"
+erf.dryscal_vert_adv_type    = "WENOZ5"
+erf.moistscal_horiz_adv_type = "WENOZ5"
+erf.moistscal_vert_adv_type  = "WENOZ5"
+
+# ---------------------------------------------------------------------------
+#  TURBULENCE / PBL
+# ---------------------------------------------------------------------------
+erf.les_type = "None"
+erf.pbl_type = "MYNNEDMF"
+
+# ---------------------------------------------------------------------------
+#  FORCINGS
+#  [CORRECTED] removed erf.has_lat_lon -- no such parameter in this fork.
+#  Lat/lon fields come from the HindCast .bin data automatically and feed
+#  variable_coriolis.
+# ---------------------------------------------------------------------------
+erf.use_gravity       = true
+erf.use_coriolis      = true
+erf.coriolis_3d       = true
+erf.variable_coriolis = true
+
+# ---------------------------------------------------------------------------
+#  MOISTURE
+#  [CORRECTED] "P3" is not a moisture model in this fork (MoistureType enum:
+#  SAM, Kessler, SatAdj, Morrison, WSM6, SuperDroplets, ... -- no P3; the
+#  ERF_ENABLE_P3 build flag gates EAMxx code, not erf.moisture_model).
+#  Morrison chosen (user selection): two-moment mixed-phase with graupel+snow
+#  (matches the qgraup/qsnow plot vars); SP-validated in this fork.
+#  ("WSM6" is the single-moment alternative, also SP-validated.)
+# ---------------------------------------------------------------------------
+erf.moisture_model = "Morrison"
+
+# ---------------------------------------------------------------------------
+#  LAND SURFACE  (Phase 1: SLM. Switch to "NOAHMP" for production -- recompile.)
+# ---------------------------------------------------------------------------
+erf.land_surface_model = "SLM"
+
+# ---------------------------------------------------------------------------
+#  RADIATION  (Phase 1: off. "RRTMGP" for production if diurnal cycle matters.)
+# ---------------------------------------------------------------------------
+erf.radiation_model = "None"
+# -- Production (uncomment with radiation_model = RRTMGP): ------------------
+# erf.rad_freq_in_steps      = 10
+# erf.rrtmgp_file_path       = "."
+# erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
+# erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
+# erf.rrtmgp_cloud_optics_sw = rrtmgp-cloud-optics-coeffs-sw.nc
+# erf.rrtmgp_cloud_optics_lw = rrtmgp-cloud-optics-coeffs-lw.nc
+
+# ---------------------------------------------------------------------------
+#  REFINEMENT  (single uniform level -- no AMR)
+# ---------------------------------------------------------------------------
+amr.max_level       = 0
+amr.max_grid_size   = 64
+amr.blocking_factor = 16
+
+# ---------------------------------------------------------------------------
+#  DIAGNOSTICS & VERBOSITY
+# ---------------------------------------------------------------------------
+erf.sum_interval = 1
+erf.v = 1
+amr.v = 1
+amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
+
+# ---------------------------------------------------------------------------
+#  CHECKPOINTS  (time-based to match adaptive dt; every 6 h of sim time)
+#  (amr.check_per verified accepted -- ERF reads both erf.* and amr.*)
+# ---------------------------------------------------------------------------
+erf.check_file = chk
+amr.check_per  = 21600.0           # checkpoint every 21600 s (6 h)
+
+# ---------------------------------------------------------------------------
+#  PLOTFILES  (native AMReX; convert to NetCDF afterward)
+#  erf.plot_per_1 verified correct (ERF.cpp:2632). All plot vars verified
+#  against ERF_Plotfile.cpp / cons_names.
+# ---------------------------------------------------------------------------
+erf.plotfile_type = amrex
+erf.plot_file_1   = plt
+erf.plot_per_1    = 3600.0         # write a plotfile every 3600 s (hourly)
+erf.plot_vars_1   = density rhotheta x_velocity y_velocity z_velocity \
+                    pressure temp theta pres_hse z_phys qv qc qrain \
+                    qgraup qsnow vorticity_x vorticity_y vorticity_z rain_accum
