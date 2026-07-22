@@ -36,17 +36,11 @@ RUN git clone --depth 1 https://github.com/erf-model/erftools.git /opt/erftools 
     && python3 -m pip install --no-cache-dir -e /opt/erftools || true
 ENV ERFTOOLS_HOME=/opt/erftools
 
-# ---- RRTMGP coefficient tables (gas optics + cloud optics) ----
-# E3SM inputdata mirror; the four defaults expected by ERF_Radiation.H.
-RUN mkdir -p /opt/rrtmgp-data && cd /opt/rrtmgp-data \
-    && for f in rrtmgp-data-sw-g224-2018-12-04.nc \
-                rrtmgp-data-lw-g256-2018-12-04.nc \
-                rrtmgp-cloud-optics-coeffs-sw.nc \
-                rrtmgp-cloud-optics-coeffs-lw.nc ; do \
-         curl -fsSL -o $f \
-           "https://web.lcrc.anl.gov/public/e3sm/inputdata/atm/cam/rad/$f" \
-         || echo "WARNING: could not fetch $f -- supply manually"; \
-       done
-ENV RRTMGP_DATA=/opt/rrtmgp-data
+# ---- RRTMGP coefficient tables ----
+# The four tables ERF needs ship inside the ERF repo itself (bind-mounted at
+# runtime), so nothing is fetched here:
+#   Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-{sw-g224,lw-g256}-2018-12-04.nc
+#   Submodules/RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-{sw,lw}.nc
+# Run scripts copy them into the run directory (see benchmark instructions).
 
 WORKDIR /app/ERF

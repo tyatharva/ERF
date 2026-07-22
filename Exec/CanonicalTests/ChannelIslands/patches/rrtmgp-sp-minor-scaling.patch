@@ -1,0 +1,19 @@
+diff --git a/cpp/rrtmgp/kernels/mo_gas_optics_kernels.h b/cpp/rrtmgp/kernels/mo_gas_optics_kernels.h
+index 7efd3f9..f9d16d5 100644
+--- a/cpp/rrtmgp/kernels/mo_gas_optics_kernels.h
++++ b/cpp/rrtmgp/kernels/mo_gas_optics_kernels.h
+@@ -457,7 +457,13 @@ void gas_optical_depths_minor(int max_gpt_diff, int ncol, int nlay, int ngpt, in
+           if (scale_by_complement(imnr)) { // scale by densities of all gases but the special one
+             scaling = scaling * (1. - mycol_gas_imnr * vmr_fact * dry_fact);
+           } else {
+-            scaling = scaling *       mycol_gas_imnr * vmr_fact * dry_fact;
++            // Group the volume-mixing-ratio factor (col_imnr/col_dry ~ 1e-8..1e-2)
++            // before multiplying into scaling: evaluated left-to-right,
++            // scaling * mycol_gas_imnr multiplies two ~1e22-1e24 column amounts
++            // and overflows single precision (product ~1e45 > FLT_MAX -> inf).
++            // Algebraically identical; matches the parenthesization already used
++            // in the scale_by_complement branch above.
++            scaling = scaling *      (mycol_gas_imnr * vmr_fact * dry_fact);
+           }
+         }
+       } // minor_scalse_with_density(imnr)
