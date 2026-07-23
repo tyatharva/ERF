@@ -480,11 +480,15 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     // NOTE: the logic below will BREAK if we have any grids not touching the bottom boundary
     //
     {
-    lmask_lev[lev].resize(1);
     auto ngv = lev_new[Vars::cons].nGrowVect(); ngv[2] = 0;
+    // Do not clobber a mask already wired from hindcast surface data
+    // (SurfaceDataInterpolation runs earlier in init_stuff).
+    if (lmask_lev[lev].empty() || !lmask_lev[lev][0]) {
+    lmask_lev[lev].resize(1);
     lmask_lev[lev][0] = std::make_unique<iMultiFab>(ba2d[lev],dm,1,ngv);
     lmask_lev[lev][0]->setVal(1);
     lmask_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+    }
 
     land_type_lev[lev].resize(1);
     land_type_lev[lev][0] = std::make_unique<iMultiFab>(ba2d[lev],dm,1,ngv);

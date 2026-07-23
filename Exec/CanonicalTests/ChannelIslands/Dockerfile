@@ -1,7 +1,6 @@
 # ============================================================================
 # ERF Channel Islands hindcast environment
 #   erf-env (CUDA 12.6.2 + MPICH + HDF5 + NetCDF-C + CMake)
-#   + gfortran & NetCDF-Fortran   (required by ERF_ENABLE_NOAHMP)
 #   + erftools + Python deps     (ERA5 -> ERF IC/BC pipeline)
 #   + RRTMGP coefficient tables  (fetched at build time)
 #
@@ -12,43 +11,10 @@
 # ============================================================================
 FROM erf-env
 
-# ---- Fortran toolchain + NetCDF-Fortran (built against /usr/local netcdf-c) ----
+# ---- Minimal additions over erf-env (MM5 land model needs no Fortran) ----
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gfortran m4 csh curl ca-certificates python3-pip file \
+        curl ca-certificates python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-RUN cd /tmp \
-    && curl -fsSL -o netcdf-fortran.tar.gz \
-       https://github.com/Unidata/netcdf-fortran/archive/refs/tags/v4.6.1.tar.gz \
-    && tar xf netcdf-fortran.tar.gz && cd netcdf-fortran-4.6.1 \
-    && FC=gfortran CPPFLAGS="-I/usr/local/include" LDFLAGS="-L/usr/local/lib" \
-       ./configure --prefix=/usr/local --disable-static \
-    && make -j"$(nproc)" && make install && ldconfig \
-    && cd / && rm -rf /tmp/netcdf-fortran*
-
-# ---- WRF (real.exe) + WPS, prebuilt for the NOAHMP wrfinput pipeline ----
-# Serial GNU builds; we only need geogrid/ungrib/metgrid/real, never wrf.exe.
-ENV NETCDF=/usr/local
-RUN cd /opt \
-    && curl -fsSL -o wrf.tar.gz \
-         https://github.com/wrf-model/WRF/releases/download/v4.6.1/v4.6.1.tar.gz \
-    && mkdir WRF && tar xf wrf.tar.gz -C WRF --strip-components=1 && rm wrf.tar.gz \
-    && cd WRF && printf '32\n1\n' | ./configure \
-    && { ./compile em_real > /tmp/wrf_compile.log 2>&1 || true; } \
-    && { test -x main/real.exe || { echo "FATAL: real.exe did not build; last errors:" >&2; \
-         grep -nE "error|Error" /tmp/wrf_compile.log | tail -20 >&2; exit 1; }; } \
-    && rm -f /tmp/wrf_compile.log && find . -name "*.o" -delete
-RUN cd /opt \
-    && curl -fsSL -o wps.tar.gz \
-         https://github.com/wrf-model/WPS/archive/refs/tags/v4.6.0.tar.gz \
-    && mkdir WPS && tar xf wps.tar.gz -C WPS --strip-components=1 && rm wps.tar.gz \
-    && cd WPS && printf '1\n' | ./configure \
-    && sed -i "s|^WRF_DIR.*|WRF_DIR = /opt/WRF|" configure.wps \
-    && ./compile 2>&1 | tail -4 \
-    && test -x geogrid/src/geogrid.exe || { echo "FATAL: geogrid.exe did not build" >&2; exit 1; } \
-    && test -x ungrib/src/ungrib.exe  || { echo "FATAL: ungrib.exe did not build"  >&2; exit 1; } \
-    && test -x metgrid/src/metgrid.exe || { echo "FATAL: metgrid.exe did not build" >&2; exit 1; }
-ENV WRF_DIR=/opt/WRF WPS_DIR=/opt/WPS
 
 # ---- Python deps for erftools (ERA5 pipeline) and the terrain converter ----
 # Upgrade pip/setuptools first: the base image's setuptools cannot parse

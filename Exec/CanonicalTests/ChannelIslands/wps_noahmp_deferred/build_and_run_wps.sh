@@ -57,6 +57,11 @@ build_all () {
     # WPS: serial GNU (configure option 1)
     cd $SRC_WPS
     if [ ! -x geogrid/src/geogrid.exe ]; then
+        # WPS configure only checks for the STATIC libnetcdff.a; ours is
+        # shared-only, so the probe links without -lnetcdff and reports
+        # "Your versions of Fortran and NETCDF are not consistent".
+        sed -i 's|if \[ -f "$NETCDF/lib/libnetcdff.a" \]|if [ -f "$NETCDF/lib/libnetcdff.a" ] || [ -f "$NETCDF/lib/libnetcdff.so" ]|' configure
+        grep -q 'libnetcdff.so' configure || { echo "FATAL: WPS configure netcdff patch did not apply"; exit 1; }
         printf '1\n' | ./configure
         # WPS links against the WRF build above
         sed -i "s|^WRF_DIR.*|WRF_DIR = $SRC_WRF|" configure.wps

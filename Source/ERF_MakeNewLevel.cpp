@@ -127,8 +127,11 @@ void ERF::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& ba_in,
     // ********************************************************************************************
     // Build the data structures for holding sea surface temps and skin temps
     // ********************************************************************************************
-    sst_lev[lev].resize(1);     sst_lev[lev][0] = nullptr;
-    tsk_lev[lev].resize(1);     tsk_lev[lev][0] = nullptr;
+    // Do not clobber SST/TSK slots already wired by the hindcast surface-data
+    // path (init_stuff -> SurfaceDataInterpolation runs before this point);
+    // identical to the old unconditional reset whenever the slots were empty.
+    if (sst_lev[lev].empty()) { sst_lev[lev].resize(1);  sst_lev[lev][0] = nullptr; }
+    if (tsk_lev[lev].empty()) { tsk_lev[lev].resize(1);  tsk_lev[lev][0] = nullptr; }
 
     // ********************************************************************************************
     // Thin immersed body
@@ -396,8 +399,11 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     // ********************************************************************************************
     // Build the data structures for holding sea surface temps and skin temps
     // ********************************************************************************************
-    sst_lev[lev].resize(1);     sst_lev[lev][0] = nullptr;
-    tsk_lev[lev].resize(1);     tsk_lev[lev][0] = nullptr;
+    // Do not clobber SST/TSK slots already wired by the hindcast surface-data
+    // path (init_stuff -> SurfaceDataInterpolation runs before this point);
+    // identical to the old unconditional reset whenever the slots were empty.
+    if (sst_lev[lev].empty()) { sst_lev[lev].resize(1);  sst_lev[lev][0] = nullptr; }
+    if (tsk_lev[lev].empty()) { tsk_lev[lev].resize(1);  tsk_lev[lev][0] = nullptr; }
 
     // ********************************************************************************************
     // Fill data at the new level by interpolation from the coarser level

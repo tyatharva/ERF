@@ -14,15 +14,11 @@ fail () { echo "FATAL [stage_run]: $*" >&2; exit 1; }
 [ -d "$ERA5_OUT/ERA5Data_3D" ]      || fail "$ERA5_OUT/ERA5Data_3D missing -- run the erftools ERA5 step first"
 [ -d "$ERA5_OUT/ERA5Data_Surface" ] || fail "$ERA5_OUT/ERA5Data_Surface missing -- run the erftools ERA5 step first"
 [ -f "$CI/channel_islands_terrain.txt" ] || fail "terrain file missing -- run dem_to_erf_terrain.py"
-[ -f "$CI/wps/wrfinput_d01" ] || fail "wrfinput_d01 missing -- run wps/build_and_run_wps.sh all"
 [ -x /app/ERF/build/Exec/erf_exec ] || fail "erf_exec not built -- run Build/cmake_single_precision_cuda.sh"
 
 mkdir -p $RUN
 cp    $CI/inputs_hindcast                          $RUN/
 cp    $CI/channel_islands_terrain.txt              $RUN/
-cp    $CI/namelist.erf                             $RUN/
-cp    $CI/wps/wrfinput_d01                         $RUN/
-cp    /app/ERF/Submodules/Noah-MP/parameters/NoahmpTable.TBL $RUN/
 cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-sw-g224-2018-12-04.nc  $RUN/
 cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-lw-g256-2018-12-04.nc  $RUN/
 cp    /app/ERF/Submodules/RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-sw.nc $RUN/

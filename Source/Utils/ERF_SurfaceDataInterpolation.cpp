@@ -102,8 +102,11 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     Real* ls_mask_d_ptr = ls_mask_d.data();
     Real* sst_d_ptr   = sst_d.data();
 
-    const auto prob_lo  = geom[lev].ProbLo();
-    const auto dx       = geom[lev].CellSize();
+    // Use the GpuArray accessors: ProbLo()/CellSize() return host pointers,
+    // which are invalid when captured into a device lambda (CUDA error 700).
+    // The 3D path (ERF_WeatherDataInterpolation.cpp) already does this.
+    const auto prob_lo  = geom[lev].ProbLoArray();
+    const auto dx       = geom[lev].CellSizeArray();
 
     for (amrex::MFIter mfi(surface_state[lev]); mfi.isValid(); ++mfi) {
         const Box gbx = mfi.growntilebox();
@@ -208,6 +211,54 @@ ERF::SurfaceDataInterpolation(const int lev,
 
         FillSurfaceStateMultiFabs(lev, filename1, surface_state_1);
         FillSurfaceStateMultiFabs(lev, filename2, surface_state_2);
+
+        // Wire the hindcast surface data into the MOST surface layer:
+        // an LSM (or MYNN-EDMF's surface layer) over a domain with water
+        // requires SST (m_sst_lev) and a land mask; previously only the
+        // WRF lower-boundary path populated these. Register a single
+        // time slot (the surface layer's nt=1 branch uses it directly)
+        // and refresh its data at every 3-hourly read. The surface layer
+        // stores raw pointers at construction, so the allocation must
+        // persist and only its contents change.
+        {
+            MultiFab& surf_mf = surface_state_1[lev];
+            if (sst_lev[lev].empty()) {
+                sst_lev[lev].resize(1);
+                sst_lev[lev][0] = std::make_unique<MultiFab>(
+                    surf_mf.boxArray(), surf_mf.DistributionMap(), 1,
+                    surf_mf.nGrowVect());
+            }
+            // TSK is not provided by the hindcast surface files: register an
+            // empty slot so the surface layer's m_tsk_lev[lev][0] check sees
+            // a null pointer instead of indexing an empty vector.
+            if (tsk_lev[lev].empty()) {
+                tsk_lev[lev].resize(1);
+            }
+            // The default all-land lmask is allocated later in init_stuff;
+            // at the first (init-time) call here it does not exist yet, so
+            // allocate it now (the later default allocation is skipped when
+            // one already exists, so this wiring is not clobbered).
+            if (lmask_lev[lev].empty() || !lmask_lev[lev][0]) {
+                lmask_lev[lev].resize(1);
+                auto ngv = surf_mf.nGrowVect(); ngv[2] = 0;
+                lmask_lev[lev][0] = std::make_unique<iMultiFab>(
+                    surf_mf.boxArray(), surf_mf.DistributionMap(), 1, ngv);
+            }
+
+            // comp 0 = land-sea mask (1 = land), comp 1 = SST
+            MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, surf_mf.nGrowVect());
+            sst_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+
+            auto const& mask_arrs = surf_mf.const_arrays();
+            auto const& lmsk_arrs = lmask_lev[lev][0]->arrays();
+            ParallelFor(*lmask_lev[lev][0], lmask_lev[lev][0]->nGrowVect(),
+                        [=] AMREX_GPU_DEVICE (int box_no, int i, int j, int k) noexcept
+            {
+                lmsk_arrs[box_no](i,j,k) = (mask_arrs[box_no](i,j,0) >= myhalf) ? 1 : 0;
+            });
+            Gpu::streamSynchronize();
+            lmask_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+        }
 
          // Create the time-interpolated forecast state
         //CreateForecastStateMultiFabs(forecast_state_interp);

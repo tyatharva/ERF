@@ -76,7 +76,11 @@ zhi.type = "SlipWall"
 # if absent), and fixed Cd/Ch/Cq with a fixed surface temperature is wrong for
 # a diurnal hindcast anyway. moeng is the standard MOST similarity closure and
 # takes its surface state from the land model / hindcast surface data.
-erf.most.z0             = 0.1     # land roughness; ocean handled by Charnock internally
+erf.most.z0             = 0.1     # LAND points only (chaparral/scrub). Ocean
+                                  # roughness is computed dynamically from u*
+                                  # via Charnock (verified: the surface layer
+                                  # iterates land and sea separately; z0_const
+                                  # never applies to sea points).
 erf.most.zref           = 25.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
 erf.most.average_policy = 1
 erf.surface_layer.flux_type = moeng
@@ -172,16 +176,30 @@ erf.variable_coriolis = true
 erf.moisture_model = "Morrison"
 
 # ---------------------------------------------------------------------------
-#  LAND SURFACE  (NOAHMP; requires ERF_ENABLE_NOAHMP build and, in the run
-#  directory: NoahmpTable.TBL, namelist.erf, wrfinput_d01 -- see README/wps/)
+#  LAND SURFACE  (MM5: soil-column heat diffusion, Chen & Dudhia 2001 style.
+#  Compiled into every ERF build -- no build flag, no runtime data files.
+#  Land points only; ocean surface state comes from ERA5 SST via
+#  hindcast_surface_bcs. Note the driver hard-codes soil properties and a
+#  300 K column init (spin-up over the first hours for January land points).
+#  NOAHMP assets are quarantined in wps_noahmp_deferred/ if higher land
+#  fidelity is needed later.)
 # ---------------------------------------------------------------------------
-erf.land_surface_model = "NOAHMP"
+erf.land_surface_model = "MM5"
 
 # ---------------------------------------------------------------------------
 #  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.
 #  rad_freq_in_steps: radiation every N dycore steps -- see benchmark notes.)
 # ---------------------------------------------------------------------------
 erf.radiation_model        = "RRTMGP"
+# Uniform surface temperature for the LW lower boundary (this fork's RRTMGP
+# uses a constant, not the evolving skin-temperature field -- known fidelity
+# limitation). 288 K = ocean-weighted January value for this 75%-ocean domain.
+erf.rad_t_sfc              = 288.0
+# Ozone volume mixing ratio for gas optics: single tropospheric-mean value
+# (domain tops at 20 km, largely below the O3 layer; the O3-sensitive upper
+# levels sit inside the damping layer). Refine to a 48-entry profile if
+# stratospheric SW heating ever matters for the application.
+erf.o3vmr                  = 5.0e-8
 erf.rad_freq_in_steps      = 30
 erf.rrtmgp_file_path       = "."
 erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
