@@ -566,6 +566,18 @@ public:
                     iindex_terrain = nx-1;
                 }
 
+                // Clamp so the (iindex+1, jindex+1) accesses below stay in
+                // bounds. Query points at (or epsilon past) the last terrain
+                // grid line left the search exhausted with index nx-1/ny-1,
+                // and d_xt[nx]/d_yt[ny]/d_zt[...] then read PAST the arrays
+                // (uninitialized memory -> NaN terrain at the domain's high-x
+                // and high-y edge nodes; found with compute-sanitizer
+                // initcheck). Clamping reduces the bilinear weights to a
+                // boundary extrapolation with in-range data, matching the
+                // clamping the USGS branch and bilinear_interpolation_2d use.
+                iindex_terrain = amrex::max(0, amrex::min(iindex_terrain, nx-2));
+                jindex_terrain = amrex::max(0, amrex::min(jindex_terrain, ny-2));
+
                 // Define the four values to interpolate between
                 x1 = d_xt[iindex_terrain];
                 x2 = d_xt[iindex_terrain+1];

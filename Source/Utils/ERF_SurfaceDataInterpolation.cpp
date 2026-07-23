@@ -114,28 +114,32 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
 
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
 
-            if(k == 0) {
-                const Real x        = prob_lo[0] + (i + myhalf) * dx[0];
-                const Real y        = prob_lo[1] + (j + myhalf) * dx[1];
+            // NOTE: write EVERY k-plane of the slab, not just k==0. The 2D
+            // surface MultiFab inherits the 3D state's ghost vector, so it
+            // owns z-ghost planes (k != 0); leaving them unwritten fed
+            // uninitialized memory into every downstream copy/blend of this
+            // field (flagged by compute-sanitizer initcheck). The field is
+            // k-independent, so all planes take the same value.
+            const Real x        = prob_lo[0] + (i + myhalf) * dx[0];
+            const Real y        = prob_lo[1] + (j + myhalf) * dx[1];
 
-                // First interpolate where the weather data is available from
-                Real tmp_ls_mask, tmp_sst;
+            // First interpolate where the weather data is available from
+            Real tmp_ls_mask, tmp_sst;
 
-                bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
-                                          dxvec, dyvec,
-                                          nx, ny,
-                                          x, y,
-                                          ls_mask_d_ptr, tmp_ls_mask);
+            bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
+                                      dxvec, dyvec,
+                                      nx, ny,
+                                      x, y,
+                                      ls_mask_d_ptr, tmp_ls_mask);
 
-                bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
-                                          dxvec, dyvec,
-                                          nx, ny,
-                                          x, y,
-                                          sst_d_ptr, tmp_sst);
+            bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
+                                      dxvec, dyvec,
+                                      nx, ny,
+                                      x, y,
+                                      sst_d_ptr, tmp_sst);
 
-                surf_arr(i, j, 0) = std::min(tmp_ls_mask, amrex::Real(1.0));
-                surf_arr(i, j, 1) = tmp_sst;
-            }
+            surf_arr(i, j, k, 0) = std::min(tmp_ls_mask, amrex::Real(1.0));
+            surf_arr(i, j, k, 1) = tmp_sst;
         });
     }
 
