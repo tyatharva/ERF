@@ -50,7 +50,10 @@ erf.anelastic = 0
 
 # ---------------------------------------------------------------------------
 #  PROBLEM SIZE & GEOMETRY
-#  Domain: 384 x 192 km @ exactly 2 km, anchored at NE corner (34.2, -117.2).
+#  Domain: 384 x 192 km @ exactly 3 km, anchored at NE corner (34.2, -117.2).
+#  [3-km OPERATING POINT] 128x64x32 = 262K cells; same extent/vertical grid
+#  as the measured 2-km config (revert n_cell to 192 96 32 + terrain file
+#  channel_islands_terrain.txt for 2 km).
 #  (Pin moved south 0.3 deg: drops Mt. San Antonio / high San Gabriels. The
 #  northern Channel Islands sit ~17 km inside the N edge -- inside the 30 km
 #  sponge; at most ~17 km further southward motion before Santa Cruz clips.)
@@ -64,7 +67,7 @@ erf.anelastic = 0
 # ---------------------------------------------------------------------------
 geometry.prob_lo     = -195131.04 -126372.41     0.0
 geometry.prob_hi     =  188868.96   65627.59 17893.69
-amr.n_cell           = 192    96     32
+amr.n_cell           = 128    64     32
 geometry.is_periodic = 0 0 0
 
 # Lateral faces: Outflow (features exit; ERA5 sponge does the coupling).
@@ -105,7 +108,7 @@ erf.most.surf_temp      = 288.0   # fixed surface T while LSM/SST path is off
 #  LCC plane as the erftools ERA5 data. (The _USGS reader path has an
 #  out-of-bounds indexing bug in this fork -- do not use it; see notes.)
 # ---------------------------------------------------------------------------
-erf.terrain_file_name = "channel_islands_terrain.txt"
+erf.terrain_file_name = "channel_islands_terrain_3km.txt"
 erf.terrain_type      = StaticFittedMesh
 # Generated vertical grid: 32 levels, dz0=25 m, ratio 1.16 -> top exactly
 # 17893.69 m (the generator does NOT rescale to prob_hi; prob_hi z is set to
