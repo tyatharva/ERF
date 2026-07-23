@@ -449,14 +449,22 @@ ERF::WeatherDataInterpolation(const int lev,
                       alpha1, forecast_state_1[lev][Vars::cons], 0,
                       alpha2, forecast_state_2[lev][Vars::cons], 0,
                       0, erf_mf_cons.nComp(), forecast_state_interp[lev][Vars::cons].nGrow());
+    // The velocity fill kernels above cover VALID face boxes only (no ghosts),
+    // so forecast_state_1/2 velocity ghost cells are uninitialized. Blend over
+    // 0 ghosts and fill the interp ghosts by exchange instead: blending over
+    // nGrow copies uninitialized memory into the interp state, which the
+    // hindcast sponge kernels then read at box perimeters (NaN in
+    // memory-dependent regions).
     MultiFab::LinComb(forecast_state_interp[lev][Vars::xvel],
                       alpha1, forecast_state_1[lev][Vars::xvel], 0,
                       alpha2, forecast_state_2[lev][Vars::xvel], 0,
-                      0, erf_mf_xvel.nComp(), forecast_state_interp[lev][Vars::xvel].nGrow());
+                      0, erf_mf_xvel.nComp(), 0);
     MultiFab::LinComb(forecast_state_interp[lev][Vars::yvel],
                       alpha1, forecast_state_1[lev][Vars::yvel], 0,
                       alpha2, forecast_state_2[lev][Vars::yvel], 0,
-                      0, erf_mf_yvel.nComp(), forecast_state_interp[lev][Vars::yvel].nGrow());
+                      0, erf_mf_yvel.nComp(), 0);
+    forecast_state_interp[lev][Vars::xvel].FillBoundary(geom[lev].periodicity());
+    forecast_state_interp[lev][Vars::yvel].FillBoundary(geom[lev].periodicity());
     MultiFab::LinComb(forecast_state_interp[lev][4],
                       alpha1, forecast_state_1[lev][4], 0,
                       alpha2, forecast_state_2[lev][4], 0,

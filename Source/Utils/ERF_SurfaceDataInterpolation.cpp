@@ -247,6 +247,33 @@ ERF::SurfaceDataInterpolation(const int lev,
 
             // comp 0 = land-sea mask (1 = land), comp 1 = SST
             MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, surf_mf.nGrowVect());
+
+            // Sanitize: ERA5 SST carries ~9999 fill values over land, and the
+            // bilinear interpolation blends them into coastal sea cells (values
+            // of several thousand K were observed). qsat() of such values
+            // overflows -- fatally in single precision -- and one bad surface
+            // cell NaNs its whole column through the vertically-implicit solve.
+            // Land cells get a benign placeholder (their surface temperature
+            // comes from the land model / T0, never from SST); sea cells are
+            // clamped to a physical ocean range so fill-contaminated coastal
+            // cells stay finite (warm-biased in at most a 1-2 cell halo of the
+            // ~25 km source data; flagged in the run documentation).
+            {
+                auto const& m_arrs = surf_mf.const_arrays();
+                auto const& s_arrs = sst_lev[lev][0]->arrays();
+                ParallelFor(*sst_lev[lev][0], sst_lev[lev][0]->nGrowVect(),
+                            [=] AMREX_GPU_DEVICE (int box_no, int i, int j, int k) noexcept
+                {
+                    if (m_arrs[box_no](i,j,0) >= myhalf) {
+                        s_arrs[box_no](i,j,k) = Real(288.0);  // land placeholder
+                    } else {
+                        s_arrs[box_no](i,j,k) =
+                            amrex::min(amrex::max(s_arrs[box_no](i,j,k),
+                                                  Real(271.0)), Real(305.0));
+                    }
+                });
+                Gpu::streamSynchronize();
+            }
             sst_lev[lev][0]->FillBoundary(geom[lev].periodicity());
 
             auto const& mask_arrs = surf_mf.const_arrays();
@@ -283,6 +310,17 @@ ERF::SurfaceDataInterpolation(const int lev,
         << "alpha1 = " << alpha1 << ", alpha2 = " << alpha2;
        Abort(ss.str());
     }
+
+    // Fill the time-interpolated surface state. This LinComb was commented
+    // out upstream, leaving surface_state_interp UNINITIALIZED while the
+    // slow-RHS/substep source terms consume it whenever hindcast_surface_bcs
+    // is on (garbage land-sea mask -> unbounded bulk-coefficient tendencies,
+    // NaN within one step in memory-dependent regions).
+    MultiFab::LinComb(surface_state_interp[lev],
+                      alpha1, surface_state_1[lev], 0,
+                      alpha2, surface_state_2[lev], 0,
+                      0, surface_state_interp[lev].nComp(),
+                      surface_state_interp[lev].nGrow());
 
     /*MultiFab& mf_surf_interp   = surface_state_interp[lev];
 

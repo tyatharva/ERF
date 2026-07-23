@@ -394,6 +394,9 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
             forecast_state_1[lev][comp].define(ba, dm, ncomp, ng);
             forecast_state_2[lev][comp].define(ba, dm, ncomp, ng);
             forecast_state_interp[lev][comp].define(ba, dm, ncomp, ng);
+            // Zero-init: physical-boundary ghosts are never filled by the
+            // LinComb/FillBoundary pipeline and must not be garbage.
+            forecast_state_interp[lev][comp].setVal(0.0);
         }
 
         // Define the "extra" component (last slot)
@@ -405,6 +408,7 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
             forecast_state_1[lev][idx].define(ba, dm, ncomp_extra, ngrow);
             forecast_state_2[lev][idx].define(ba, dm, ncomp_extra, ngrow);
             forecast_state_interp[lev][idx].define(ba, dm, ncomp_extra, ngrow);
+            forecast_state_interp[lev][idx].setVal(0.0);
         }
         bool regrid_forces_file_read = true;
         WeatherDataInterpolation(lev, t_new[0],z_phys_nd, regrid_forces_file_read);

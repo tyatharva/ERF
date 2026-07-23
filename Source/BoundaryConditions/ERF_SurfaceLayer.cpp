@@ -226,6 +226,7 @@ SurfaceLayer::update_fluxes (const int& lev,
     t_star[lev]->FillBoundary(m_geom[lev].periodicity());
     q_star[lev]->FillBoundary(m_geom[lev].periodicity());
       olen[lev]->FillBoundary(m_geom[lev].periodicity());
+
 }
 
 /**
