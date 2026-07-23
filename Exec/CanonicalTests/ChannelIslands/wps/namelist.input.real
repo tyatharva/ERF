@@ -1,0 +1,48 @@
+! Minimal WRF namelist.input for running REAL.EXE ONLY, to produce
+! wrfinput_d01 for the ERF Noah-MP driver (soil/veg static + SMOIS/TSLB/
+! SNOW/TSK/CANWAT/TMN initial states). We never run wrf.exe.
+!
+! FILL: start/end date (same single time as namelist.wps) and
+! num_metgrid_levels (printed by metgrid; = number of ERA5 pressure levels
+! in your GRIB + 1 surface level. 38 pressure levels -> 39).
+
+&time_control
+ run_days   = 0,
+ run_hours  = 0,
+ start_year = YYYY, start_month = MM, start_day = DD, start_hour = HH,
+ end_year   = YYYY, end_month   = MM, end_day   = DD, end_hour   = HH,
+ interval_seconds = 10800,
+ input_from_file = .true.,
+ io_form_input   = 2,
+ io_form_auxinput2 = 2,
+/
+
+&domains
+ time_step = 6,
+ max_dom   = 1,
+ e_we      = 385,
+ e_sn      = 193,
+ e_vert    = 45,
+ num_metgrid_levels      = 39,   ! FILL: check metgrid output
+ num_metgrid_soil_levels = 4,
+ dx = 1000.0,
+ dy = 1000.0,
+ p_top_requested = 5000,
+/
+
+&physics
+ ! Noah-MP so real.exe lays out 4 soil layers the ERF driver expects
+ sf_surface_physics = 4,
+ num_soil_layers    = 4,
+ num_land_cat       = 21,
+/
+
+&dynamics
+/
+
+&bdy_control
+ specified = .true.,
+/
+
+&namelist_quilt
+/

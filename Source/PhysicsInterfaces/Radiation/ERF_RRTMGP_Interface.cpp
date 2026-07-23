@@ -1,4 +1,5 @@
 #include "ERF_RRTMGP_Interface.H"
+#include <AMReX.H>
 
 namespace rrtmgp {
 
@@ -7,6 +8,30 @@ namespace rrtmgp {
  * once and then persist throughout the life of the program, so we
  * declare them here within the rrtmgp namespace.
  */
+
+// Defensive check: gas optics must never emit non-finite optical depths.
+// In particular, a single-precision build without the RRTMGP minor-gas
+// scaling regrouping (Exec/CanonicalTests/ChannelIslands/patches/
+// rrtmgp-sp-minor-scaling.patch) overflows FLT_MAX in
+// gas_optical_depths_minor and would otherwise silently produce NaN
+// radiative fluxes. Cost: one reduction per radiation call.
+template <typename TauViewT>
+static void validate_finite_tau (const char* which, TauViewT const& tau)
+{
+    long nbad = 0;
+    Kokkos::parallel_reduce(tau.size(),
+        KOKKOS_LAMBDA (long i, long& nb) {
+            if (!Kokkos::isfinite(tau.data()[i])) { nb++; }
+        }, Kokkos::Sum<long>(nbad));
+    if (nbad > 0) {
+        amrex::Abort(std::string("RRTMGP gas optics produced ") +
+                     std::to_string(nbad) + " non-finite optical depths (" + which +
+                     "). If this is a single-precision build, verify the "
+                     "rrtmgp-sp-minor-scaling patch is applied to Submodules/RRTMGP "
+                     "(see Exec/CanonicalTests/ChannelIslands/README.md).");
+    }
+}
+
 std::unique_ptr<gas_optics_t> k_dist_sw_k;
 std::unique_ptr<gas_optics_t> k_dist_lw_k;
 
@@ -783,6 +808,7 @@ rrtmgp_sw (const int ncol,
 
     k_dist.gas_optics(nday, nlay, top_at_1, p_lay_day, p_lev_day,
                       t_lay_limited, gas_concs_day, col_gas, optics, toa_flux);
+    validate_finite_tau("shortwave", optics.tau);
     if (extra_clnsky_diag) {
         k_dist.gas_optics(nday, nlay, top_at_1, p_lay_day, p_lev_day,
                           t_lay_limited, gas_concs_day, col_gas, optics_no_aerosols, toa_flux);
@@ -1014,6 +1040,7 @@ rrtmgp_lw (const int ncol,
     real3d_k col_gas("col_gas", ncol, nlay, k_dist.get_ngas()+1);
     k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                       t_sfc, gas_concs, col_gas, optics, lw_sources, view_t<RealT**>(), t_lev_limited);
+    validate_finite_tau("longwave", optics.tau);
     if (extra_clnsky_diag) {
         k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                           t_sfc, gas_concs, col_gas, optics_no_aerosols, lw_sources, view_t<RealT**>(), t_lev_limited);

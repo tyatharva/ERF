@@ -18,6 +18,11 @@ else
   : ${ERF_INSTALL_DIR:="install"}
 fi
 
+# Single-precision RRTMGP requires the minor-gas-scaling overflow fix in the
+# RRTMGP submodule. Applied with byte-exact verification; the build HARD-FAILS
+# if the file is in an unknown state. See Exec/CanonicalTests/ChannelIslands/.
+"$ERF_SOURCE_DIR/Exec/CanonicalTests/ChannelIslands/apply_rrtmgp_patch.sh" || exit 1
+
 echo "Source: $ERF_SOURCE_DIR | Build: $ERF_BUILD_DIR | Install: $ERF_INSTALL_DIR | PWD: $(pwd)"
 echo "Customize: export ERF_BUILD_DIR=... ERF_SOURCE_DIR=... ERF_INSTALL_DIR=... or ERF_HOME=..."
 

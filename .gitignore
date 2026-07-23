@@ -78,3 +78,7 @@ build_*.log
 # ChannelIslands generated/staged data
 Exec/CanonicalTests/ChannelIslands/dem.tif
 Exec/CanonicalTests/ChannelIslands/channel_islands_terrain.txt
+Exec/CanonicalTests/ChannelIslands/wps/wrfinput_d01
+/wps_geog/
+/wps_work/
+/era5_grib/
