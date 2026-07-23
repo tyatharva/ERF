@@ -82,11 +82,11 @@ which apply to `development`:
 `RhoTheta`, not momentum, so "velmag" evaluates to ~theta ≈ 300 (m/s scale)
 over sea. Latent/sensible bulk fluxes are then ~an order of magnitude too
 strong. Only active with `erf.hindcast_surface_bcs = true`; all-ocean
-hurricane cases may have tolerated it. In this fork's ChannelIslands runs it
-likely intensifies the spin-up (cfl=0.7 blow-up; stable at cfl=0.5 with the
-defect present, and stable at cfl=0.7 with the surface treatment disabled).
-Not yet fixed here — a proper fix needs the velocity MultiFabs passed into
-the CC treatment.
+hurricane cases may have tolerated it. **Fixed in this fork**: the CC variant
+now takes the face-velocity arrays (`u_arr`/`v_arr`, averaged to cell
+centers) plumbed through `make_sources`; see
+`ERF_ApplySurfaceTreatment_BulkCoeff.cpp` / `ERF_MakeSources.cpp` on branch
+`ERF`. Upstream still has the defect.
 
 ## 5. erftools
 
@@ -104,3 +104,40 @@ the CC treatment.
   herbie-data, pygrib, tqdm, dateutil, yt) are undeclared.
 - The era5 notebook requires `TypicalAtmosphereData/` but only the gfs
   notebooks ship it.
+
+## 6. Anelastic mode is incompatible with the HindCast pathway (three independent failures)
+
+Measured on the 2-km ChannelIslands config (this fork, branch `ERF`):
+
+- **Adaptive dt is unbounded from the at-rest IC.** The HindCast IC starts
+  the state at rest (item 1), so the anelastic dt estimator (advective CFL
+  only — no acoustic constraint) returns "undefined"/unbounded; the run
+  reached 12 model-hours in 4 steps, NaN'd, and aborted in the hindcast
+  frame-interpolation weights (`alpha1 = -0.084`).
+- **Pressure blow-up at the lateral momentum sponge.** With `fixed_dt=2.6`
+  the run survives ~50 steps, then the state fed to radiation shows
+  `p_lay` up to 1718 hPa and temperatures at the gas-optics table ceiling
+  (355 K), localized at the north-edge sponge — the anelastic pressure
+  projection and the hindcast momentum sponge are inconsistent at the
+  boundary. (Compressible with the identical deck runs clean.)
+- **No compressible→anelastic restart.** Anelastic restart requires
+  `Level_0/PP_Inc_H`, which compressible checkpoints do not write, so the
+  obvious workaround (spin up compressible, switch to anelastic) aborts at
+  I/O.
+
+Worth fixing upstream: measured anelastic per-step cost on this config is
+~12% BELOW compressible (no acoustic substepping outweighs the FFT-
+preconditioned GMRES Poisson solve), and the advective dt estimate is ~8x
+the compressible (acoustic-bound) dt — a large win if the boundary
+treatment supported it.
+
+## 7. check_for_low_temp floods stdout with the HindCast IC
+
+The dry-isentropic 300 K IC (item 1) puts every cell above ~11.4 km below
+the 188 K microphysics validity floor, so `ERF::check_for_low_temp`
+(called twice per step with any moisture model) emits ~30,000 device
+printfs per step — ~12M warning lines in a 400-step run. The `Abort()` in
+the device lambda does not fire in release GPU builds, so the run
+continues; the flood is log bloat plus measurable printf overhead. A
+count-limited warning (or one summary line per step) would preserve the
+diagnostic without the flood.

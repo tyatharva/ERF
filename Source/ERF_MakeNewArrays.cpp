@@ -52,6 +52,11 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
 
     int ngrow = ComputeGhostCells(solverChoice) + 2;
     tmp_zphys_nd = std::make_unique<MultiFab>(ba_nd,dm,1,IntVect(ngrow,ngrow,ngrow));
+    // Deterministic init: compute-sanitizer initcheck showed FillBoundary on
+    // z_phys_nd reading cells no construction path had written (~1.8M reads on
+    // a 96x96x48 case). Zero them so any consumer of a not-yet-filled cell is
+    // reproducible rather than dependent on prior GPU-memory contents.
+    tmp_zphys_nd->setVal(zero);
 
     // Offset z-coordinate for interpolate_1d when plane EB is used.
     Real z_offset = zero;

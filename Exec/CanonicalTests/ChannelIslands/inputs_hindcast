@@ -134,11 +134,17 @@ erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
 # ---------------------------------------------------------------------------
 erf.substepping_type = "Implicit"
 erf.cfl              = 0.5        # slow-step CFL target (auto dt).
-                                  # 0.7 blew up deterministically at step ~45
-                                  # of the boundary-jet spin-up (single AND
-                                  # multi-stream); 0.5 is finite through the
-                                  # window (validated 60 steps). Revisit after
-                                  # spin-up if benchmark time matters.
+                                  # MEASURED: dt is horizontal-ACOUSTIC bound
+                                  # (dt = cfl*dx/(c+|u|); initial_dz does not
+                                  # move it). The 0.7 blowup is ONLY the IC-
+                                  # adjustment transient (~50-65 s model time
+                                  # at both 1 km and 2 km). Recipe: cold-start
+                                  # at 0.5 with erf.check_int=100, then restart
+                                  # chk00100 at cfl=0.7 (dt 3.62 s, 300 steps
+                                  # validated) or 0.9 (dt 4.46 s, 300 steps
+                                  # validated, less margin). fixed_dt=8 NaNs
+                                  # in <=20 steps -- do not exceed the
+                                  # acoustic-proportional adaptive dt.
 erf.substepping_cfl  = 1.0        # acoustic substep CFL target
 erf.init_shrink      = 0.1        # first step at 10% to survive IC adjustment
 erf.change_max       = 1.1        # dt may grow at most 10% per step

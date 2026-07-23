@@ -15,8 +15,10 @@ namespace rrtmgp {
 // rrtmgp-sp-minor-scaling.patch) overflows FLT_MAX in
 // gas_optical_depths_minor and would otherwise silently produce NaN
 // radiative fluxes. Cost: one reduction per radiation call.
-template <typename TauViewT>
-static void validate_finite_tau (const char* which, TauViewT const& tau)
+template <typename TauViewT, typename T2dT = TauViewT>
+static void validate_finite_tau (const char* which, TauViewT const& tau,
+                                 T2dT const* tlay = nullptr,
+                                 T2dT const* play = nullptr)
 {
     long nbad = 0;
     Kokkos::parallel_reduce(tau.size(),
@@ -24,6 +26,41 @@ static void validate_finite_tau (const char* which, TauViewT const& tau)
             if (!Kokkos::isfinite(tau.data()[i])) { nb++; }
         }, Kokkos::Sum<long>(nbad));
     if (nbad > 0) {
+        // Diagnostic context: locate the first bad entry and report the
+        // temperature/pressure extremes fed to gas optics, so table-edge
+        // states (e.g. the isentropic-IC cold top) are identifiable.
+        long e0 = tau.extent(0), e1 = tau.extent(1), e2 = tau.extent(2);
+        long first_bad = -1;
+        Kokkos::parallel_reduce(tau.size(),
+            KOKKOS_LAMBDA (long i, long& fb) {
+                if (!Kokkos::isfinite(tau.data()[i]) && (fb < 0 || i < fb)) { fb = i; }
+            }, Kokkos::Min<long>(first_bad));
+        long i2 = first_bad % e2, i1 = (first_bad/e2) % e1, i0 = first_bad/(e2*e1);
+        std::cout << "validate_finite_tau(" << which << "): nbad=" << nbad
+                       << " extents=(" << e0 << "," << e1 << "," << e2 << ")"
+                       << " first_bad=(" << i0 << "," << i1 << "," << i2 << ")\n";
+        if (tlay) {
+            typename TauViewT::non_const_value_type tmin, tmax;
+            auto tl = *tlay;
+            Kokkos::parallel_reduce(tl.size(),
+                KOKKOS_LAMBDA (long i, decltype(tmin)& m) { m = (tl.data()[i] < m) ? tl.data()[i] : m; },
+                Kokkos::Min<decltype(tmin)>(tmin));
+            Kokkos::parallel_reduce(tl.size(),
+                KOKKOS_LAMBDA (long i, decltype(tmax)& m) { m = (tl.data()[i] > m) ? tl.data()[i] : m; },
+                Kokkos::Max<decltype(tmax)>(tmax));
+            std::cout << "  t_lay range fed to gas optics: [" << tmin << "," << tmax << "]\n";
+        }
+        if (play) {
+            typename TauViewT::non_const_value_type pmin, pmax;
+            auto pl = *play;
+            Kokkos::parallel_reduce(pl.size(),
+                KOKKOS_LAMBDA (long i, decltype(pmin)& m) { m = (pl.data()[i] < m) ? pl.data()[i] : m; },
+                Kokkos::Min<decltype(pmin)>(pmin));
+            Kokkos::parallel_reduce(pl.size(),
+                KOKKOS_LAMBDA (long i, decltype(pmax)& m) { m = (pl.data()[i] > m) ? pl.data()[i] : m; },
+                Kokkos::Max<decltype(pmax)>(pmax));
+            std::cout << "  p_lay range fed to gas optics: [" << pmin << "," << pmax << "]\n";
+        }
         amrex::Abort(std::string("RRTMGP gas optics produced ") +
                      std::to_string(nbad) + " non-finite optical depths (" + which +
                      "). If this is a single-precision build, verify the "
@@ -1040,7 +1077,7 @@ rrtmgp_lw (const int ncol,
     real3d_k col_gas("col_gas", ncol, nlay, k_dist.get_ngas()+1);
     k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                       t_sfc, gas_concs, col_gas, optics, lw_sources, view_t<RealT**>(), t_lev_limited);
-    validate_finite_tau("longwave", optics.tau);
+    validate_finite_tau("longwave", optics.tau, &t_lay_limited, &p_lay);
     if (extra_clnsky_diag) {
         k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                           t_sfc, gas_concs, col_gas, optics_no_aerosols, lw_sources, view_t<RealT**>(), t_lev_limited);

@@ -188,7 +188,7 @@ See "What a healthy run looks like" below.
    double + RRTMGP exceeds 16 GB — double is NOT a viable fallback on this
    card, and precision is not implicated in any remaining issue). The
    flagged bulk-coeff velmag defect (Known issue #5 / UPSTREAM_ISSUES #4)
-   likely intensifies the spin-up and should be fixed for science runs.
+   is now fixed in this fork.
 3. **HindCast pathway couples momenta only** (upstream gap, confirmed against
    upstream `development`): no ERA5 field enters the initial state (u=v=0,
    theta=300 K isentrope, qv=0 verified via max_step=0 plotfile), and the
@@ -201,5 +201,39 @@ See "What a healthy run looks like" below.
    the MOST surface layer (land->288 K placeholder, sea clamped to
    [271,305] K); erftools should mask these upstream.
 5. **rain_accum / bulk-coeff quirks**: the hindcast bulk-coefficient surface
-   treatment reads rhotheta as a velocity component (flagged, not fixed --
-   Hurricane-era code, only active with hindcast_surface_bcs).
+   treatment read rhotheta as a velocity component -- FIXED in this fork
+   (face velocities plumbed into the CC treatment; UPSTREAM_ISSUES #4).
+   Upstream still has the defect; only active with hindcast_surface_bcs.
+
+---
+
+## Measured performance levers (2 km, 192x96x32, RTX 4080, one stream)
+
+All numbers below are measured on 400-step runs of the shipped deck unless
+noted. Baseline: 0.159 s/step median (0.194 s avg incl. radiation),
+dt plateau 2.60 s at cfl=0.5.
+
+- **dt is horizontal-ACOUSTIC bound**: dt = cfl*dx/(c+|u|). The per-step
+  log proves it (compressible dt 2.60 vs anelastic/advective estimate ~21 s
+  at step 399). Consequences:
+  - `initial_dz` does NOT move dt. Measured: dz0=50 m -> dt 2.607,
+    0.180 s/step (+13%); dz0=100 m -> dt 2.608, 0.275 s/step (+73%).
+    Coarsening the surface layer is strictly a loss: no dt gain, higher
+    per-step cost, and worse MYNN-EDMF surface-layer resolution. Keep 25 m.
+  - `erf.cfl` is the lever that works. The historical 0.7 blowup is ONLY
+    the IC-adjustment transient (~50-65 s model time at both 1 km and 2 km).
+    Recipe: cold-start cfl=0.5 with `erf.check_int=100`, then restart
+    chk00100 with `erf.cfl=0.7` (dt 3.62 s) or `erf.cfl=0.9` (dt 4.46 s);
+    both validated 300 steps clean at identical per-step cost. Ship 0.7;
+    0.9 has less margin.
+  - Exceeding the acoustic-proportional dt fails: `fixed_dt=8` NaN'd the
+    state within 20 steps (substep ratio stays 4; not an acoustic-substep
+    issue).
+- **Anelastic**: 0.140 s/step (~12% cheaper) and ~8x dt headroom in
+  principle, but NOT usable with the HindCast pathway today -- three
+  independent failures (UPSTREAM_ISSUES #6). Revisit after the theta/qv
+  boundary-coupling task.
+- **Stale run-dir deck**: `stage_run.sh` recopies `inputs_hindcast` for a
+  reason. A stale copy silently reran the old surface_bcs=true config and
+  confounded a whole measurement round. Always re-stage (or diff the run-dir
+  deck against the repo deck) before benchmarking.
