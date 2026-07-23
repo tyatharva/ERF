@@ -133,7 +133,73 @@ See "What a healthy run looks like" below.
 
 ---
 
-## What a healthy run looks like
+## What a healthy run looks like (measured, RTX 4080, single precision)
 
-*(numbers below are from the validation runs on the RTX 4080; see the
-handoff message for the measured values)*
+- **Startup**: ~2 min before step 1 (init + first-call RRTMGP/CUDA JIT).
+  Watch for: `Reading terrain file` + `Expecting 1154 values...` (terrain in),
+  `Reading weather data/surface data 0 0 1 9` (ERA5 frames in), MM5/Morrison/
+  RRTMGP/MYNNEDMF banners, then `Coarse STEP 1 starts`.
+- **Timestep**: starts at ~0.2 s (`init_shrink` x CFL), grows 10%/step
+  (`change_max`) toward the CFL ceiling. During the first hour of violent
+  spin-up it plateaus around ~2 s, limited by vertical CFL over the San
+  Gabriels (w ~ 5-7 m/s in 18.6 m terrain-compressed cells); as the interior
+  equilibrates it should rise toward the horizontal advective ceiling
+  (~0.7*dx/u ~ 15-20 s at jet speed). Step count for 24 h: roughly
+  5,000-15,000 depending on where dt settles -- treat the first benchmark as
+  the measurement.
+- **Per-step wall time**: ~15-17 s/step during spin-up with
+  `amrex.max_gpu_streams=1` (the stream-race workaround costs roughly 3x vs
+  multi-stream; revisit when the race is fixed upstream).
+- **Per-step log**: `Coarse STEP N starts/ends` + `DT =`; with
+  `erf.sum_interval=1` a `TIME=/MASS/RHO THETA/...` block each step -- MASS
+  ~7.2e14 and slowly drifting is healthy; `nan` anywhere = stop. Radiation
+  steps add `Radiation advancing level 0 ... DONE` (every
+  `rad_freq_in_steps`).
+- **Plotfiles**: `plt00000` at start, then hourly (`plot_per_1 = 3600`) --
+  25 plotfiles for 24 h; `chk*` every 21600 s.
+- **Boundary spin-up signature** (first model hour): sponge-band winds reach
+  the ERA5 values (|u| up to ~35-44 m/s) while the interior fills in from
+  rest -- see Known issues #3.
+- **GPU memory**: arena ~7 GB + Kokkos ~3-4 GB peaks; `nvidia-smi` ~12-14 GB
+  of 16 GB. OOM in a radiation step => lower `erf.rad_ncol_chunk` (512 set)
+  or the arena cap.
+- **Radiation cost**: at rad_freq=30 (shipped), radiation contributed
+  ~2-10%% of a clean-GPU 60-step segment (2 calls in 1045 s). rad_freq=30 at
+  spin-up dt (~1.4-2 s) gives a ~1 min model-time radiation cadence,
+  matching the WRF radt ~ dx(km) rule at 1 km; once dt grows post-spin-up
+  the cadence coarsens (~5-8 min) — acceptable for benchmarking, revisit
+  for science runs (a time-based trigger would be better).
+  CAUTION: measure timings on an idle GPU — a forgotten compute-sanitizer
+  container skewed an earlier timing set by >30%%; `docker ps` first.
+
+## Known issues (all documented in the session/commits)
+
+1. **Cross-stream GPU race** (open): with default AMReX streams the step path
+   NaNs non-deterministically; `amrex.max_gpu_streams=1` (pinned in the deck)
+   is bit-reproducibly clean at 1 and 30 steps. compute-sanitizer initcheck
+   is clean (0 errors) after the five uninitialized-memory fixes, isolating
+   a true execution race. Costs ~3x per-step; upstream-report material.
+2. **Spin-up intensity — RESOLVED with cfl=0.5**: the at-rest IC + strong
+   boundary jets make the first model hour violent; cfl=0.7 blew up
+   deterministically near step ~45 (rad-schedule-independent, one-stream).
+   cfl=0.5 is finite through the window (60-step validation, ~17.4 s/step,
+   dt ~1.4 s while vertical-CFL-limited during spin-up). Double precision
+   was finite as far as it fit (aborted ~step 30 on memory: full-domain
+   double + RRTMGP exceeds 16 GB — double is NOT a viable fallback on this
+   card, and precision is not implicated in any remaining issue). The
+   flagged bulk-coeff velmag defect (Known issue #5 / UPSTREAM_ISSUES #4)
+   likely intensifies the spin-up and should be fixed for science runs.
+3. **HindCast pathway couples momenta only** (upstream gap, confirmed against
+   upstream `development`): no ERA5 field enters the initial state (u=v=0,
+   theta=300 K isentrope, qv=0 verified via max_step=0 plotfile), and the
+   lateral sponge relaxes rho_u/rho_v/rho_w only -- theta/moisture are never
+   anchored to ERA5. Fine for timing benchmarks; for science runs the theta/qv
+   boundary-sponge extension is scoped separately. The docs (HindCast.rst)
+   describe an `erf.hindcast_IC_filename` IC-from-file step that no code
+   parses -- the docs-vs-code contradiction is part of the upstream report.
+4. **ERA5 SST land fill values** (9999 K) are sanitized at the wiring into
+   the MOST surface layer (land->288 K placeholder, sea clamped to
+   [271,305] K); erftools should mask these upstream.
+5. **rain_accum / bulk-coeff quirks**: the hindcast bulk-coefficient surface
+   treatment reads rhotheta as a velocity component (flagged, not fixed --
+   Hurricane-era code, only active with hindcast_surface_bcs).

@@ -122,7 +122,12 @@ erf.terrain_z_levels = 0.0 25.0 55.0 90.0 130.0 175.0 226.0 283.0 347.0 419.0 \
 #  init_shrink eases the first (violent) step; change_max caps dt growth.)
 # ---------------------------------------------------------------------------
 erf.substepping_type = "Implicit"
-erf.cfl              = 0.7        # slow-step CFL target (auto dt)
+erf.cfl              = 0.5        # slow-step CFL target (auto dt).
+                                  # 0.7 blew up deterministically at step ~45
+                                  # of the boundary-jet spin-up (single AND
+                                  # multi-stream); 0.5 is finite through the
+                                  # window (validated 60 steps). Revisit after
+                                  # spin-up if benchmark time matters.
 erf.substepping_cfl  = 1.0        # acoustic substep CFL target
 erf.init_shrink      = 0.1        # first step at 10% to survive IC adjustment
 erf.change_max       = 1.1        # dt may grow at most 10% per step
