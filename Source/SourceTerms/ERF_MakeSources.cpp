@@ -436,7 +436,10 @@ void make_sources (int level,
 
         if (solverChoice.init_type == InitType::HindCast and solverChoice.hindcast_surface_bcs) {
             const Array4<const Real>& surface_state_arr = (*surface_state_at_lev).array(mfi);
-            ApplySurfaceTreatment_BulkCoeff_CC(bx, cell_src, cell_data, z_cc_arr, surface_state_arr);
+            const Array4<const Real>& u_arr_sfc = xvel.const_array(mfi);
+            const Array4<const Real>& v_arr_sfc = yvel.const_array(mfi);
+            ApplySurfaceTreatment_BulkCoeff_CC(bx, cell_src, cell_data, u_arr_sfc, v_arr_sfc,
+                                               z_cc_arr, surface_state_arr);
         }
 
 

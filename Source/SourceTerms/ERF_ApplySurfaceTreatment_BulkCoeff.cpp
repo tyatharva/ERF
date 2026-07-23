@@ -60,6 +60,8 @@ void
 ApplySurfaceTreatment_BulkCoeff_CC (const Box& bx,
                          const Array4<Real>& cell_rhs,
                          const Array4<const Real>& cons_state,
+                         const Array4<const Real>& u_arr,
+                         const Array4<const Real>& v_arr,
                          const Array4<const Real>& z_phys_cc,
                          const Array4<const Real>& surface_state_arr)
 {
@@ -76,8 +78,14 @@ ApplySurfaceTreatment_BulkCoeff_CC (const Box& bx,
             Real theta = rhotheta/rho;
             Real qv = rhoqv/rho;
             Real temp = getTgivenRandRTh(rho, rhotheta, qv);
-            Real uvel = cons_state(i,j,k,1)/cons_state(i,j,k,0);
-            Real vvel = cons_state(i,j,k,2)/cons_state(i,j,k,0);
+            // Cell-centered speed from the face velocities. The previous code
+            // read cons components 1/2 (RhoTheta, RhoKE) as momenta, giving
+            // velmag ~ theta ~ 300 "m/s" and bulk fluxes ~100x too strong --
+            // strong enough to destabilize the marine boundary layer within
+            // minutes of model time (verified by bisect: runs are stable with
+            // this treatment disabled and blew up in the ocean block with it).
+            Real uvel = myhalf*(u_arr(i,j,k) + u_arr(i+1,j,k));
+            Real vvel = myhalf*(v_arr(i,j,k) + v_arr(i,j+1,k));
             Real velmag = std::sqrt(uvel*uvel + vvel*vvel);
             Real dT = max(zero, Real(301.0) - temp);
             Real dq = max(zero, Real(0.024) - qv);

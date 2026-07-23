@@ -213,6 +213,8 @@ void
 ApplySurfaceTreatment_BulkCoeff_CC (const amrex::Box& bx,
                                     const amrex::Array4<amrex::Real>& cell_rhs,
                                     const amrex::Array4<const amrex::Real>& cons_state,
+                                    const amrex::Array4<const amrex::Real>& u_arr,
+                                    const amrex::Array4<const amrex::Real>& v_arr,
                                     const amrex::Array4<const amrex::Real>& z_phys_cc,
                                     const amrex::Array4<const amrex::Real>& surface_state_arr);
 
