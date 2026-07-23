@@ -82,3 +82,5 @@ Exec/CanonicalTests/ChannelIslands/wps/wrfinput_d01
 /wps_geog/
 /wps_work/
 /era5_grib/
+/era5_run/
+/run_hindcast/

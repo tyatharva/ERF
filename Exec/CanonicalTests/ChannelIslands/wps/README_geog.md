@@ -8,7 +8,7 @@ real.exe. All scripted in `build_and_run_wps.sh`.
 ## Datasets to download (subset — NOT the full ~60 GB archive)
 
 From https://www2.mmm.ucar.edu/wrf/src/wps_files/ download and extract ALL of
-these into one directory, staged at `~/ERF/wps_geog/` (≈3 GB total):
+these into one directory, staged at `~/ERF/wps_geog/` (the extracted geog_high_res_mandatory bundle covers all of these; islope is a WPS-V3-only field and is NOT needed for V4):
 
 | tarball | provides |
 |---|---|
@@ -21,7 +21,6 @@ these into one directory, staged at `~/ERF/wps_geog/` (≈3 GB total):
 | `soiltemp_1deg.tar.bz2`                       | TMN (deep soil temperature) |
 | `albedo_modis.tar.bz2`                        | ALBBCK |
 | `maxsnowalb_modis.tar.bz2`                    | SNOALB |
-| `islope.tar.bz2`                              | SLOPECAT (GEOGRID.TBL mandatory) |
 
 Extraction: each tarball unpacks to a directory (e.g. `topo_gmted2010_30s/`);
 `geog_data_path` in `namelist.wps` must point at their common parent

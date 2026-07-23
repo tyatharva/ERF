@@ -15,8 +15,15 @@
 set -euo pipefail
 
 WORK=/app/ERF/wps_work
-SRC_WRF=$WORK/WRF
-SRC_WPS=$WORK/WPS
+# Prefer the prebuilt WRF/WPS baked into the erf-hindcast image; fall back to
+# building from source in the mounted work dir (older images).
+if [ -x /opt/WRF/main/real.exe ] && [ -x /opt/WPS/geogrid/src/geogrid.exe ]; then
+    SRC_WRF=/opt/WRF
+    SRC_WPS=/opt/WPS
+else
+    SRC_WRF=$WORK/WRF
+    SRC_WPS=$WORK/WPS
+fi
 HERE=/app/ERF/Exec/CanonicalTests/ChannelIslands/wps
 STAGE="${1:-build}"
 
@@ -25,6 +32,7 @@ export HDF5=/usr/local
 export J="-j $(nproc)"
 
 build_all () {
+    if [ "$SRC_WRF" = /opt/WRF ]; then echo "Using prebuilt WRF/WPS from image."; return 0; fi
     mkdir -p $WORK && cd $WORK
     if [ ! -d $SRC_WRF ]; then
         curl -fsSL -o wrf.tar.gz \
@@ -58,35 +66,41 @@ build_all () {
 }
 
 run_geogrid () {
-    cd $SRC_WPS
+    mkdir -p $WORK/wps_run && cd $WORK/wps_run
+    ln -sf $SRC_WPS/geogrid/GEOGRID.TBL.ARW GEOGRID.TBL 2>/dev/null || cp $SRC_WPS/geogrid/GEOGRID.TBL.ARW GEOGRID.TBL
+    mkdir -p geogrid && cp GEOGRID.TBL geogrid/GEOGRID.TBL
     cp $HERE/namelist.wps namelist.wps
     [ -d /app/ERF/wps_geog ] || { echo "FATAL: /app/ERF/wps_geog not staged"; exit 1; }
-    ./geogrid/src/geogrid.exe
+    $SRC_WPS/geogrid/src/geogrid.exe
     ls -la geo_em.d01.nc
 }
 
 run_ungrib () {
-    cd $SRC_WPS
+    cd $WORK/wps_run
     [ -d /app/ERF/era5_grib ] || { echo "FATAL: /app/ERF/era5_grib not staged"; exit 1; }
     # ERA5 pressure-level + surface GRIB: the ERA-interim pressure-level Vtable
     # matches ERA5 field codes
-    ln -sf ungrib/Variable_Tables/Vtable.ERA-interim.pl Vtable
-    ./link_grib.csh /app/ERF/era5_grib/era5_*
-    ./ungrib/src/ungrib.exe
+    ln -sf $SRC_WPS/ungrib/Variable_Tables/Vtable.ERA-interim.pl Vtable
+    $SRC_WPS/link_grib.csh /app/ERF/era5_grib/era5_*
+    $SRC_WPS/ungrib/src/ungrib.exe
 }
 
 run_metgrid () {
-    cd $SRC_WPS
-    ./metgrid/src/metgrid.exe
+    cd $WORK/wps_run
+    ln -sf $SRC_WPS/metgrid/METGRID.TBL.ARW METGRID.TBL 2>/dev/null || true
+    mkdir -p metgrid && cp $SRC_WPS/metgrid/METGRID.TBL.ARW metgrid/METGRID.TBL
+    $SRC_WPS/metgrid/src/metgrid.exe
     ls -la met_em.d01.*.nc
     echo "NOTE: set num_metgrid_levels in namelist.input.real to the value"
     echo "      shown by: ncdump -h met_em.d01.*.nc | grep num_metgrid_levels"
 }
 
 run_real () {
-    cd $SRC_WRF/test/em_real
+    mkdir -p $WORK/real_run && cd $WORK/real_run
+    for f in $SRC_WRF/test/em_real/*; do ln -sf $f . 2>/dev/null; done
+    rm -f namelist.input
     cp $HERE/namelist.input.real namelist.input
-    ln -sf $SRC_WPS/met_em.d01.*.nc .
+    ln -sf $WORK/wps_run/met_em.d01.*.nc .
     ./real.exe || { tail -20 rsl.error.0000 2>/dev/null; exit 1; }
     [ -f wrfinput_d01 ] || { echo "FATAL: wrfinput_d01 not produced"; exit 1; }
     cp wrfinput_d01 /app/ERF/Exec/CanonicalTests/ChannelIslands/wps/wrfinput_d01

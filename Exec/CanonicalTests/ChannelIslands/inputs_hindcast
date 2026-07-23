@@ -126,12 +126,11 @@ erf.w_damping        = true
 erf.w_damping_const  = 0.3
 
 # ---------------------------------------------------------------------------
-#  RUN LENGTH  (UTC datetimes aligned to ERA5 frames -- FILL from erftools date.
-#  Format must be "YYYY-MM-DD HH:MM:SS" (or HH:MM); verified in ERF.cpp.)
-#  Keep FIRST test short (e.g. +2 h) to confirm it runs.
+#  RUN LENGTH  (24-hour hindcast: 2023-01-09 00Z -> 2023-01-10 00Z, aligned
+#  to the 3-hourly ERA5 frames produced by erftools.)
 # ---------------------------------------------------------------------------
-start_datetime = "YYYY-MM-DD HH:00:00"
-stop_datetime  = "YYYY-MM-DD HH:00:00"
+start_datetime = "2023-01-09 00:00:00"
+stop_datetime  = "2023-01-10 00:00:00"
 max_step = 100000                 # safety cap; datetime governs the stop
 
 # ---------------------------------------------------------------------------
@@ -173,21 +172,22 @@ erf.variable_coriolis = true
 erf.moisture_model = "Morrison"
 
 # ---------------------------------------------------------------------------
-#  LAND SURFACE  (Phase 1: SLM. Switch to "NOAHMP" for production -- recompile.)
+#  LAND SURFACE  (NOAHMP; requires ERF_ENABLE_NOAHMP build and, in the run
+#  directory: NoahmpTable.TBL, namelist.erf, wrfinput_d01 -- see README/wps/)
 # ---------------------------------------------------------------------------
-erf.land_surface_model = "SLM"
+erf.land_surface_model = "NOAHMP"
 
 # ---------------------------------------------------------------------------
-#  RADIATION  (Phase 1: off. "RRTMGP" for production if diurnal cycle matters.)
+#  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.
+#  rad_freq_in_steps: radiation every N dycore steps -- see benchmark notes.)
 # ---------------------------------------------------------------------------
-erf.radiation_model = "None"
-# -- Production (uncomment with radiation_model = RRTMGP): ------------------
-# erf.rad_freq_in_steps      = 10
-# erf.rrtmgp_file_path       = "."
-# erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
-# erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
-# erf.rrtmgp_cloud_optics_sw = rrtmgp-cloud-optics-coeffs-sw.nc
-# erf.rrtmgp_cloud_optics_lw = rrtmgp-cloud-optics-coeffs-lw.nc
+erf.radiation_model        = "RRTMGP"
+erf.rad_freq_in_steps      = 30
+erf.rrtmgp_file_path       = "."
+erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
+erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
+erf.rrtmgp_cloud_optics_sw = rrtmgp-cloud-optics-coeffs-sw.nc
+erf.rrtmgp_cloud_optics_lw = rrtmgp-cloud-optics-coeffs-lw.nc
 
 # ---------------------------------------------------------------------------
 #  REFINEMENT  (single uniform level -- no AMR)
