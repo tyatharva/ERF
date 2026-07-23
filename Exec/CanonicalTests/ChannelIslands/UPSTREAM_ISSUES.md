@@ -242,3 +242,31 @@ reaches 97 m/s within 30 steps, silent NaN by ~step 100 with radiation
 off). The Poisson solve's lateral BCs do not account for specified
 (non-divergence-free-consistent) inflow. Needs upstream-grade work on the
 projection boundary conditions before anelastic + real BCs is usable.
+
+## 6c. Anelastic scoping result: structural, precision-independent top-level runaway
+
+Systematic elimination (3-km config, real BCs, theta/qv init; all runs
+reproduce from cold start):
+
+- theta runs away in the TOP TWO LEVELS only (healthy 387 K at k=29 ->
+  452 -> 567 K at the lid within 30 steps, ~5 K/step; NaN by ~step 100).
+  Lateral bands are NOT the locus (9% of hot cells).
+- Radiation off: unchanged. zhi w-sponge off: unchanged. cfl 0.3: unchanged.
+- DOUBLE PRECISION reproduces theta=567.33 at the same cell to 5 digits:
+  precision-independent.
+- The Poisson correction is structurally inconsistent with the recomputed
+  divergence: GMRES converges its own residual to tolerance (7 iters,
+  2.8e-4) yet the post-correction divergence is only 4x (SP) / 8-25x
+  (double) smaller than pre-solve -- the operator and the
+  getFluxes/compute_divergence path disagree. Also the post-solve
+  volume-weighted divergence sum jumps to -1.37e6 IDENTICALLY in both
+  precisions (structural, possibly a diagnostic artifact -- unverified).
+- Suspect space that remains: Omega/w handling in the deep stretched top
+  cells (dz ~2.5 km), buoyancy type 3 against a 3-D data-derived base
+  state, theta advection with the residual divergence. The anelastic x
+  terrain x real-data combination appears never to have been exercised
+  upstream (anelastic is used for idealized LES).
+
+Scope estimate for a fix: week-class with tail risk (structural dycore
+excavation, not BC glue). The measured prize if fixed: anelastic dt
+9.3-9.7 s vs compressible 2.1-2.3 s at identical per-step cost -- ~4x.
