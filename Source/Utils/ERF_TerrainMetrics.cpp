@@ -280,6 +280,11 @@ init_which_terrain_grid (int lev, Geometry const& geom, MultiFab& z_phys_nd,
         // Get MultiFab spanning domain with 1 level of ghost cells
         MultiFab h_mf(    z_phys_nd.boxArray(), z_phys_nd.DistributionMap(), 1, ngrow+1);
         MultiFab h_mf_old(z_phys_nd.boxArray(), z_phys_nd.DistributionMap(), 1, ngrow+1);
+        // Deterministic init: only the k0 plane is written before the first
+        // FillBoundary/Copy below, which otherwise read the unwritten upper
+        // planes (flagged by compute-sanitizer initcheck).
+        h_mf.setVal(zero);
+        h_mf_old.setVal(zero);
 
         // Save max height for smoothing
         Real h_m;

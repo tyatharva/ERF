@@ -222,6 +222,17 @@ erf.v = 1
 amr.v = 1
 amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
 
+# --- REQUIRED runtime settings on the 16 GB RTX 4080 -----------------------
+# Single GPU stream: the hindcast step path has a cross-stream execution race
+# (NaN in memory-dependent regions; bit-identical clean runs with 1 stream;
+# compute-sanitizer initcheck clean -- see RUNBOOK "Known issues"). Keep this
+# until the racing kernel pair is found and fenced.
+amrex.max_gpu_streams = 1
+# Cap the AMReX arena so Kokkos (RRTMGP work arrays) has headroom, and chunk
+# the radiation columns; without these the first radiation call OOMs.
+amrex.the_arena_init_size = 7000000000
+erf.rad_ncol_chunk        = 512
+
 # ---------------------------------------------------------------------------
 #  CHECKPOINTS  (time-based to match adaptive dt; every 6 h of sim time)
 #  (amr.check_per verified accepted -- ERF reads both erf.* and amr.*)
