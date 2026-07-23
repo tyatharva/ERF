@@ -24,12 +24,11 @@ erf.hindcast_lateral_forcing      = true
 
 # [ADDED] Surface forcing from ERA5 (erftools Output/Surface). The domain is
 # mostly ocean; without this, water-surface temperatures have no data source.
-# [MEASURED 2-km FINDING] With surface BCs on, the run blows up ~5-6 model
-# minutes into spin-up regardless of LSM/cfl/sponge (bisected): the inert
-# isentropic IC (N^2=0, qv=0 -- upstream gap) x fixed-coefficient ocean
-# fluxes (dq = 0.024 - qv = maximal moistening of dry air) drives explosive
-# convection. Re-enable together with the theta/qv boundary-coupling task.
-erf.hindcast_surface_bcs      = false
+# RE-ENABLED after the theta/qv coupling + ERA5 init landed: the old
+# blow-up (~5-6 model-min) was the dry isentropic IC meeting maximal ocean
+# moistening; with real stratification the surface pathway is stable
+# (measured: full-physics 24 h complete, 38,550 steps, mass -0.26%).
+erf.hindcast_surface_bcs      = true
 erf.hindcast_surface_data_dir = "ERA5Data_Surface"
 
 # Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
@@ -110,7 +109,7 @@ erf.most.z0             = 0.1     # LAND points only (chaparral/scrub). Ocean
 erf.most.zref           = 25.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
 erf.most.average_policy = 1
 erf.surface_layer.flux_type = moeng
-erf.most.surf_temp      = 288.0   # fixed surface T while LSM/SST path is off
+erf.most.surf_temp      = 288.0   # fallback only; MM5/SST provide the live surface state
 # [CORRECTED] removed erf.most.Cd/Ch/Cq -- only read (and required) for bulk_coeff.
 
 # ---------------------------------------------------------------------------
@@ -227,7 +226,7 @@ erf.moisture_model = "Morrison"
 # MM5 requires the SST wiring that only activates with hindcast_surface_bcs;
 # with surface BCs off (above), run without an LSM and a fixed surface temp.
 # Restore MM5 when surface BCs return.
-erf.land_surface_model = "None"
+erf.land_surface_model = "MM5"
 
 # ---------------------------------------------------------------------------
 #  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.

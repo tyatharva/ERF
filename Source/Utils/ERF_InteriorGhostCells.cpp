@@ -182,7 +182,8 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     //
 
     // Get bndry data if we have it
-    Vector<int>  bnd_map = {BCVars::xvel_bc, BCVars::yvel_bc, BCVars::RhoTheta_bc_comp};
+    Vector<int>  bnd_map = {BCVars::xvel_bc, BCVars::yvel_bc, BCVars::RhoTheta_bc_comp,
+                            BCVars::RhoQ1_bc_comp};
     Array4<Real> bdatxlo, bdatxhi, bdatylo, bdatyhi;
     Array4<Real> btenxlo, btenxhi, btenylo, btenyhi;
     if (m_r2d) {
@@ -224,19 +225,28 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     FArrayBox U_xlo, U_xhi, U_ylo, U_yhi;
     FArrayBox V_xlo, V_xhi, V_ylo, V_yhi;
     FArrayBox T_xlo, T_xhi, T_ylo, T_yhi;
+    FArrayBox Q_xlo, Q_xhi, Q_ylo, Q_yhi;
 
     // Variable index map (WRFBdyVars -> Vars)
-    Vector<int> var_map  = {Vars::xvel,    Vars::yvel,    Vars::cons   };
-    Vector<int> ivar_map = {IntVars::xmom, IntVars::ymom, IntVars::cons};
+    Vector<int> var_map  = {Vars::xvel,    Vars::yvel,    Vars::cons,    Vars::cons   };
+    Vector<int> ivar_map = {IntVars::xmom, IntVars::ymom, IntVars::cons, IntVars::cons};
 
     // Variable icomp map
-    Vector<int> comp_map = {0, 0, RhoTheta_comp};
+    Vector<int> comp_map = {0, 0, RhoTheta_comp, RhoQ1_comp};
 
     // Indices
-    int  ivarU = RealBdyVars::U;
-    int  ivarV = RealBdyVars::V;
-    int  ivarT = RealBdyVars::T;
-    int BdyEnd = RealBdyVars::NumTypes-1;
+    int  ivarU  = RealBdyVars::U;
+    int  ivarV  = RealBdyVars::V;
+    int  ivarT  = RealBdyVars::T;
+    int  ivarQV = RealBdyVars::QV;
+    // Relax QV too when the state carries moisture and the boundary planes
+    // include it (WRF relaxes moisture in the zone; previously only U/V/T
+    // were nudged while QV was set in the specified cells only, leaving a
+    // sharp qv step at the specified/relaxation interface).
+    bool l_relax_qv = (S_cur_data[IntVars::cons].nComp() > RhoQ1_comp) &&
+                      (!bdy_data_xlo.empty()) &&
+                      (static_cast<int>(bdy_data_xlo[0].size()) > RealBdyVars::QV);
+    int BdyEnd = l_relax_qv ? RealBdyVars::NumTypes : RealBdyVars::NumTypes-1;
 
 
     // NOTE: The sizing of the temporary BDY FABS is
@@ -270,6 +280,9 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         } else if (ivar  == ivarT){
             T_xlo.resize(bx_xlo,1,The_Async_Arena()); T_xhi.resize(bx_xhi,1,The_Async_Arena());
             T_ylo.resize(bx_ylo,1,The_Async_Arena()); T_yhi.resize(bx_yhi,1,The_Async_Arena());
+        } else if (ivar  == ivarQV){
+            Q_xlo.resize(bx_xlo,1,The_Async_Arena()); Q_xhi.resize(bx_xhi,1,The_Async_Arena());
+            Q_ylo.resize(bx_ylo,1,The_Async_Arena()); Q_yhi.resize(bx_yhi,1,The_Async_Arena());
         } else {
             continue;
         }
@@ -322,6 +335,9 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             } else if (ivar  == ivarT){
                 arr_xlo = T_xlo.array(); arr_xhi = T_xhi.array();
                 arr_ylo = T_ylo.array(); arr_yhi = T_yhi.array();
+            } else if (ivar  == ivarQV){
+                arr_xlo = Q_xlo.array(); arr_xhi = Q_xhi.array();
+                arr_ylo = Q_ylo.array(); arr_yhi = Q_yhi.array();
             } else {
                 continue;
             }
@@ -484,6 +500,11 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             } else if (ivar  == ivarT){
                 arr_xlo  = T_xlo.array(); arr_xhi = T_xhi.array();
                 arr_ylo  = T_ylo.array(); arr_yhi = T_yhi.array();
+                rhs_arr  = S_rhs[IntVars::cons].array(mfi);
+                data_arr = S_cur_data[IntVars::cons].array(mfi);
+            } else if (ivar  == ivarQV){
+                arr_xlo  = Q_xlo.array(); arr_xhi = Q_xhi.array();
+                arr_ylo  = Q_ylo.array(); arr_yhi = Q_yhi.array();
                 rhs_arr  = S_rhs[IntVars::cons].array(mfi);
                 data_arr = S_cur_data[IntVars::cons].array(mfi);
             } else {

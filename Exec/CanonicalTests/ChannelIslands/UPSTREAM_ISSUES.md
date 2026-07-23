@@ -229,3 +229,16 @@ deep cells aloft are not over-constrained) to the substepping branch.
 With the fix the adaptive dt visibly tracks convective pulses (drops to
 ~1.4 s during storms). Explicit moist convection additionally needs
 cfl <= 0.3 on this grid (w can grow faster than one step's margin).
+
+## 6b. Anelastic update (with the theta/qv + real-BC atmosphere)
+
+Re-tested after items 8-10 were resolved: the at-rest adaptive-dt failure
+and the sponge pressure blow-up of item 6 are CLEARED (anelastic dt is
+well-defined at 9.3-9.7 s vs compressible 2.1-2.3 s -- a measured ~4.5x dt
+headroom -- and T/p stay physical). A third blocker remains: with
+`use_real_bcs` specified-inflow boundaries, the anelastic pressure
+projection mis-evolves the state from the start (theta gains +130 K and u
+reaches 97 m/s within 30 steps, silent NaN by ~step 100 with radiation
+off). The Poisson solve's lateral BCs do not account for specified
+(non-divergence-free-consistent) inflow. Needs upstream-grade work on the
+projection boundary conditions before anelastic + real BCs is usable.
