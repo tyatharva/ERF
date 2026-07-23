@@ -352,6 +352,176 @@ ERF::FillForecastStateMultiFabs(const int lev,
         );*/
 }
 
+#ifdef ERF_USE_NETCDF
+/**
+ * Copy one component of a (possibly staggered) MultiFab into a global
+ * FArrayBox covering `strip` that is identical on all ranks: ParallelCopy
+ * gathers the distributed data onto a single-box MultiFab on rank 0, which
+ * is then broadcast. (Same all-ranks convention as the metgrid/wrfbdy
+ * boundary planes; ParallelCopy also resolves shared staggered faces
+ * without double counting.)
+ */
+static void
+strip_to_global_fab (const MultiFab& src, const int scomp,
+                     const Box& strip, FArrayBox& dest)
+{
+    BoxArray sba(strip);
+    DistributionMapping sdm(Vector<int>({0}));
+    MultiFab smf(sba, sdm, 1, 0);
+    smf.ParallelCopy(src, scomp, 0, 1);
+
+    const Long npts = strip.numPts();
+    Vector<Real> buf(npts, Real(0.0));
+    for (MFIter mfi(smf); mfi.isValid(); ++mfi) {   // non-empty on rank 0 only
+        Gpu::copy(Gpu::deviceToHost,
+                  smf[mfi].dataPtr(), smf[mfi].dataPtr() + npts, buf.data());
+    }
+    ParallelDescriptor::Bcast(buf.data(), npts, 0);
+    Gpu::copy(Gpu::hostToDevice, buf.data(), buf.data() + npts, dest.dataPtr());
+}
+
+/**
+ * Fill the real-BC lateral boundary planes from the hindcast frames.
+ *
+ * The specified+relaxation-zone machinery (fill_from_realbdy each FillPatch;
+ * realbdy_compute_interior_ghost_rhs in the slow RHS) consumes
+ * bdy_data_{xlo,xhi,ylo,yhi}[time][RealBdyVars::{U,V,T,QV}] as global
+ * FArrayBox strips of width real_width holding PLAIN u, v, theta, qv --
+ * exactly what FillForecastStateMultiFabs interpolates from the ERA5/GFS
+ * .bin frames. This routine sizes the planes like init_from_metgrid does
+ * and fills every frame, so init_type = HindCast gets the WRF-style inflow
+ * treatment (boundary values SET, not just interior-relaxed).
+ */
+void
+ERF::fill_bdy_data_from_hindcast ()
+{
+    const int lev = 0;
+
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(real_width > 0,
+        "erf.use_real_bcs with HindCast requires erf.real_width > 0");
+
+    // Enumerate the frames the same way WeatherDataInterpolation does
+    std::string folder = solverChoice.hindcast_boundary_data_dir;
+    std::vector<std::string> bin_files;
+    for (const auto& entry : fs::directory_iterator(folder)) {
+        if (!entry.is_regular_file()) continue;
+        std::string fname = entry.path().filename().string();
+        if (fname.size() >= 4 && fname.substr(fname.size() - 4) == ".bin") {
+            bin_files.push_back(entry.path().string());
+        }
+    }
+    std::sort(bin_files.begin(), bin_files.end());
+    const int ntimes = static_cast<int>(bin_files.size());
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(ntimes >= 2,
+        "Need at least two hindcast frames for boundary data");
+
+    // The first .bin frame corresponds to start_datetime by construction
+    // (WeatherDataInterpolation indexes frames by elapsed time/interval).
+    bdy_time_interval = solverChoice.hindcast_data_interval_in_hrs * Real(3600.0);
+    start_bdy_time    = start_time;
+    final_bdy_time    = start_time + (ntimes-1) * bdy_time_interval;
+
+    const bool l_use_moisture = (solverChoice.moisture_type != MoistureType::None);
+    const int BdyEnd = l_use_moisture ? MetGridBdyVars::NumTypes
+                                      : MetGridBdyVars::NumTypes-1;
+
+    // Same arena convention as init_from_metgrid: CPU+GPU accessible
+    Arena* Arena_Used = The_Arena();
+#ifdef AMREX_USE_GPU
+    Arena_Used = The_Pinned_Arena();
+#endif
+
+    // Build the plane boxes exactly as init_from_metgrid does
+    const auto& lo = geom[lev].Domain().loVect();
+    const auto& hi = geom[lev].Domain().hiVect();
+    IntVect plo(lo), phi(hi);
+
+    plo[0] = lo[0];              plo[1] = lo[1]; plo[2] = lo[2];
+    phi[0] = lo[0]+real_width-1; phi[1] = hi[1]; phi[2] = hi[2];
+    const Box pbx_xlo(plo, phi);
+    Box xlo_plane_no_stag(pbx_xlo);
+    Box xlo_plane_x_stag = pbx_xlo; xlo_plane_x_stag.shiftHalf(0,-1);
+    Box xlo_plane_y_stag = convert(pbx_xlo, {0, 1, 0});
+
+    plo[0] = hi[0]-real_width+1; plo[1] = lo[1]; plo[2] = lo[2];
+    phi[0] = hi[0];              phi[1] = hi[1]; phi[2] = hi[2];
+    const Box pbx_xhi(plo, phi);
+    Box xhi_plane_no_stag(pbx_xhi);
+    Box xhi_plane_x_stag = pbx_xhi; xhi_plane_x_stag.shiftHalf(0,1);
+    Box xhi_plane_y_stag = convert(pbx_xhi, {0, 1, 0});
+
+    plo[1] = lo[1];              plo[0] = lo[0]; plo[2] = lo[2];
+    phi[1] = lo[1]+real_width-1; phi[0] = hi[0]; phi[2] = hi[2];
+    const Box pbx_ylo(plo, phi);
+    Box ylo_plane_no_stag(pbx_ylo);
+    Box ylo_plane_x_stag = convert(pbx_ylo, {1, 0, 0});
+    Box ylo_plane_y_stag = pbx_ylo; ylo_plane_y_stag.shiftHalf(1,-1);
+
+    plo[1] = hi[1]-real_width+1; plo[0] = lo[0]; plo[2] = lo[2];
+    phi[1] = hi[1];              phi[0] = hi[0]; phi[2] = hi[2];
+    const Box pbx_yhi(plo, phi);
+    Box yhi_plane_no_stag(pbx_yhi);
+    Box yhi_plane_x_stag = convert(pbx_yhi, {1, 0, 0});
+    Box yhi_plane_y_stag = pbx_yhi; yhi_plane_y_stag.shiftHalf(1,1);
+
+    bdy_data_xlo.resize(ntimes);
+    bdy_data_xhi.resize(ntimes);
+    bdy_data_ylo.resize(ntimes);
+    bdy_data_yhi.resize(ntimes);
+
+    for (int itime(0); itime < ntimes; itime++) {
+        bdy_data_xlo[itime].resize(BdyEnd);
+        bdy_data_xhi[itime].resize(BdyEnd);
+        bdy_data_ylo[itime].resize(BdyEnd);
+        bdy_data_yhi[itime].resize(BdyEnd);
+        for (int nvar(0); nvar<BdyEnd; ++nvar) {
+            if (nvar==MetGridBdyVars::U) {
+                bdy_data_xlo[itime][nvar].resize(xlo_plane_x_stag, 1, Arena_Used);
+                bdy_data_xhi[itime][nvar].resize(xhi_plane_x_stag, 1, Arena_Used);
+                bdy_data_ylo[itime][nvar].resize(ylo_plane_x_stag, 1, Arena_Used);
+                bdy_data_yhi[itime][nvar].resize(yhi_plane_x_stag, 1, Arena_Used);
+            } else if (nvar==MetGridBdyVars::V) {
+                bdy_data_xlo[itime][nvar].resize(xlo_plane_y_stag, 1, Arena_Used);
+                bdy_data_xhi[itime][nvar].resize(xhi_plane_y_stag, 1, Arena_Used);
+                bdy_data_ylo[itime][nvar].resize(ylo_plane_y_stag, 1, Arena_Used);
+                bdy_data_yhi[itime][nvar].resize(yhi_plane_y_stag, 1, Arena_Used);
+            } else {
+                bdy_data_xlo[itime][nvar].resize(xlo_plane_no_stag, 1, Arena_Used);
+                bdy_data_xhi[itime][nvar].resize(xhi_plane_no_stag, 1, Arena_Used);
+                bdy_data_ylo[itime][nvar].resize(ylo_plane_no_stag, 1, Arena_Used);
+                bdy_data_yhi[itime][nvar].resize(yhi_plane_no_stag, 1, Arena_Used);
+            }
+        }
+
+        // Interpolate this frame onto the ERF grid (forecast_state_1 is
+        // scratch here; the run-time machinery re-reads its frames at the
+        // first Evolve step).
+        FillForecastStateMultiFabs(lev, bin_files[itime], z_phys_nd[lev], forecast_state_1);
+
+        const MultiFab& fcons = forecast_state_1[lev][Vars::cons];
+        const MultiFab& fxvel = forecast_state_1[lev][Vars::xvel];
+        const MultiFab& fyvel = forecast_state_1[lev][Vars::yvel];
+
+        for (int nvar(0); nvar<BdyEnd; ++nvar) {
+            const MultiFab* src = nullptr;
+            int scomp = 0;
+            if      (nvar==MetGridBdyVars::U)  { src = &fxvel; scomp = 0; }
+            else if (nvar==MetGridBdyVars::V)  { src = &fyvel; scomp = 0; }
+            else if (nvar==MetGridBdyVars::T)  { src = &fcons; scomp = RhoTheta_comp; } // plain theta
+            else if (nvar==MetGridBdyVars::QV) { src = &fcons; scomp = RhoQ1_comp;    } // plain qv
+            strip_to_global_fab(*src, scomp, bdy_data_xlo[itime][nvar].box(), bdy_data_xlo[itime][nvar]);
+            strip_to_global_fab(*src, scomp, bdy_data_xhi[itime][nvar].box(), bdy_data_xhi[itime][nvar]);
+            strip_to_global_fab(*src, scomp, bdy_data_ylo[itime][nvar].box(), bdy_data_ylo[itime][nvar]);
+            strip_to_global_fab(*src, scomp, bdy_data_yhi[itime][nvar].box(), bdy_data_yhi[itime][nvar]);
+        }
+    } // itime
+
+    Print() << "HindCast real BCs: filled " << ntimes << " boundary-plane times "
+            << "(width " << real_width << " cells, interval "
+            << bdy_time_interval << " s) from " << folder << std::endl;
+}
+#endif
+
 /**
  * Rebuild the HSE base state and the thermodynamic state from the
  * time-interpolated ERA5 frame at initialization time.

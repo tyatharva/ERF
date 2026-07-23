@@ -504,6 +504,13 @@ public:
     // rho qv) from the interpolated ERA5 frame at initialization time.
     void init_thermo_from_hindcast(const int lev);
 
+#ifdef ERF_USE_NETCDF
+    // Fill the real-BC boundary planes (bdy_data_xlo/xhi/ylo/yhi) from the
+    // interpolated hindcast frames so the specified/relaxation-zone
+    // machinery can be used with init_type = HindCast (erf.use_real_bcs).
+    void fill_bdy_data_from_hindcast();
+#endif
+
     void SurfaceDataInterpolation(const int nlevs,
                                   const amrex::Real time,
                                   amrex::Vector<std::unique_ptr<amrex::MultiFab>>& z_phys_nd,

@@ -214,6 +214,49 @@ ERF::estTimeStep (int level, long& dt_fast_ratio) const
        });
     } // not EB
 
+    // Implicit acoustic substepping removes the VERTICAL ACOUSTIC constraint,
+    // but vertical ADVECTION is still explicit in the slow RHS. The branch
+    // above omits the z-direction entirely under substepping, so a strong
+    // updraft in thin near-surface cells runs unconstrained (measured: a
+    // resolved convective cell with w ~ 10 m/s in 18.5-m terrain-compressed
+    // cells NaN'd at dt = 3.9 s where the advective limit was ~0.9 s).
+    // Add the |w|/dz_local advective term; use detJ for the local cell
+    // thickness over terrain so deep cells aloft are not over-constrained.
+    if (l_substepping) {
+        Real estdt_vadv_inv;
+        if (SolverChoice::mesh_type != MeshType::ConstantDz && detJ_cc[level]) {
+            const Real dz_comp_inv = dxinv[2];
+            estdt_vadv_inv = ReduceMax(ccvel, *detJ_cc[level], 0,
+            [=] AMREX_GPU_HOST_DEVICE (Box const& b,
+                                       Array4<Real const> const& u,
+                                       Array4<Real const> const& dj) -> Real
+            {
+                Real new_vadv_dt = -Real(1.e100);
+                amrex::Loop(b, [=,&new_vadv_dt] (int i, int j, int k) noexcept
+                {
+                    if (dj(i,j,k) > zero) {
+                        new_vadv_dt = amrex::max(amrex::Math::abs(u(i,j,k,2)) * dz_comp_inv / dj(i,j,k),
+                                                 new_vadv_dt);
+                    }
+                });
+                return new_vadv_dt;
+            });
+        } else {
+            estdt_vadv_inv = ReduceMax(ccvel, 0,
+            [=] AMREX_GPU_HOST_DEVICE (Box const& b,
+                                       Array4<Real const> const& u) -> Real
+            {
+                Real new_vadv_dt = -Real(1.e100);
+                amrex::Loop(b, [=,&new_vadv_dt] (int i, int j, int k) noexcept
+                {
+                    new_vadv_dt = amrex::max(amrex::Math::abs(u(i,j,k,2)) * dzinv, new_vadv_dt);
+                });
+                return new_vadv_dt;
+            });
+        }
+        estdt_comp_inv = amrex::max(estdt_comp_inv, estdt_vadv_inv);
+    }
+
     ParallelDescriptor::ReduceRealMax(estdt_comp_inv);
     // Globally empty level -> ReduceMax = lowest(); treat level as non-constraining.
     estdt_comp = (estdt_comp_inv > Real(0.0)) ? (cfl / estdt_comp_inv) : Real(1.e20);

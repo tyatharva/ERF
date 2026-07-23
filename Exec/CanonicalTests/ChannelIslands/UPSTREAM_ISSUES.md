@@ -192,3 +192,40 @@ prognostic RhoKE (in WRF the clipped qke IS the prognostic state). Measured
 consequence: TKE ran past 200 m2/s2 at 8-15 km (2.5-km cells, strong jet
 shear) on this config. Fixed in this fork by bounding the prognostic state
 each step (`bound_mynn_tke` in ERF_Advance.cpp, `erf.bound_pbl_tke`).
+
+## 9. RESOLVED IN FORK: real-BC machinery repointed at hindcast frames (fixes item 8)
+
+Rather than writing a new inflow BC, this fork drives the existing
+specified/relaxation-zone machinery (`fill_from_realbdy`,
+`realbdy_compute_interior_ghost_rhs`) from the interpolated hindcast frames:
+`ERF::fill_bdy_data_from_hindcast` sizes and fills
+`bdy_data_{xlo,xhi,ylo,yhi}[time][U,V,T,QV]` exactly as `init_from_metgrid`
+does (plain u/v/theta/qv strips; ParallelCopy gather + broadcast), gated by
+`erf.use_real_bcs` with `init_type = HindCast` (sanity-check assert relaxed
+accordingly). **Measured result: global mass drift +0.25% over a full 24-h
+run** (item 8 measured +135% in 9 h before), first complete 24-h hindcast of
+this campaign. The machinery is init-type-agnostic by construction —
+upstream may want this adapter, since it gives the ERA5/GFS route the same
+boundary treatment as the WRF-file route with ~150 lines of marshaling.
+
+Note for upstream: the interior relaxation (`realbdy_compute_interior_ghost_rhs`)
+nudges U/V/T but NOT QV, although the boundary planes carry QV and the
+specified zone sets it. WRF relaxes moisture in the zone. Not yet extended
+here (a sharp qv step stands at the specified/relax interface; it was NOT
+the cause of our storm-time NaN, but is worth closing for consistency).
+
+## 10. estTimeStep omits the vertical ADVECTIVE constraint under implicit substepping
+
+`ERF::estTimeStep`'s compressible branch drops the z-direction entirely when
+`substepping_type = Implicit` ("the z-direction does not contribute") --
+correct for vertical ACOUSTICS (integrated implicitly) but wrong for
+vertical ADVECTION, which remains explicit in the slow RHS. Measured
+consequence (3-km ChannelIslands, 18.5-m terrain-compressed surface cells):
+a resolved convective cell reached w ~ 10 m/s while the estimator held
+dt = 3.9 s (advective limit ~0.9 s) -> NaN. This also explains previously
+observed cfl-0.9 and fixed_dt=8 failures on this config. Fixed in this fork
+by adding a |w|/dz_local advective term (detJ-based local cell thickness so
+deep cells aloft are not over-constrained) to the substepping branch.
+With the fix the adaptive dt visibly tracks convective pulses (drops to
+~1.4 s during storms). Explicit moist convection additionally needs
+cfl <= 0.3 on this grid (w can grow faster than one step's margin).

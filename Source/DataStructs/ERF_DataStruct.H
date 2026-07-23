@@ -751,6 +751,16 @@ struct SolverChoice {
             pp.query("hindcast_lateral_sponge_strength", hindcast_lateral_sponge_strength);
             pp.query("hindcast_lateral_sponge_length", hindcast_lateral_sponge_length);
 
+            // Opt-in: drive the real-BC specified/relaxation machinery
+            // (fill_from_realbdy + realbdy_compute_interior_ghost_rhs) from
+            // the interpolated hindcast frames instead of wrfbdy/met_em
+            // files. This is the WRF-style inflow treatment the sponge-only
+            // pathway lacks (measured: momentum-only sponge + foextrap
+            // Outflow faces let global mass reach 2.35x initial in 9 h).
+            if (init_type == InitType::HindCast) {
+                pp.query("use_real_bcs", use_real_bcs);
+            }
+
             pp.query("hindcast_zhi_sponge_length", hindcast_zhi_sponge_length);
             pp.query("hindcast_zhi_sponge_strength", hindcast_zhi_sponge_strength);
 

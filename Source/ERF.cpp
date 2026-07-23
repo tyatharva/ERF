@@ -2216,6 +2216,15 @@ ERF::restart ()
 
     ReadCheckpointFile();
 
+#ifdef ERF_USE_NETCDF
+    // Rebuild the hindcast boundary planes on restart (they are not in the
+    // checkpoint) before any FillPatch consults fill_from_realbdy.
+    if (solverChoice.init_type == InitType::HindCast &&
+        solverChoice.hindcast_lateral_forcing && solverChoice.use_real_bcs) {
+        fill_bdy_data_from_hindcast();
+    }
+#endif
+
     if (regrid_level_0_on_restart) {
         //
         // Coarsening before we split the grids ensures that each resulting
@@ -2366,6 +2375,13 @@ ERF::init_only (int lev, Real elapsed_time)
         if (solverChoice.init_type == InitType::HindCast &&
             solverChoice.hindcast_lateral_forcing) {
             init_thermo_from_hindcast(lev);
+#ifdef ERF_USE_NETCDF
+            // With use_real_bcs, the boundary planes must exist before the
+            // first FillPatch consults fill_from_realbdy.
+            if (solverChoice.use_real_bcs && lev == 0) {
+                fill_bdy_data_from_hindcast();
+            }
+#endif
         }
 
     } else {
@@ -2933,9 +2949,14 @@ ERF::ParameterSanityChecks ()
 {
     AMREX_ALWAYS_ASSERT(cfl > zero || fixed_dt[0] > zero);
 
-    // We don't allow use_real_bcs to be true if init_type is not either InitType::WRFInput or InitType::Metgrid
+    // use_real_bcs requires a pathway that fills the boundary planes:
+    // WRFInput/Metgrid (from files) or HindCast with lateral forcing (from
+    // the interpolated hindcast frames -- fill_bdy_data_from_hindcast).
     AMREX_ALWAYS_ASSERT( !solverChoice.use_real_bcs ||
-                        ((solverChoice.init_type == InitType::WRFInput) || (solverChoice.init_type == InitType::Metgrid)) );
+                        ((solverChoice.init_type == InitType::WRFInput) ||
+                         (solverChoice.init_type == InitType::Metgrid)  ||
+                         ((solverChoice.init_type == InitType::HindCast) &&
+                          solverChoice.hindcast_lateral_forcing)) );
 
     AMREX_ALWAYS_ASSERT(real_width >= 0);
 
