@@ -245,8 +245,14 @@ void TerrainPoisson::precond (MultiFab& lhs, MultiFab const& rhs)
 #ifdef ERF_USE_FFT
     if (m_use_precond)
     {
-        // Make a version that isn't constant
-        MultiFab& rhs_tmp = const_cast<MultiFab&>(rhs);
+        // The hybrid-FFT solve uses its rhs argument as in-place scratch.
+        // The previous const_cast passed GMRES's orthonormal basis vector
+        // directly, so every precond call CORRUPTED the Krylov basis --
+        // measured consequence: the GMRES recurrence reported ~1e-8
+        // convergence while the true residual ||rhs - A phi|| stalled at
+        // 2-12percent, and iterative refinement diverged. Solve on a copy.
+        MultiFab rhs_tmp(rhs.boxArray(), rhs.DistributionMap(), 1, rhs.nGrowVect());
+        MultiFab::Copy(rhs_tmp, rhs, 0, 0, 1, rhs.nGrowVect());
 
         lhs.setVal(0.);
         m_2D_fft_precond->solve(lhs, rhs_tmp, m_stretched_dz_d);

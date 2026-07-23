@@ -270,3 +270,29 @@ reproduce from cold start):
 Scope estimate for a fix: week-class with tail risk (structural dycore
 excavation, not BC glue). The measured prize if fixed: anelastic dt
 9.3-9.7 s vs compressible 2.1-2.3 s at identical per-step cost -- ~4x.
+
+## 6d. Anelastic root cause narrowed to the GMRES solve itself (operator/flux exonerated)
+
+Synthetic-phi consistency test (erf.poisson_consistency_test=1, this fork):
+TerrainPoisson::apply and the applied-correction path
+(getFluxes -> momenta increment -> compute_divergence) agree to round-off
+(norms match to 10 digits; div(flux) = -A phi exactly, the intended sign).
+The item-6c "operator vs correction inconsistency" is EXONERATED.
+
+The true defect (erf.poisson_consistency_test=2): ||rhs - A phi_solved||
+equals the leftover post-projection divergence to every digit, i.e. the
+GMRES recurrence residual is fictitious: the solver reports ~1e-8 relative
+convergence while the TRUE operator residual stalls at 2-44 percent per
+solve (double precision; SP similar). Iterative refinement on the true
+residual DIVERGES deterministically (0.236 -> 0.45 L2 after 10 passes),
+so each solve's output can be anti-correlated with its own residual --
+the Krylov mechanics are broken for this operator/preconditioner pair,
+not merely slow. Eliminated: rhs in-place mutation by the FFT
+preconditioner (solving on a copy is bit-identical); apply_bcs
+inhomogeneity (it is linear/homogeneous); precision (double reproduces).
+Remaining suspects: Krylov-basis corruption via the apply() const_cast
+ghost mutation, catastrophic orthogonality loss in the Gram-Schmidt for
+this A*Minv, or an inconsistent singular system (all-Neumann null space
+vs the dJ-weighted mean subtraction). Consequence in production: the
+un-projected divergence remainder pumps (rho theta) at ~5 K/step near
+the lid until NaN (~step 100).
