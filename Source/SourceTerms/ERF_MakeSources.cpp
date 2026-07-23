@@ -53,6 +53,7 @@ void make_sources (int level,
                    const Vector<Real*> d_rayleigh_ptrs_at_lev,
                    const Real* d_sinesq_at_lev,
                    const MultiFab* surface_state_at_lev,
+                   const Vector<MultiFab>* forecast_state_at_lev,
                    InputSoundingData& input_sounding_data,
                    TurbulentPerturbation& turbPert,
                    bool is_slow_step)
@@ -440,6 +441,16 @@ void make_sources (int level,
             const Array4<const Real>& v_arr_sfc = yvel.const_array(mfi);
             ApplySurfaceTreatment_BulkCoeff_CC(bx, cell_src, cell_data, u_arr_sfc, v_arr_sfc,
                                                z_cc_arr, surface_state_arr);
+        }
+
+        // Lateral sponge on (rho theta) / (rho qv) toward the ERA5 forecast --
+        // thermodynamic counterpart of the momentum sponge in make_mom_sources.
+        if (solverChoice.init_type == InitType::HindCast and
+            solverChoice.hindcast_lateral_forcing and is_slow_step and
+            forecast_state_at_lev != nullptr) {
+            const Array4<const Real>& cons_forecast_state = (*forecast_state_at_lev)[IntVars::cons].array(mfi);
+            ApplyBndryForcingCC_Forecast(solverChoice, geom, bx, cell_src, cell_data,
+                                         cons_forecast_state, has_moisture);
         }
 
 

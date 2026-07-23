@@ -257,3 +257,32 @@ numbers in earlier notes/commits carry that inflation.)
   reason. A stale copy silently reran the old surface_bcs=true config and
   confounded a whole measurement round. Always re-stage (or diff the run-dir
   deck against the repo deck) before benchmarking.
+
+---
+
+## Theta/qv boundary coupling (implemented; 3-km status)
+
+The HindCast pathway now carries thermodynamics, not just momenta:
+
+1. **ERA5 initialization** (`ERF::init_thermo_from_hindcast`): the base state
+   and the state (rho, rho theta, rho qv) are rebuilt from the interpolated
+   first ERA5 frame at init (ERA5 rho -> enforce_hse -> consistent p/pi/theta;
+   momenta stay zero). This removes the dry-300 K-isentrope start entirely:
+   no sub-188 K cold top (zero check_for_low_temp warnings), realistic
+   stratification (theta 286->443 K), and it is REQUIRED for the sponge --
+   relaxing band theta toward ERA5 against a 300 K interior was measured
+   driving +-57 m/s w within 15 model minutes (baroclinic wall at the bands).
+2. **Lateral theta/qv sponge** (`ApplyBndryForcingCC_Forecast`): relaxes
+   (rho theta) and (rho qv) toward the time-interpolated frames in the same
+   quadratic bands as the momentum sponge (model-rho-weighted targets; the
+   momentum sponge now uses max-weight instead of additive band stacking).
+3. **MYNN TKE bound** (`erf.bound_pbl_tke`, default true): prognostic RhoKE
+   clipped to the scheme's internal 150 m2/s2 qke design limit.
+
+**Validated**: 3.2-h run fully clean; hourly-plotfile physics healthy at 4 h
+(band and interior theta agree to 1-2 K at every level, w bounded by mountain
+waves, qv realistic). **Known limit**: the run ends at ~9.1 model hours when
+boundary mass influx breaks the EOS (global mass 2.35x initial by then) --
+that is UPSTREAM_ISSUES item 8 (no inflow treatment on the hindcast faces),
+the remaining blocker for 24-h and multi-year runs. Deck ships the
+best-measured mitigation (sponge strength 0.05 + 6th-order num_diff 0.12).

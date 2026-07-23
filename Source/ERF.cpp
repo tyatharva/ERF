@@ -2359,6 +2359,15 @@ ERF::init_only (int lev, Real elapsed_time)
         // Copy rho and rhotheta from rho_hse and p_hse
         init_from_hse(lev);
 
+        // HindCast theta/qv coupling: replace the problem-default isentropic
+        // base/state with one built from the interpolated ERA5 frame (see
+        // ERF::init_thermo_from_hindcast for the measured failure mode this
+        // prevents). Momenta remain zero (spin-up from rest).
+        if (solverChoice.init_type == InitType::HindCast &&
+            solverChoice.hindcast_lateral_forcing) {
+            init_thermo_from_hindcast(lev);
+        }
+
     } else {
         Abort("Unknown init_type!");
     }

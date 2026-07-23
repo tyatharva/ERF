@@ -7,6 +7,84 @@
 
 using namespace amrex;
 
+// Bound the prognostic MYNN TKE like WRF does. The MYNN-EDMF column solver
+// clips its internal qke to <= 150 m2/s2 (2*TKE), and in WRF that clipped
+// qke IS the prognostic state; in this port the dycore-advected RhoKE never
+// sees the clip, and upper-level shear production (2.5-km cells at 8-15 km)
+// was measured running TKE past 200 m2/s2 to NaN at ~4.6 h.
+// (Free function: CUDA extended lambdas are not allowed inside the private
+// member function ERF::Advance.)
+// WRF-style specified-zone treatment for MASS in the hindcast lateral bands:
+// blend density directly toward the interpolated forecast after each step,
+// preserving theta and the moisture mixing ratio (the rho-weighted components
+// are rescaled). Rationale (all measured at 3 km): the momentum-only RHS
+// sponge accumulates mass along the whole band (~0.3 kg/m3 per hour; worst at
+// band-overlap corners) until EOS/radiation blowup at ~4.6 h; an RHS
+// mass-equation relaxation destabilizes the acoustic substepping in ~60
+// steps. A direct post-step state blend does not enter the acoustic solver.
+static void hindcast_blend_band_density (MultiFab& S, const MultiFab& fcons,
+                                         const Geometry& geom, const Real dt,
+                                         const SolverChoice& sc, const bool has_moisture)
+{
+    auto dx = geom.CellSizeArray();
+    auto ProbHiArr = geom.ProbHiArray();
+    auto ProbLoArr = geom.ProbLoArray();
+    const Real len      = sc.hindcast_lateral_sponge_length;
+    const Real strength = sc.hindcast_lateral_sponge_strength;
+    const Real xlo_end   = ProbLoArr[0] + len;
+    const Real xhi_start = ProbHiArr[0] - len;
+    const Real ylo_end   = ProbLoArr[1] + len;
+    const Real yhi_start = ProbHiArr[1] - len;
+
+    for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+        Box bx = mfi.tilebox();
+        const Array4<Real>& s_arr = S.array(mfi);
+        const Array4<Real const>& f_arr = fcons.const_array(mfi);
+        const bool blend_q = has_moisture && (S.nComp() > RhoQ1_comp);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            Real x = ProbLoArr[0] + (i+myhalf) * dx[0];
+            Real y = ProbLoArr[1] + (j+myhalf) * dx[1];
+            Real xi = zero;
+            if (x < xlo_end)   { xi = amrex::max(xi, (xlo_end - x)   / len); }
+            if (x > xhi_start) { xi = amrex::max(xi, (x - xhi_start) / len); }
+            if (y < ylo_end)   { xi = amrex::max(xi, (ylo_end - y)   / len); }
+            if (y > yhi_start) { xi = amrex::max(xi, (y - yhi_start) / len); }
+            if (xi > zero) {
+                // Gentle rate: the measured pile-up is only ~1e-4 kg/m3/s,
+                // so a ~100 s blend time-constant dominates it while staying
+                // far from the acoustic dynamics. Using the full sponge
+                // strength here (alpha ~0.9/step) shocked the dycore to NaN
+                // within ~800 steps.
+                Real alpha = amrex::min(Real(0.01) * xi * xi * dt, Real(0.1));
+                amrex::ignore_unused(strength);
+                Real rho_o = s_arr(i,j,k,Rho_comp);
+                Real rho_n = (one - alpha) * rho_o + alpha * f_arr(i,j,k,Rho_comp);
+                Real scale = rho_n / rho_o;
+                s_arr(i,j,k,Rho_comp)       = rho_n;
+                s_arr(i,j,k,RhoTheta_comp) *= scale;   // theta preserved
+                if (blend_q) {
+                    s_arr(i,j,k,RhoQ1_comp) *= scale;  // qv preserved
+                }
+            }
+        });
+    }
+}
+
+static void bound_mynn_tke (MultiFab& S)
+{
+    const Real tke_max = Real(75.0);   // = qke_max/2, matching the internal clip
+    for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+        Box bx = mfi.tilebox();
+        const Array4<Real>& s_arr = S.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            Real rho = s_arr(i,j,k,Rho_comp);
+            s_arr(i,j,k,RhoKE_comp) = amrex::min(s_arr(i,j,k,RhoKE_comp), rho * tke_max);
+        });
+    }
+}
+
 /**
  * Function that advances the solution at one level for a single time step --
  * this does some preliminaries then calls erf_advance
@@ -203,6 +281,38 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
     state_new.push_back(MultiFab(rU_new[lev], amrex::make_alias, 0,     1)); // xmom
     state_new.push_back(MultiFab(rV_new[lev], amrex::make_alias, 0,     1)); // ymom
     state_new.push_back(MultiFab(rW_new[lev], amrex::make_alias, 0,     1)); // zmom
+
+    // **************************************************************************************
+    // Bound the prognostic MYNN TKE like WRF does. The MYNN-EDMF column solver
+    // clips its internal qke to <= 150 m2/s2 (2*TKE), and in WRF that clipped
+    // qke IS the prognostic state; in this port the dycore-advected RhoKE never
+    // sees the clip, and upper-level shear production (2.5-km cells at 8-15 km)
+    // was measured running TKE past 200 m2/s2 to NaN at ~4.6 h. Apply the same
+    // bound to the state.
+    // **************************************************************************************
+    static const bool bound_pbl_tke = [] {
+        bool b = true; ParmParse pp("erf"); pp.query("bound_pbl_tke", b); return b;
+    }();
+    if (bound_pbl_tke &&
+        (solverChoice.turbChoice[lev].pbl_type == PBLType::MYNNEDMF ||
+         solverChoice.turbChoice[lev].pbl_type == PBLType::MYNN25)) {
+        bound_mynn_tke(S_old);
+    }
+
+    // Direct band-density blending: three rates were tried (0.9/step, 0.04/step,
+    // and an RHS mass source) and ALL destabilize the acoustic dycore faster
+    // than the slow band mass-accumulation they target. Default OFF; kept for
+    // future specified-zone boundary work.
+    static const bool blend_band_density = [] {
+        bool b = false; ParmParse pp("erf"); pp.query("hindcast_blend_band_density", b); return b;
+    }();
+    if (blend_band_density &&
+        solverChoice.init_type == InitType::HindCast &&
+        solverChoice.hindcast_lateral_forcing) {
+        const bool l_has_moist = (solverChoice.moisture_type != MoistureType::None);
+        hindcast_blend_band_density(S_old, forecast_state_interp[lev][Vars::cons],
+                                    Geom(lev), dt_lev, solverChoice, l_has_moist);
+    }
 
     // **************************************************************************************
     // Tests on the reasonableness of the solution before the dycore

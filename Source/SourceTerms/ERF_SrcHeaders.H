@@ -75,6 +75,7 @@ void make_sources (int level, int nrk,
                    const amrex::Vector<amrex::Real*> d_rayleigh_ptrs_at_lev,
                    const amrex::Real* sinesq_at_lev_d,
                    const amrex::MultiFab* surface_state_at_lev,
+                   const amrex::Vector<amrex::MultiFab>* forecast_state_at_lev,
                    InputSoundingData& input_sounding_data,
                    TurbulentPerturbation& turbPert,
                    bool is_slow_step);
@@ -197,6 +198,14 @@ void ApplyBndryForcing_Forecast (const SolverChoice& solverChoice,
                                  const amrex::Array4<const amrex::Real>& rho_v_initial_state,
                                  const amrex::Array4<const amrex::Real>& rho_w_initial_state,
                                  const amrex::Array4<const amrex::Real>& cons_initial_state);
+
+void ApplyBndryForcingCC_Forecast (const SolverChoice& solverChoice,
+                                   const amrex::Geometry geom,
+                                   const amrex::Box& bx,
+                                   const amrex::Array4<amrex::Real>& cell_rhs,
+                                   const amrex::Array4<const amrex::Real>& cell_data,
+                                   const amrex::Array4<const amrex::Real>& cons_initial_state,
+                                   const bool has_moisture);
 
 void
 ApplySurfaceTreatment_BulkCoeff_Mom (const amrex::Box& tbx,

@@ -155,3 +155,40 @@ per-cell device printf was 4.6x of total runtime, and it also scales
 pathologically with GPU stream count (4 streams: 0.68 s/step WITH the
 flood vs 0.0287 WITHOUT). State evolution verified identical (MASS to 9
 digits over 400 steps). Upstream should adopt the summary form.
+
+## 8. HindCast lateral boundary has no inflow treatment: domain mass grows without bound
+
+Measured at 3 km (all numbers from `run_hindcast` logs on branch `ERF`,
+with the theta/qv coupling of item 1 implemented so runs survive past
+spin-up): with `Outflow` (foextrap) lateral faces and the momentum sponge
+forcing ERA5 winds, mass flows in through inflow faces with no
+characteristic/specified treatment and never leaves. **Global mass reaches
+2.35x its initial value after 9 model hours**; density in the sponge bands
+grows ~0.1-0.3 kg/m3 per hour (worst at band-overlap corners) until the
+surface pressure breaks the EOS/radiation (~1.9-2.4 kg/m3 at blowup).
+
+Sensitivity (24-h attempts, 3-km config, blowup time):
+- sponge strength 0.3, no diffusion: 4.6 h
+- + 6th-order numerical diffusion (0.12): 5.2 h
+- + max-weight (non-additive) band overlap: 5.5 h
+- strength 0.05 + diffusion: 9.1 h (rate halves, does not vanish)
+
+Approaches that made things WORSE (documented so nobody retries them):
+- RHS mass-equation relaxation toward forecast rho: destabilizes the
+  acoustic substepping within ~60 steps.
+- Forecast-rho weighting of the theta/qv sponge targets (rho_f*theta_f):
+  NaN within ~50 steps.
+- Direct post-step density blending in the bands: NaN at ~800 steps
+  (alpha~0.9/step) and ~420 steps (alpha~0.04/step).
+
+**Fix needed**: a real specified/characteristic inflow boundary (WRF-style
+specified zone at the face, or characteristic-based inflow BC) for the
+HindCast pathway. The momentum sponge alone over-determines the velocity
+while leaving the mass/pressure at the face unconstrained.
+
+Related port defect found on the way: the MYNN-EDMF column solver clips its
+internal qke at 150 m2/s2, but the clip never reaches the dycore-advected
+prognostic RhoKE (in WRF the clipped qke IS the prognostic state). Measured
+consequence: TKE ran past 200 m2/s2 at 8-15 km (2.5-km cells, strong jet
+shear) on this config. Fixed in this fork by bounding the prognostic state
+each step (`bound_mynn_tke` in ERF_Advance.cpp, `erf.bound_pbl_tke`).

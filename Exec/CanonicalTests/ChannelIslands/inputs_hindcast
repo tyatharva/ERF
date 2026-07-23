@@ -33,10 +33,20 @@ erf.hindcast_surface_bcs      = false
 erf.hindcast_surface_data_dir = "ERA5Data_Surface"
 
 # Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
-# whole 192 km N-S extent (2x120 > 192); 30 km (30 cells at dx=1 km) keeps
-# ~65% of the domain sponge-free while still relaxing smoothly to ERA5.
-erf.hindcast_lateral_sponge_strength = 0.3
+# whole 192 km N-S extent (2x120 > 192); 30 km keeps ~65% of the domain
+# sponge-free while still relaxing smoothly to ERA5.
+# [MEASURED 3-km FINDING] The hindcast boundary pathway has NO inflow
+# characteristic treatment: sponge-forced inflow through foextrap "Outflow"
+# faces pumps mass in continuously (global mass 2.35x initial after 9 model
+# hours; band density +0.1-0.3 kg/m3 per hour, weakly sensitive to every
+# knob tested) until the EOS/radiation breaks. Strength 0.05 + 6th-order
+# numerical diffusion (below) is the best-measured config: stable to ~9.1 h
+# vs ~4.6 h at strength 0.3 without diffusion. A >=24 h run needs a proper
+# specified/characteristic inflow BC -- see UPSTREAM_ISSUES.md item 8.
+erf.hindcast_lateral_sponge_strength = 0.05
 erf.hindcast_lateral_sponge_length   = 30000      # m
+erf.use_num_diff     = true
+erf.num_diff_coeff   = 0.12
 
 # Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
 erf.hindcast_zhi_sponge_damping  = true

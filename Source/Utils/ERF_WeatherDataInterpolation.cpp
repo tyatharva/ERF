@@ -170,6 +170,7 @@ ERF::FillForecastStateMultiFabs(const int lev,
 
 
         const Box& gbx = mfi.growntilebox(); // tilebox + ghost cells
+        const int ncomp_cons = erf_mf_cons.nComp();
 
         const Box &gtbx = mfi.tilebox(IntVect(1,0,0));
         const Box &gtby = mfi.tilebox(IntVect(0,1,0));
@@ -230,6 +231,14 @@ ERF::FillForecastStateMultiFabs(const int lev,
                                    lonvec_d_ptr, tmp_lon);
 
             fine_cons_arr(i,j,k,Rho_comp) = tmp_rho;
+            // Store PLAIN theta and qv (not rho-weighted), mirroring the
+            // velocity convention: the boundary sponge forms rho_f*theta_f /
+            // rho_f*qv_f at application time. Slots beyond Rho_comp were
+            // previously discarded (momenta-only coupling gap).
+            fine_cons_arr(i,j,k,RhoTheta_comp) = tmp_theta;
+            if (ncomp_cons > RhoQ1_comp) {
+                fine_cons_arr(i,j,k,RhoQ1_comp) = tmp_qv;
+            }
             fine_latlon_arr(i,j,k,0) = tmp_lat;
             fine_latlon_arr(i,j,k,1) = tmp_lon;
         });
@@ -341,6 +350,75 @@ ERF::FillForecastStateMultiFabs(const int lev,
             time,
             0 // level
         );*/
+}
+
+/**
+ * Rebuild the HSE base state and the thermodynamic state from the
+ * time-interpolated ERA5 frame at initialization time.
+ *
+ * Without this, the HindCast pathway starts from the problem default -- a dry
+ * 300 K isentrope -- and the theta/qv lateral sponge then relaxes the bands
+ * toward ERA5 theta (330-430 K aloft) against a 300 K interior/base state:
+ * measured result is O(30-100 K) standing lateral theta contrasts aloft,
+ * w of +-50 m/s within ~15 model minutes, and NaN. The interior and base
+ * state must START on the observed stratification.
+ *
+ * Method: the interpolated ERA5 density becomes the base-state density;
+ * erf_enforce_hse integrates the hydrostatic pressure from it and derives
+ * the consistent theta -- so base and state agree exactly (zero buoyancy at
+ * init) and carry the real stratification. qv comes from the frame. Momenta
+ * remain zero (spin-up from rest, as before).
+ */
+void
+ERF::init_thermo_from_hindcast (const int lev)
+{
+    // The forecast state was first filled during init_stuff, BEFORE the
+    // terrain arrays were built (z_phys_nd was still zero). Re-run the
+    // interpolation with the final grid; regrid_forces_file_read=true forces
+    // the re-read without advancing the frame clock.
+    WeatherDataInterpolation(lev, t_new[lev], z_phys_nd, true);
+
+    MultiFab r_hse (base_state[lev], make_alias, BaseState::r0_comp , 1);
+    MultiFab p_hse (base_state[lev], make_alias, BaseState::p0_comp , 1);
+    MultiFab pi_hse(base_state[lev], make_alias, BaseState::pi0_comp, 1);
+    MultiFab th_hse(base_state[lev], make_alias, BaseState::th0_comp, 1);
+    MultiFab qv_hse(base_state[lev], make_alias, BaseState::qv0_comp, 1);
+
+    MultiFab& fcons = forecast_state_interp[lev][Vars::cons];
+    MultiFab& cons  = vars_new[lev][Vars::cons];
+
+    const bool l_has_moist = (solverChoice.moisture_type != MoistureType::None) &&
+                             (cons.nComp() > RhoQ1_comp) && (fcons.nComp() > RhoQ1_comp);
+
+    IntVect ngv = r_hse.nGrowVect();
+    ngv.min(fcons.nGrowVect());
+    MultiFab::Copy(r_hse, fcons, Rho_comp, 0, 1, ngv);
+    if (l_has_moist) {
+        // Forecast state stores PLAIN qv (velocity convention)
+        MultiFab::Copy(qv_hse, fcons, RhoQ1_comp, 0, 1, ngv);
+    }
+
+    erf_enforce_hse(lev, r_hse, p_hse, pi_hse, th_hse, qv_hse, z_phys_cc[lev]);
+    (*physbcs_base[lev])(base_state[lev], 0, base_state[lev].nComp(), base_state[lev].nGrowVect());
+
+    for (MFIter mfi(cons); mfi.isValid(); ++mfi) {
+        const Box& gbx = mfi.growntilebox(1);
+        const Array4<Real      >& cons_arr = cons.array(mfi);
+        const Array4<Real const>& r_arr    = r_hse.const_array(mfi);
+        const Array4<Real const>& th_arr   = th_hse.const_array(mfi);
+        const Array4<Real const>& f_arr    = fcons.const_array(mfi);
+        ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            cons_arr(i,j,k,Rho_comp)      = r_arr(i,j,k);
+            cons_arr(i,j,k,RhoTheta_comp) = r_arr(i,j,k) * th_arr(i,j,k);
+            if (l_has_moist) {
+                cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ1_comp);
+            }
+        });
+    }
+
+    Print() << "HindCast init: base state and thermodynamic state rebuilt from "
+            << "the interpolated ERA5 frame (theta/qv coupling)." << std::endl;
 }
 
 void

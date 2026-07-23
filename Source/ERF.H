@@ -500,6 +500,10 @@ public:
                                   amrex::Vector<std::unique_ptr<amrex::MultiFab>>& z_phys_nd,
                                   bool regrid_forces_file_read);
 
+    // Rebuild the HSE base state and the thermodynamic state (rho, rhotheta,
+    // rho qv) from the interpolated ERA5 frame at initialization time.
+    void init_thermo_from_hindcast(const int lev);
+
     void SurfaceDataInterpolation(const int nlevs,
                                   const amrex::Real time,
                                   amrex::Vector<std::unique_ptr<amrex::MultiFab>>& z_phys_nd,
