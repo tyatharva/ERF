@@ -28,7 +28,10 @@ HERE=/app/ERF/Exec/CanonicalTests/ChannelIslands/wps
 STAGE="${1:-build}"
 
 export NETCDF=/usr/local
-export HDF5=/usr/local
+# Do NOT set HDF5: the container's HDF5 is C-only, and WRF's configure adds
+# -lhdf5_fortran/-lhdf5_hl_fortran (which do not exist) whenever HDF5 is set.
+# NetCDF4 compression still works through netcdf-c.
+unset HDF5 || true
 export J="-j $(nproc)"
 
 build_all () {
