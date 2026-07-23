@@ -228,9 +228,12 @@ erf.rad_t_sfc              = 288.0
 # levels sit inside the damping layer). Refine to a 48-entry profile if
 # stratospheric SW heating ever matters for the application.
 erf.o3vmr                  = 5.0e-8
-# Recalibrated at 2 km: dt plateaus ~2.6 s during spin-up -> every 10 steps
-# = ~26 s model time; measured cost 0.36 s/call = ~18% of wall at this cadence.
-erf.rad_freq_in_steps      = 10
+# Recalibrated at 2 km (after the low-temp printf fix exposed true step
+# cost): rad is 0.38 s/call vs ~0.035 s dycore steps, i.e. HALF of wall at
+# freq 10. 30 steps = ~80-135 s model time at dt 2.6-4.5, matching standard
+# practice (WRF radt ~= 1 min per km of dx -> 2 min at 2 km). Cuts rad to
+# ~25% of wall.
+erf.rad_freq_in_steps      = 30
 erf.rrtmgp_file_path       = "."
 erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
 erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
@@ -255,8 +258,12 @@ amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
 # --- REQUIRED runtime settings on the 16 GB RTX 4080 -----------------------
 # Single GPU stream: the hindcast step path has a cross-stream execution race
 # (NaN in memory-dependent regions; bit-identical clean runs with 1 stream;
-# compute-sanitizer initcheck clean -- see RUNBOOK "Known issues"). Keep this
-# until the racing kernel pair is found and fenced.
+# compute-sanitizer initcheck clean -- see RUNBOOK "Known issues").
+# MEASURED at 2 km (after the printf-flood fix): the race is RARE here
+# (one event in ~390 cold-start steps at 4 streams; immediate at 1 km with
+# 24 boxes) and the pin costs only ~1.2x (0.0348 vs 0.0287 s/step) -- NOT
+# the 3x measured at 1 km under the printf flood. Keep the pin: 20% is not
+# worth silent-corruption risk until the racing pair is found and fenced.
 amrex.max_gpu_streams = 1
 # Cap the AMReX arena so Kokkos (RRTMGP work arrays) has headroom, and chunk
 # the radiation columns; without these the first radiation call OOMs.

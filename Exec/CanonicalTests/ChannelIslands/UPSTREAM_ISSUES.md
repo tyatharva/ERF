@@ -50,9 +50,19 @@ NaN in memory-dependent, run-to-run-varying regions within one step. With
 bit-reproducible (1-step and 30-step verified). `compute-sanitizer
 --tool initcheck` reports zero errors on the failing configuration (after
 the fixes in item 3), isolating a true execution-order race rather than
-uninitialized memory. Racing kernel pair not yet identified; reproduction
-recipe: this fork @ `ERF` branch, `Exec/CanonicalTests/ChannelIslands/`,
-remove `amrex.max_gpu_streams=1` from the deck and run 2x.
+uninitialized memory. Racing kernel pair not yet identified.
+
+Additional bracketing (2-km config, all item-3/4 fixes in): the race still
+exists but is RARE at 6 boxes — one NaN event in ~390 cold-start steps at
+4 streams (corruption in a plain dycore step, 8 steps after the last
+radiation call, with the surface path disabled — so it is in the ordinary
+hindcast step path, not radiation-interop or surface code), while two
+200-step multi-stream runs were clean and mass-identical to one-stream.
+At 1 km (24 boxes) it fires within one step. Frequency scaling with box
+count fits a cross-stream timing-window race. Reproduction: this fork @
+`ERF` branch, `Exec/CanonicalTests/ChannelIslands/`, remove
+`amrex.max_gpu_streams=1`; use the 1-km config (git history, commit
+0bd051d5) for an immediate repro.
 
 ## 3. Uninitialized-memory defects found via compute-sanitizer initcheck
 
@@ -138,6 +148,10 @@ the 188 K microphysics validity floor, so `ERF::check_for_low_temp`
 (called twice per step with any moisture model) emits ~30,000 device
 printfs per step — ~12M warning lines in a 400-step run. The `Abort()` in
 the device lambda does not fire in release GPU builds, so the run
-continues; the flood is log bloat plus measurable printf overhead. A
-count-limited warning (or one summary line per step) would preserve the
-diagnostic without the flood.
+continues; the flood is log bloat plus SEVERE printf overhead: fixing it
+(reduction + one summary line per check, done in this fork's `ERF.cpp`)
+took the full 2-km hindcast step from 0.159 to 0.0348 s/step — the
+per-cell device printf was 4.6x of total runtime, and it also scales
+pathologically with GPU stream count (4 streams: 0.68 s/step WITH the
+flood vs 0.0287 WITHOUT). State evolution verified identical (MASS to 9
+digits over 400 steps). Upstream should adopt the summary form.

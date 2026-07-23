@@ -210,8 +210,28 @@ See "What a healthy run looks like" below.
 ## Measured performance levers (2 km, 192x96x32, RTX 4080, one stream)
 
 All numbers below are measured on 400-step runs of the shipped deck unless
-noted. Baseline: 0.159 s/step median (0.194 s avg incl. radiation),
-dt plateau 2.60 s at cfl=0.5.
+noted. Baseline AFTER the check_for_low_temp printf fix: 0.0348 s/step
+median (dycore+physics), 0.38 s per radiation call, 28.8 s total for 400
+cold-start steps at rad_freq=10; dt plateau 2.60 s at cfl=0.5. (Before the
+printf fix the same deck measured 0.159 s/step — the per-cell device
+printf flood from the isentropic-IC cold top was 4.6x of runtime. Historic
+numbers in earlier notes/commits carry that inflation.)
+
+- **check_for_low_temp printf flood (FIXED)**: with the 300 K-isentrope IC,
+  every cell above ~11.4 km is below the 188 K microphysics floor; the
+  per-cell device printf (2 checks/step, ~30k cells) serialized the GPU.
+  Now a reduction + one summary line per check (UPSTREAM_ISSUES #7). State
+  evolution verified identical (MASS to 9 digits over 400 steps). After the
+  theta/qv coupling task the real atmosphere clears 188 K everywhere and
+  the check goes quiet on its own.
+- **Stream pin re-measured**: with the flood gone, `amrex.max_gpu_streams=1`
+  costs ~1.2x (0.0348 vs 0.0287 s/step at 4 streams), NOT the historic 3x
+  (that ratio was flood-inflated). The race is still real: one NaN event in
+  ~390 cold-start steps at 4 streams at 2 km (immediate at 1 km). Keep the
+  pin.
+- **rad_freq recalibrated to 30**: rad is 0.38 s/call vs 0.035 s dycore
+  steps; at freq 10 it was half of wall. 30 steps = 80-135 s model-time
+  cadence, matching WRF radt practice (1 min per km of dx).
 
 - **dt is horizontal-ACOUSTIC bound**: dt = cfl*dx/(c+|u|). The per-step
   log proves it (compressible dt 2.60 vs anelastic/advective estimate ~21 s

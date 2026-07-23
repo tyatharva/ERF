@@ -3293,11 +3293,22 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
     // This value is defined in erf_dtesati in Source/Utils/ERF_MicrophysicsUtils.H
     Real t_low = Real(273.16) - Real(85.);
     //
+    // Count offending cells with a reduction and print ONE summary line per
+    // check instead of a per-cell device printf: with the dry-isentropic
+    // HindCast IC every cell above ~11.4 km is below t_low, and ~30,000
+    // device printfs per step serialized the GPU (measured 0.159 -> 0.02x
+    // s/step at 2 km) and bloated logs by ~30k lines/step. The device-side
+    // Abort() never fired in release GPU builds, so behavior is unchanged
+    // apart from the print volume.
+    ReduceOps<ReduceOpSum, ReduceOpMin> reduce_op;
+    ReduceData<long, Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
     for (MFIter mfi(S); mfi.isValid(); ++mfi)
     {
         Box bx = mfi.tilebox();
         const Array4<Real> &s_arr  = S.array(mfi);
-        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        reduce_op.eval(bx, reduce_data,
+        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
         {
             const Real rho      = s_arr(i, j, k, Rho_comp);
             const Real rhotheta = s_arr(i, j, k, RhoTheta_comp);
@@ -3305,16 +3316,16 @@ ERF::check_for_low_temp(amrex::MultiFab& S)
 
             Real temp = getTgivenRandRTh(rho, rhotheta, qv);
 
-            if (temp < t_low) {
-#ifdef AMREX_USE_GPU
-                AMREX_DEVICE_PRINTF("Temperature too low in cell: %d %d %d %e \n", i,j,k,temp);
-#else
-                printf("Temperature too low in cell: %d %d %d \n", i,j,k);
-                printf("Based on temp / rhotheta / rho / qv %e %e %e %e \n", temp,rhotheta,rho,qv);
-#endif
-                Abort();
-            }
+            return { (temp < t_low) ? 1L : 0L, temp };
         });
+    }
+    ReduceTuple hv = reduce_data.value(reduce_op);
+    long nlow  = amrex::get<0>(hv);
+    Real tmin  = amrex::get<1>(hv);
+    if (nlow > 0) {
+        amrex::Print() << "Warning: check_for_low_temp: " << nlow
+                       << " cells below " << t_low << " K (min temp "
+                       << tmin << " K)" << std::endl;
     }
 }
 
