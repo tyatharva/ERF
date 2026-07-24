@@ -162,7 +162,13 @@ erf.w_damping_const  = 0.3
 # ---------------------------------------------------------------------------
 start_datetime = "2023-01-09 00:00:00"
 stop_datetime  = "2023-01-10 00:00:00"
-max_step = 100000                 # safety cap; datetime governs the stop
+# [AUDIT 2026-07-24] max_step MUST be -1 (= unlimited) for production:
+# ERF stops at min(max_step, stop_datetime) with a CLEAN exit, and istep
+# continues across restarts, so any positive cap silently truncates a
+# year run (~14M steps at dt~2.24 s) while looking like a success. The
+# old "safety cap" of 100000 covered only ~2.6 simulated days.
+# stage_run.sh hard-fails if this is not -1.
+max_step = -1                     # datetime governs the stop
 
 # ---------------------------------------------------------------------------
 #  ADVECTION  (WENOZ5; horiz and vert MUST match for WENO)

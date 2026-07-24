@@ -88,7 +88,11 @@ def per_timestep_name(stream, t):
 
 
 def batch_name(stream, cs, ce):
-    return f"era5_{stream}_batch_{cs.strftime('%Y%m%d')}_{(ce - timedelta(days=1)).strftime('%Y%m%d')}.grib"
+    # PREFIX MUST NOT MATCH era5_3d_* / era5_surf_*: the erftools
+    # processing step globs those patterns and would ingest a multi-time
+    # batch file as a single-time frame, silently corrupting the .bin of
+    # its first timestamp (pre-launch audit finding #2).
+    return f"batch_era5_{stream}_{cs.strftime('%Y%m%d')}_{(ce - timedelta(days=1)).strftime('%Y%m%d')}.grib"
 
 
 def validate_batch(path, expected_msgs):

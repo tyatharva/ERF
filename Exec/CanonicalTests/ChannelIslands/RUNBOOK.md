@@ -474,3 +474,68 @@ skipped via their per-timestep files, valid batch gribs are not
 re-downloaded, short/corrupt batches are deleted and re-fetched. The
 surface variable list includes forecast_albedo and must stay in sync
 with erftools_fal_patch.py.
+
+## Month-segment date recipe (the concrete procedure; audit item #4)
+
+The year runs as 12 restart-chained segments. THE RULE THAT MATTERS:
+**start_datetime stays FIXED at the year start for every segment** --
+checkpoint times are seconds-since-start_datetime, and ERF indexes ERA5
+frames positionally from t=0, so changing it breaks both. Only
+stop_datetime advances. The frames directory ACCUMULATES (frame[0] must
+always be the year-start frame; the preflight enforces this).
+
+    Segment 1:  start_datetime = "2023-01-01 00:00:00"
+                stop_datetime  = "2023-02-01 00:00:00"
+                launch:  erf_exec inputs_hindcast
+    Segment N:  edit ONLY stop_datetime -> first instant of month N+1
+                launch:  erf_exec inputs_hindcast erf.restart=chk<last>
+    (final segment: stop_datetime = "2024-01-01 00:00:00")
+
+Per segment, before launching: batch-download + process ONLY the new
+month in a per-month work dir (era5_run_YYYYMM), then copy its .bin
+frames into era5_run/Output/ERA5Data_{3D,Surface}/ and re-run
+stage_run.sh (the preflight then re-verifies coverage through the new
+stop_datetime, frame[0] alignment, and 6-field surface frames).
+
+Audit items #7/#8 under this workflow, stated honestly:
+- #8 (erftools processing is non-resumable and linear): ELIMINATED --
+  each segment processes only its own month's gribs (~500 files, the
+  measured 3-5 min scale), because processing globs whatever gribs sit
+  in the work dir.
+- #7 (startup reads ALL boundary frames): NOT eliminated -- the 3D
+  real-BC plane build reads every frame from the year start at each
+  (re)start, so segment-N startup grows through the year (worst ~2,921
+  frames in December; estimated 10-30 min + ~1.2 GB pinned host
+  memory). Bounded and payable, but it prices every crash-restart too.
+  MEASURE on segment 1 and revise this note with the real number.
+
+## LAND SURFACE TEMPERATURE IS NOT A TRUSTWORTHY FIELD (audit item #3)
+
+Read this before using land skin/soil temperature from the OSSE output.
+
+ERF's MM5 land model is a bare soil-diffusion column (125 lines): its
+only coupling is the MOST sensible-heat flux at the top. It has NO
+radiation input slot and NO surface energy balance -- this is
+STRUCTURAL, not unwired plumbing (the radiation->LSM outputs
+sw_flux_dn/cos_zenith_angle/... are consumed only by Noah-MP, which was
+dropped with its geog-data dependency; ERF's SLM is the same bare
+column, so there is no intermediate option in this fork). Consequences
+over land:
+- no direct solar heating of the ground by day, no LW cooling at night:
+  the land diurnal cycle is structurally damped;
+- no seasonal soil memory; the soil column initializes at a HARDCODED
+  uniform 300 K (not even a runtime parameter) -> warm-soil spin-up
+  bias for a January start;
+- interaction with the albedo work: radiation now sees correct land
+  reflectance (ERA5 fal), but the absorbed shortwave heats only the
+  ATMOSPHERE's surface layer via MOST -- the ground itself never
+  receives it.
+Ocean (75% of the domain) is unaffected: SST is prescribed from ERA5.
+Land-driven flows (sea breeze strength, nocturnal drainage, inland
+convective triggering) inherit a damped-diurnal bias of unquantified
+size. Cheap partial fixes if ever needed: make the 300 K init a
+runtime parameter (~5 lines; a January-appropriate constant kills most
+of the spin-up bias), or init the column from ERA5
+soil_temperature_level_1..4 (available upstream; needs a new surface
+field through the pipeline, ~a day, same shape as the fal work).
+Neither gives day-to-day radiative driving -- that requires Noah-MP.
