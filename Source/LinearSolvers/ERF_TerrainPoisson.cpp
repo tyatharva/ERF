@@ -24,6 +24,7 @@ TerrainPoisson::TerrainPoisson (Geometry const& geom, BoxArray const& ba,
       m_dJ(dJ),
       m_zphys(z_phys_nd)
 {
+    m_use_real_bcs = use_real_bcs;
     if (!m_2D_fft_precond) {
         Box bounding_box = ba.minimalBox();
         bc_fft = get_fft_bc(geom,domain_bcs_type,bounding_box,use_real_bcs);
@@ -36,6 +37,51 @@ void TerrainPoisson::usePrecond (bool use_precond_in)
     m_use_precond = use_precond_in;
 }
 
+void TerrainPoisson::mask_specified_faces (Array<MultiFab,AMREX_SPACEDIM>& fluxes)
+{
+    // Prescribed-inflow projection: with use_real_bcs the fill sets the
+    // momenta on the outermost face layers (set_width = 1 in
+    // fill_from_realbdy: x-faces i = 0,1 and i = nx-1,nx plus the ring
+    // cells' transverse faces; likewise in y). Any correction applied
+    // there is overwritten at the next fill, re-injecting divergence into
+    // the ring cells every stage -- fatal for anelastic (measured: qv to
+    // 0.8 kg/kg at a ring cell, theta runaway at the lid). Zeroing the
+    // correction flux on those faces (and on the terrain/lid z-faces,
+    // where w must remain 0) makes the projection solve for a correction
+    // consistent with the specified data; ring cells adjust through their
+    // interior-facing and vertical faces.
+    const Box& dom = m_geom.Domain();
+    const int ilo = dom.smallEnd(0), ihi = dom.bigEnd(0);
+    const int jlo = dom.smallEnd(1), jhi = dom.bigEnd(1);
+    const int klo = dom.smallEnd(2), khi = dom.bigEnd(2);
+    const int sw  = 1;   // must match set_width in fill_from_realbdy
+
+    if (m_use_real_bcs) {
+        auto const& fx = fluxes[0].arrays();
+        ParallelFor(fluxes[0], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+        {
+            if (i <= ilo+sw || i >= ihi+1-sw || j <= jlo+sw-1 || j >= jhi-sw+1) {
+                fx[b](i,j,k) = zero;
+            }
+        });
+        auto const& fy = fluxes[1].arrays();
+        ParallelFor(fluxes[1], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+        {
+            if (j <= jlo+sw || j >= jhi+1-sw || i <= ilo+sw-1 || i >= ihi-sw+1) {
+                fy[b](i,j,k) = zero;
+            }
+        });
+    }
+    // No correction flux through the terrain or the lid in any case
+    auto const& fz = fluxes[2].arrays();
+    ParallelFor(fluxes[2], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+    {
+        if (k <= klo || k >= khi+1) {
+            fz[b](i,j,k) = zero;
+        }
+    });
+}
+
 void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
 {
     AMREX_ASSERT(rhs.nGrowVect().allGT(0));
@@ -45,7 +91,6 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
     auto const& dxinv = m_geom.InvCellSizeArray();
 
     auto const& y = lhs.arrays();
-    auto const& zpa = m_zphys->const_arrays();
     auto const& axa = m_ax.const_arrays();
     auto const& aya = m_ay.const_arrays();
     auto const& aza = m_az.const_arrays();
@@ -53,11 +98,82 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
 
     apply_bcs(xx);
 
-    auto const& xc = xx.const_arrays();
-    ParallelFor(rhs, [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+    // Build the operator literally as divergence(mask(flux(phi))) using the
+    // SAME flux kernels and mask as the applied correction (getFluxes), so
+    // the operator and the correction agree by construction -- including
+    // the prescribed-inflow face masking.
+    Array<MultiFab,AMREX_SPACEDIM> flx{
+        MultiFab(convert(m_grids, IntVect(1,0,0)), m_dmap, 1, 0),
+        MultiFab(convert(m_grids, IntVect(0,1,0)), m_dmap, 1, 0),
+        MultiFab(convert(m_grids, IntVect(0,0,1)), m_dmap, 1, 0)};
+
+    auto const& zpa = m_zphys->const_arrays();
+    auto const& xc  = xx.const_arrays();
+
+    auto const& fxa = flx[0].arrays();
+    ParallelFor(flx[0], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
     {
-        terrpoisson_adotx(i, j, k, y[b], xc[b], axa[b], aya[b], aza[b], dJa[b], zpa[b], dxinv[0], dxinv[1], dxinv[2]);
+        fxa[b](i,j,k) = terrpoisson_flux_x(i,j,k,xc[b],zpa[b],dxinv[0]);
     });
+    auto const& fya = flx[1].arrays();
+    ParallelFor(flx[1], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+    {
+        fya[b](i,j,k) = terrpoisson_flux_y(i,j,k,xc[b],zpa[b],dxinv[1]);
+    });
+    auto const& fza = flx[2].arrays();
+    ParallelFor(flx[2], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+    {
+        fza[b](i,j,k) = terrpoisson_flux_z(i,j,k,xc[b],zpa[b],dxinv[0],dxinv[1]);
+    });
+
+    mask_specified_faces(flx);
+
+    auto const& fxc = flx[0].const_arrays();
+    auto const& fyc = flx[1].const_arrays();
+    auto const& fzc = flx[2].const_arrays();
+    ParallelFor(lhs, [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+    {
+        // Matches the sign convention of terrpoisson_adotx: A phi =
+        // -div(flux(phi)) with the adotx area/dJ weighting (proven equal
+        // to the production compute_divergence assembly). Ring cells (all
+        // lateral faces specified/masked) reduce to the vertical-only
+        // operator: ring w carries the column-consistent correction.
+        y[b](i,j,k) = -( (axa[b](i+1,j,k)*fxc[b](i+1,j,k) - axa[b](i,j,k)*fxc[b](i,j,k)) * dxinv[0]
+                        +(aya[b](i,j+1,k)*fyc[b](i,j+1,k) - aya[b](i,j,k)*fyc[b](i,j,k)) * dxinv[1]
+                        +(aza[b](i,j,k+1)*fzc[b](i,j,k+1) - aza[b](i,j,k)*fzc[b](i,j,k)) * dxinv[2] )
+                      / dJa[b](i,j,k);
+    });
+
+    // Ring-column deflation: with all lateral faces masked, each ring
+    // column's operator is vertical-only with capped ends, so each column
+    // contributes its own left-null functional (dJ restricted to that
+    // column). Project the output orthogonal to each.
+    if (m_use_real_bcs) {
+        const Box& domn = m_geom.Domain();
+        const int rilo = domn.smallEnd(0), rihi = domn.bigEnd(0);
+        const int rjlo = domn.smallEnd(1), rjhi = domn.bigEnd(1);
+        const int rklo = domn.smallEnd(2), rkhi = domn.bigEnd(2);
+        for (MFIter mfi(lhs); mfi.isValid(); ++mfi) {
+            Box bx2 = mfi.tilebox();
+            bx2.setRange(2, rklo, 1);
+            const Array4<Real>& yv = lhs.array(mfi);
+            const Array4<Real const>& dJv = m_dJ.const_array(mfi);
+            ParallelFor(bx2, [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+            {
+                if (i == rilo || i == rihi || j == rjlo || j == rjhi) {
+                    Real s1 = zero, s2 = zero;
+                    for (int kk = rklo; kk <= rkhi; ++kk) {
+                        s1 += yv(i,j,kk) * dJv(i,j,kk);
+                        s2 += dJv(i,j,kk) * dJv(i,j,kk);
+                    }
+                    Real cc = s1 / s2;
+                    for (int kk = rklo; kk <= rkhi; ++kk) {
+                        yv(i,j,kk) -= cc * dJv(i,j,kk);
+                    }
+                }
+            });
+        }
+    }
 
     // Deflate the singular mode: this operator is singular (constants in
     // null(A), dJ spans null(A^T)) and the FFT preconditioner is singular
@@ -69,11 +185,28 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
     // orthogonal to dJ solves P A phi = rhs, equivalent for the compatible
     // rhs (its dJ component is ~1e-17 after the production mean
     // subtraction) and keeps the Krylov space clean.
-    Real ydotdJ = MultiFab::Dot(lhs, 0, m_dJ, 0, 1, 0);
-    if (m_dJ_norm2sq < Real(0.0)) {
-        m_dJ_norm2sq = MultiFab::Dot(m_dJ, 0, m_dJ, 0, 1, 0);
+    // Deflation weight: dJ restricted to the projected (non-ring) cells --
+    // with ring identity rows the left-null vector is dJ on the interior
+    // and zero on the ring.
+    if (!m_dJ_int.ok()) {
+        m_dJ_int.define(m_grids, m_dmap, 1, 0);
+        MultiFab::Copy(m_dJ_int, m_dJ, 0, 0, 1, 0);
+        if (m_use_real_bcs) {
+            const Box& domi = m_geom.Domain();
+            const int iilo = domi.smallEnd(0), iihi = domi.bigEnd(0);
+            const int ijlo = domi.smallEnd(1), ijhi = domi.bigEnd(1);
+            auto const& dJi = m_dJ_int.arrays();
+            ParallelFor(m_dJ_int, [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+            {
+                if (i == iilo || i == iihi || j == ijlo || j == ijhi) {
+                    dJi[b](i,j,k) = zero;
+                }
+            });
+        }
+        m_dJ_norm2sq = MultiFab::Dot(m_dJ_int, 0, m_dJ_int, 0, 1, 0);
     }
-    MultiFab::Saxpy(lhs, -ydotdJ/m_dJ_norm2sq, m_dJ, 0, 0, 1, 0);
+    Real ydotdJ = MultiFab::Dot(lhs, 0, m_dJ_int, 0, 1, 0);
+    MultiFab::Saxpy(lhs, -ydotdJ/m_dJ_norm2sq, m_dJ_int, 0, 0, 1, 0);
 }
 
 void TerrainPoisson::apply_bcs (MultiFab& phi)
@@ -212,6 +345,9 @@ void TerrainPoisson::getFluxes (MultiFab& phi,
     {
         fz[b](i,j,k) = terrpoisson_flux_z(i,j,k,x[b],zpa[b],dxinv[0],dxinv[1]);
     });
+
+    // Same masking as the operator (prescribed-inflow projection)
+    mask_specified_faces(fluxes);
 }
 
 void TerrainPoisson::assign (MultiFab& lhs, MultiFab const& rhs)

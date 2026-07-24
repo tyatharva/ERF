@@ -55,8 +55,18 @@ public:
     void setToZero(amrex::MultiFab& v);
 
 private:
+public:
+    // Zero the correction fluxes on faces whose momenta are specified by
+    // the real-BC fill (prescribed-inflow projection) plus the lid/terrain
+    // z-faces, so the projection never fights the specified boundary data.
+    // (Public: CUDA extended lambdas cannot live in private members.)
+    void mask_specified_faces(amrex::Array<amrex::MultiFab,AMREX_SPACEDIM>& fluxes);
+
+private:
     bool m_use_precond = false;
-    mutable amrex::Real m_dJ_norm2sq = amrex::Real(-1.0);   // cached <dJ,dJ>
+    bool m_use_real_bcs = false;
+    mutable amrex::Real m_dJ_norm2sq = amrex::Real(-1.0);   // cached <dJ_int,dJ_int>
+    mutable amrex::MultiFab m_dJ_int;                       // dJ zeroed on the specified ring
     amrex::Geometry m_geom;
     amrex::BoxArray m_grids;
     amrex::DistributionMapping m_dmap;

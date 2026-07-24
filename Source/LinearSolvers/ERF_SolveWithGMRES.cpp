@@ -214,6 +214,55 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
         Abort("poisson_consistency_test mode 5 complete");
     }
 
+    // Prescribed-inflow projection rhs prep: the specified ring has
+    // identity rows (no divergence constraint there -- its divergence IS
+    // the boundary data), so its rhs must be zero; and interior
+    // solvability is enforced exactly by removing the component along the
+    // interior-restricted left-null vector dJ_int (the upstream global
+    // dJ-mean subtraction includes the ring and is no longer exact).
+    if (solverChoice.use_real_bcs) {
+        const Box& domr = Geom(lev).Domain();
+        const int rilo = domr.smallEnd(0), rihi = domr.bigEnd(0);
+        const int rjlo = domr.smallEnd(1), rjhi = domr.bigEnd(1);
+        // Ring columns: subtract each column's dJ-weighted mean (the
+        // column-wise compatibility component that vertical redistribution
+        // cannot remove).
+        const int rklo = domr.smallEnd(2), rkhi = domr.bigEnd(2);
+        for (MFIter mfi(rhs); mfi.isValid(); ++mfi) {
+            Box bx2 = mfi.tilebox();
+            bx2.setRange(2, rklo, 1);
+            const Array4<Real>& rv = rhs.array(mfi);
+            const Array4<Real const>& dJv = dJ_sub.const_array(mfi);
+            ParallelFor(bx2, [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+            {
+                if (i == rilo || i == rihi || j == rjlo || j == rjhi) {
+                    Real s1 = zero, s2 = zero;
+                    for (int kk = rklo; kk <= rkhi; ++kk) {
+                        s1 += rv(i,j,kk) * dJv(i,j,kk);
+                        s2 += dJv(i,j,kk) * dJv(i,j,kk);
+                    }
+                    Real cc = s1 / s2;
+                    for (int kk = rklo; kk <= rkhi; ++kk) {
+                        rv(i,j,kk) -= cc * dJv(i,j,kk);
+                    }
+                }
+            });
+        }
+        MultiFab dJint(rhs.boxArray(), rhs.DistributionMap(), 1, 0);
+        MultiFab::Copy(dJint, dJ_sub, 0, 0, 1, 0);
+        auto const& dji = dJint.arrays();
+        ParallelFor(dJint, [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
+        {
+            if (i == rilo || i == rihi || j == rjlo || j == rjhi) { dji[b](i,j,k) = zero; }
+        });
+        Real c = MultiFab::Dot(rhs, 0, dJint, 0, 1, 0) / MultiFab::Dot(dJint, 0, dJint, 0, 1, 0);
+        MultiFab::Saxpy(rhs, -c, dJint, 0, 0, 1, 0);
+        if (mg_verbose > 0) {
+            Print() << "Prescribed-inflow rhs prep: removed interior-imbalance component c = "
+                    << c << std::endl;
+        }
+    }
+
     gmsolver.solve(phi, rhs, reltol, abstol);
 
     // Iterative refinement on the TRUE residual. The GMRES recurrence
