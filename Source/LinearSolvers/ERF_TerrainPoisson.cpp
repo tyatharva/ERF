@@ -58,6 +58,22 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
     {
         terrpoisson_adotx(i, j, k, y[b], xc[b], axa[b], aya[b], aza[b], dJa[b], zpa[b], dxinv[0], dxinv[1], dxinv[2]);
     });
+
+    // Deflate the singular mode: this operator is singular (constants in
+    // null(A), dJ spans null(A^T)) and the FFT preconditioner is singular
+    // too (pinned mean). GMRES on the singular pair lets the null
+    // component re-enter through round-off, driving the Hessenberg
+    // near-singular; the recurrence then reports false convergence while
+    // the returned update violates the minimizer property (measured:
+    // reported 1e-8 vs true 2-44 percent residual). Projecting the output
+    // orthogonal to dJ solves P A phi = rhs, equivalent for the compatible
+    // rhs (its dJ component is ~1e-17 after the production mean
+    // subtraction) and keeps the Krylov space clean.
+    Real ydotdJ = MultiFab::Dot(lhs, 0, m_dJ, 0, 1, 0);
+    if (m_dJ_norm2sq < Real(0.0)) {
+        m_dJ_norm2sq = MultiFab::Dot(m_dJ, 0, m_dJ, 0, 1, 0);
+    }
+    MultiFab::Saxpy(lhs, -ydotdJ/m_dJ_norm2sq, m_dJ, 0, 0, 1, 0);
 }
 
 void TerrainPoisson::apply_bcs (MultiFab& phi)

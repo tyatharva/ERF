@@ -56,6 +56,7 @@ public:
 
 private:
     bool m_use_precond = false;
+    mutable amrex::Real m_dJ_norm2sq = amrex::Real(-1.0);   // cached <dJ,dJ>
     amrex::Geometry m_geom;
     amrex::BoxArray m_grids;
     amrex::DistributionMapping m_dmap;

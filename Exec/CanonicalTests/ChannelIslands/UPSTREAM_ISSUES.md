@@ -331,3 +331,38 @@ amrex::GMRES's recurrence/orthogonalization bookkeeping when paired with
 this legitimate M^-1 (possibly its Gram-Schmidt under the ~1e8 spectral
 spread of A*M^-1). Recommend filing against AMReX with the two one-flag
 reproducers in this fork (poisson_consistency_test=2 vs =4).
+
+## 6f. FIXED IN FORK: singular-pair GMRES false convergence (root cause of 6d/6e)
+
+Root cause found and fixed ERF-side (no AMReX patch needed): the terrain
+Poisson operator is singular (constants in null(A), dJ spans null(A^T))
+and the FFT preconditioner is singular too (pinned mean). GMRES on the
+singular pair lets the null component re-enter through round-off, the
+Hessenberg goes near-singular, and amrex::GMRES's unprotected backsolve
+(`m_grs[it] /= m_hh(it,it)`, exact-zero check only) produces corrupted
+updates while the Givens recurrence reports convergence -- explaining the
+false 1e-8 reports, the 2-44 percent true-residual stalls, and the
+minimizer-property violation (updates worse than zero).
+
+Fix: deflate the singular mode in TerrainPoisson::apply -- project the
+operator output orthogonal to dJ (solves P A phi = rhs; equivalent for
+the compatible rhs whose dJ-component is ~1e-17 after the production
+mean subtraction). MEASURED: true residual after solve drops from 2-44
+percent to 5e-9 (meets tolerance, zero refinement passes); post-projection
+divergence drops from 7.5e-4 to 1.9e-9 max -- seven orders. Upstream
+recommendations: (1) this deflation in ERF's TerrainPoisson; (2) a
+relative near-zero pivot guard in amrex::GMRES build_solution; (3) a true-
+residual verification before declaring convergence (defense in depth).
+
+REMAINING anelastic blocker (next layer, precisely characterized): the
+real-BC specified zone overwrites boundary-strip velocities AFTER each
+projection, re-injecting divergence there every stage. Compressible
+absorbs this acoustically; anelastic advects scalars with the divergent
+velocity and they accumulate without bound (measured with the FIXED
+solver: qv reaches 0.8 kg/kg at a boundary-adjacent surface cell by step
+80; the top-level theta runaway persists at ~1/3 its former rate).
+Proper fix: projection with prescribed inflow -- treat specified-zone
+faces as fixed-flux (inhomogeneous Neumann) data in the Poisson solve and
+exclude them from correction. Standard construction; est. 2-3 days.
+Also note: double + RRTMGP + anelastic needs rad_ncol_chunk ~1024 and
+arena ~3e9 on 16 GB (Kokkos OOM otherwise).
