@@ -37,6 +37,7 @@ import sys
 from datetime import datetime, timedelta
 
 import cdsapi
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pygrib
 
 PL_VARS = ["geopotential", "relative_humidity", "specific_cloud_ice_water_content",
@@ -171,59 +172,73 @@ def main():
     # erftools' frame list is inclusive of the end instant (the final BC frame):
     end = datetime.strptime(args.end, "%Y-%m-%d") + timedelta(hours=args.interval_hours)
     area = [float(v) for v in args.area.split(",")]
-    client = None
 
-    for stream, spec in STREAMS.items():
-        # Never let a chunk span a month boundary (CDS day-lists are per-month)
-        month_edges = []
-        d = start.replace(day=1)
-        while d < end:
-            month_edges.append(max(d, start))
-            d = (d + timedelta(days=32)).replace(day=1)
-        month_edges.append(end)
+    # Chunk boundaries, computed once (never let a chunk span a month
+    # boundary -- CDS day-lists are per-month).
+    month_edges = []
+    d = start.replace(day=1)
+    while d < end:
+        month_edges.append(max(d, start))
+        d = (d + timedelta(days=32)).replace(day=1)
+    month_edges.append(end)
+    chunks = [c for mi in range(len(month_edges) - 1)
+              for c in daterange_chunks(month_edges[mi], month_edges[mi + 1], args.chunk_days)]
 
-        for mi in range(len(month_edges) - 1):
-            for cs, ce in daterange_chunks(month_edges[mi], month_edges[mi + 1], args.chunk_days):
-                tsteps = chunk_timesteps(cs, ce, args.interval_hours)
-                if not tsteps:
-                    continue
-                missing = [t for t in tsteps if not os.path.exists(per_timestep_name(stream, t))]
-                tag = f"[{stream} {cs.date()}..{(ce - timedelta(seconds=1)).date()}]"
-                if not missing:
-                    print(f"{tag} complete ({len(tsteps)} frames) -- skip")
-                    continue
+    def fetch_batch(stream, spec, tsteps, tag, cs, ce):
+        """Download + validate ONE stream's batch file. Pure network wait, so
+        the two streams of a chunk run concurrently; each thread builds its
+        own cdsapi client. Returns the batch filename."""
+        bf = batch_name(stream, cs, ce)
+        expected = len(tsteps) * spec["fields_per_time"]
+        if os.path.exists(bf) and not validate_batch(bf, expected):
+            print(f"{tag} deleting invalid batch file for re-download", flush=True)
+            os.remove(bf)
+        if not os.path.exists(bf):
+            print(f"{tag} requesting {expected} fields ...", flush=True)
+            try:
+                download_batch(cdsapi.Client(), stream, spec, cs, ce, tsteps, area, bf)
+            except Exception as e:
+                msg = str(e)
+                if ("too large" in msg or "cost limits" in msg) and args.chunk_days > 1:
+                    raise RuntimeError(f"{tag} request rejected as too large; "
+                                       f"re-run with --chunk-days {args.chunk_days // 2}")
+                raise
+            if not validate_batch(bf, expected):
+                os.remove(bf)
+                raise RuntimeError(f"{tag} downloaded batch failed validation "
+                                   f"(deleted); re-run to retry")
+        return bf
 
-                bf = batch_name(stream, cs, ce)
-                expected = len(tsteps) * spec["fields_per_time"]
-                if os.path.exists(bf) and not validate_batch(bf, expected):
-                    print(f"{tag} deleting invalid batch file for re-download")
-                    os.remove(bf)
-                if not os.path.exists(bf):
-                    if client is None:
-                        client = cdsapi.Client()
-                    days = args.chunk_days
-                    while True:
-                        try:
-                            print(f"{tag} requesting {expected} fields ...")
-                            download_batch(client, stream, spec, cs, ce, tsteps, area, bf)
-                            break
-                        except Exception as e:
-                            msg = str(e)
-                            if ("too large" in msg or "cost limits" in msg) and days > 1:
-                                # Shrink THIS chunk in place: split it into two runs
-                                # by just failing with instructions (simplest safe path).
-                                sys.exit(f"{tag} FATAL: request rejected as too large.\n"
-                                         f"Re-run with --chunk-days {days // 2}.")
-                            raise
-                    if not validate_batch(bf, expected):
-                        os.remove(bf)
-                        sys.exit(f"{tag} FATAL: downloaded batch failed validation "
-                                 f"(deleted); re-run to retry.")
+    # PIPELINE ORDER: chunk OUTER, stream INNER, both streams of a chunk
+    # fetched concurrently. A chunk therefore becomes a COMPLETE 3d+surface
+    # window as soon as it lands, so process_pool.py can convert it while the
+    # next chunk is still queued at CDS. The previous order (stream outer)
+    # finished all 25 pressure-level chunks before the first surface chunk,
+    # so nothing was convertible until the entire 3d stream was done.
+    for cs, ce in chunks:
+        work = {}
+        for stream, spec in STREAMS.items():
+            tsteps = chunk_timesteps(cs, ce, args.interval_hours)
+            if not tsteps:
+                continue
+            tag = f"[{stream} {cs.date()}..{(ce - timedelta(seconds=1)).date()}]"
+            if all(os.path.exists(per_timestep_name(stream, t)) for t in tsteps):
+                print(f"{tag} complete ({len(tsteps)} frames) -- skip", flush=True)
+                continue
+            work[stream] = (spec, tsteps, tag)
+        if not work:
+            continue
 
-                nfiles, per_time = split_batch(stream, bf, tsteps)
-                print(f"{tag} split -> {nfiles} frames ({per_time} fields each)")
-                if args.clean_batch:
-                    os.remove(bf)
+        with ThreadPoolExecutor(max_workers=len(work)) as ex:
+            futs = {ex.submit(fetch_batch, st, *work[st], cs, ce): st for st in work}
+            batch_files = {futs[f]: f.result() for f in as_completed(futs)}
+
+        # Split serially: eccodes/pygrib is not thread-safe.
+        for stream, (spec, tsteps, tag) in work.items():
+            nfiles, per_time = split_batch(stream, batch_files[stream], tsteps)
+            print(f"{tag} split -> {nfiles} frames ({per_time} fields each)", flush=True)
+            if args.clean_batch:
+                os.remove(batch_files[stream])
 
     print("All requested frames present.")
 

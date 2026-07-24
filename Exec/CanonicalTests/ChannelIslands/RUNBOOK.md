@@ -378,7 +378,11 @@ in this directory IS the production deck: hourly plotfiles, 6-hourly
 checkpoints.
 
 **Cost and storage per simulated year (RTX 4080, one GPU):**
-- Wall: ~4.4 days (17.3 min/day x 365).
+- Wall: **~6.6 GPU-days** at the measured active-day cost (24.6 min/day x
+  389 simulated days incl. the 12 segments' 2-day leads); less to the
+  extent the year contains quiet days, which run ~15 min/day against the
+  max_dt ceiling. The older 4.4-day figure was cfl 0.3, which Hilary
+  showed to be unstable -- see STRESS TESTS.
 - Plotfiles: hourly = 8,760 files x ~23 MB ~ 200 GB.
 - Checkpoints: 6-hourly, 36 MB each = 1,460 x 36 MB ~ 53 GB if all kept.
   Keep a rolling tail (e.g. last 8) plus monthly keepers; a cleanup cron of
@@ -643,11 +647,41 @@ Jan 9, the only day validated during bring-up, is mid-pack for this domain.
 A survey of all 2023 ERA5 (4x daily, whole domain) picked out the real
 extremes, and the config above was validated against the worst two:
 
-| Case | Date | Why | Result |
+All three below are FULL 24-h runs under the final segment config, each
+with **zero w-damping events and zero low-temperature warnings**:
+
+| | Hilary 08-20 | max-CAPE 09-09 | storm 01-09 |
 |---|---|---|---|
-| Hurricane Hilary | 2023-08-20 | TCWV 66 mm, 2.5x the Jan-9 storm | see below |
-| Max CAPE | 2023-09-09 | 1404 J/kg, TCWV 44 mm | see below |
-| Windstorms | 2023-02-15, 02-22 | surface winds 18 m/s | not run |
+| steps | 53,914 | 54,173 | 56,639 |
+| dt median (s) | 1.612 | 1.600 | 1.524 |
+| dt p05 / p95 (s) | 1.555 / 1.624 | 1.574 / 1.615 | 1.400 / 1.633 |
+| % of steps at the 2.5 s ceiling | 0.0 | 0.0 | 0.0 |
+| wall (min / simulated day) | 23.9 | 23.5 | 24.6 |
+| mass drift / 24 h | +0.054% | -0.081% | -0.155% |
+| moisture change / 24 h | +84% | +8.6% | +31% |
+| peak cloud fraction | 0.94 | 0.79 | 0.99 |
+| \|u\| max (m/s) | 34.4 | 38.1 | 57.5 |
+| \|w\| max (m/s) | 19.9 | 19.3 | 22.9 |
+| interior rain p99 (mm/24 h) | 164 | 39 | 146 |
+
+**August is NOT the expensive month.** That was the worry going in; it is
+wrong. All three active regimes cost 23.5-24.6 min per simulated day, and
+the January storm is the slowest of the three. dt here is set by the
+horizontal ACOUSTIC CFL, which barely varies between regimes -- it is not
+tracking convective intensity. So there is no August-specific budget line.
+
+None of these three days ever touches `max_dt`, i.e. all three are
+cfl-bound throughout. `max_dt` exists for the quiet days (a calm January
+start would otherwise run dt to ~15 s), and a quiet day capped at 2.5 s
+takes ~34,600 steps, i.e. roughly 15 min/day. The year therefore blends
+somewhere between ~15 (quiet) and ~25 (active) min per simulated day.
+Measured active-day cost is the safe number to budget with:
+389 simulated days (12 segments incl. 2-day leads) x 24.6 min ~ **6.6 GPU-days**
+on one RTX 4080, less to the extent the year contains quiet days.
+
+Windstorm days (2023-02-15, 02-22; surface winds 18 m/s) were identified by
+the survey but NOT run -- the two convective extremes were the harder test
+and both passed.
 
 **What Hilary broke.** At the bring-up cfl of 0.3 the Hilary case dies ~9
 model minutes in: a grid-scale vertical dipole (w = +48.9 / -29.5 m/s) in the
@@ -667,6 +701,36 @@ low-temperature warnings**, not merely "no NaN in one run".
 136.7 MiB Kokkos allocation because two ERF processes shared a 16 GB RTX
 4080 (one process resident set: ~7.4 GB, plus RRTMGP's per-call working
 set). Parallelize segments across GPUs, never within one.
+
+## Two things to know before trusting output fields
+
+Both were found by checking the stress-test output against physical
+expectation rather than against EXIT=0. Neither is launch-blocking; both
+will silently mislead anyone who skips them.
+
+**1. The ERA5 initial condition is wrong above ~12 km, and the model fixes
+it.** The IC hands ERF 287 K at 16.65 km -- physically absurd (should be
+~205 K), and the profile inverts above 12 km. The model relaxes it to a
+correct tropopause within ~6 h and then holds dead steady: level-mean T at
+k=31 goes 286.7 (IC) -> 208.5 (6 h) -> 207.4 (12 h) -> 208.4 K (24 h). So
+this is a bad IC that self-heals, NOT a drift. It does mean the top ~4
+levels are meaningless for the first several hours of any fresh-init run,
+which the 2-day spin-up lead already discards. Domain-mean theta appears to
+fall ~10 K/day if you look at the column average; ~all of that is this
+correction in the top 4 levels (lowest 10 levels: -0.96 K).
+
+**2. Boundary-band precipitation is garbage by a factor of ~40, worst in
+the corners.** Hilary 24-h rain_accum: domain max 7,004 mm at cell (127,2)
+-- a band-overlap corner -- versus interior (outer 10 cells excluded) max
+865 mm, p99 164 mm, mean 17 mm. Jan-9 shows the same signature (band max
+1,847 mm vs interior p99 146 mm). The "discard the outer ring" rule was
+already here; this quantifies why it is not optional. Same corners as the
+mass pile-up of UPSTREAM_ISSUES #8.
+
+Interior values are credible: 164 mm/24 h at p99 for Hilary over SoCal is
+the right order. Single-cell interior maxima (Hilary 865 mm, Jan-9 852 mm)
+are high enough to be treated as grid-point storm artifacts rather than
+forecasts -- use percentiles, not maxima.
 
 ## Calm-start stability findings (segment probes, 2026-01-01 start)
 
