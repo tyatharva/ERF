@@ -366,3 +366,47 @@ faces as fixed-flux (inhomogeneous Neumann) data in the Poisson solve and
 exclude them from correction. Standard construction; est. 2-3 days.
 Also note: double + RRTMGP + anelastic needs rad_ncol_chunk ~1024 and
 arena ~3e9 on 16 GB (Kokkos OOM otherwise).
+
+## 6g. RESOLVED IN FORK: the two defects behind the anelastic real-BC blowups
+
+Fixed in 32e4d49f + d82162d9; anelastic full-physics 24-h hindcast now
+completes in double precision (8,941 steps, wall 17.4 min, mass exact).
+
+1. **Anelastic scalar advection used raw momenta as metric fluxes**
+   (upstream-relevant, `ERF_SlowRhsPost.cpp`): the `l_anelastic` branch
+   copied cur_{x,y,z}mom into avg_{x,y,z}mom, but AdvectionSrcForScalars
+   consumes those as area-weighted, map-factor-scaled fluxes with OMEGA in
+   the z slot (as AdvectionSrcForRho builds them in the compressible path).
+   Feeding rho*w instead of Omega means scalars see a different effective
+   divergence than rho over terrain slopes: measured exponential qv/theta
+   pumping (e-fold ~65 s at 3 km over the San Gabriels / Channel Islands),
+   independent of dt, PBL scheme, and microphysics phase; absent in the
+   compressible A/B; invisible in flat idealized anelastic cases where
+   Omega == rho*w. Fix: rebuild avg_* exactly as AdvectionSrcForRho
+   (OmegaFromW; Omega(klo)=0).
+
+2. **Anelastic radiation pressure from EOS of the frozen-rho state**
+   (`ERF_Radiation.cpp`): with rho pinned to rho0, getPgivenRTh inherits
+   base-state artifacts. The ERA5-interpolated rho0 is flat-extrapolated
+   below the lowest ERA5 level, so EOS p_lay is flat/non-monotone over the
+   first ~5 model levels (dp ~ 0.4 Pa in double -- RRTMGP survived by
+   luck; exactly 0 in single precision -> col_gas = 0 -> non-finite
+   optical depths on the first rad call). Fix: when anelastic, radiation
+   uses the hydrostatic reference p0(z) and T = theta*Exner(p0) -- the
+   thermodynamically correct anelastic pressure.
+
+Also fixed en route: the prescribed-inflow mask (6f follow-on) must zero
+correction fluxes ONLY on the domain-boundary normal faces (the only ones
+the set_width=1 realbdy fill overwrites -- verified from realbdy_bc_bxs_xy
+box arithmetic) plus terrain/lid; masking the second face layer traps
+each boundary column's integrated convergence (no lateral relief) and
+pumps scalars dJ-weighted into the deep top cells.
+
+**Remaining (fork known-limit, not yet root-caused): single-precision
+anelastic + RRTMGP** dies at ~3.5 model hours via a fast (~12-step) local
+thermal collapse (transient 185-K cold pools at the stratospheric cold
+point recover earlier in the run; onset is nondeterministic). Double
+precision is unaffected (full 24 h clean); single precision with
+radiation_model=None is also clean past the crash point (1300 steps).
+So the defect lives in the SP radiation-anelastic interplay at the
+clamped cold top.

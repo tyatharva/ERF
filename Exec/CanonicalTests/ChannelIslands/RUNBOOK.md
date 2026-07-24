@@ -286,3 +286,43 @@ boundary mass influx breaks the EOS (global mass 2.35x initial by then) --
 that is UPSTREAM_ISSUES item 8 (no inflow treatment on the hindcast faces),
 the remaining blocker for 24-h and multi-year runs. Deck ships the
 best-measured mitigation (sponge strength 0.05 + 6th-order num_diff 0.12).
+
+---
+
+## Anelastic (WORKING; measured 2026-07-24)
+
+The anelastic dycore now completes the full-physics 24-h hindcast (Morrison
++ MYNN-EDMF + RRTMGP + MM5 + real BCs). Chain of fixes, in order:
+
+1. GMRES false convergence (dJ-deflation in TerrainPoisson::apply) --
+   see UPSTREAM_ISSUES 6d/6e/6f and erf-model/ERF#3487.
+2. Prescribed-inflow projection, minimal mask (32e4d49f): zero correction
+   fluxes ONLY on the domain-boundary normal faces (the only faces the
+   set_width=1 real-BC fill overwrites) plus terrain/lid. Do NOT mask the
+   second face layer -- that traps each boundary column's integrated
+   convergence and pumps rho/theta/qv (dJ-weighted, worst in the deep top
+   cells). Post-solve physical divergence: max ~1.5e-9.
+3. THE key bug (32e4d49f): the anelastic branch of SlowRhsPost copied raw
+   momenta into avg_{x,y,z}mom, but scalar advection consumes those as
+   area-weighted metric fluxes with OMEGA in the z slot. Scalars were
+   advected with rho*w while rho used Omega -> exponential qv/theta pumping
+   over terrain slopes (e-fold ~65 s; invisible on flat idealized cases).
+4. Radiation p0 (d82162d9): with rho frozen at rho0, EOS pressure inherits
+   the flat ERA5 extrapolation below its lowest level (dp ~ 0 over the first
+   5 levels; exactly 0 in SP -> non-finite RRTMGP taus). Anelastic radiation
+   now uses the hydrostatic reference p0(z), T = theta*Exner(p0).
+
+**Measured (double precision build, deck + erf.anelastic=1 erf.cfl=0.3
+erf.rad_ncol_chunk=1024 amrex.the_arena_init_size=3000000000):**
+- 24 h complete: 8,941 steps, mean dt 9.66 s (vs 2.24 s compressible =
+  4.3x fewer steps), wall 17.4 min, qv <= 0.026, T 191-304 K at h24,
+  rho sum bit-identical over 24 h, zero NaNs.
+- Wall-clock parity with SP compressible (17.3 min): the dt gain is eaten
+  by double precision (16-GB card forces DP chunk 1024) + per-stage GMRES.
+- Production options at 3 km on one RTX 4080: SP compressible or DP
+  anelastic, both ~17.4 min/day -> ~4.4 GPU-days/year.
+
+**Known limit (SP anelastic)**: single-precision anelastic runs ~3.5 h
+then hits a fast (~12-step) local thermal collapse (nondeterministic
+onset; transient 185-K cold pools recover earlier in the run). DP is
+unaffected. Needs its own investigation before SP anelastic production.
