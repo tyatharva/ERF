@@ -417,3 +417,20 @@ with instructions if it is missing). Build both trees inside the image
 bind-mount as in section 1 (`git config --global --add safe.directory "*"`
 first -- the kokkos AlwaysCheckGit probe fails on dubious ownership
 otherwise).
+
+## Radiative surface state (audited 2026-07-24)
+
+Radiation does NOT use a constant surface temperature in the production
+config: with zlo=surface_layer, t_sfc per column is the live surface-layer
+skin temperature (MM5 diurnal cycle over land, ERA5 SST over ocean);
+erf.rad_t_sfc=288 is an inert fallback. The rad->LSM direct input requests
+"t_sfc" while MM5 exports "theta" -- that branch never fires, harmlessly
+(the same skin state arrives via t_surf).
+
+**Known radiative fidelity limit (the real one): uniform surface albedo
+0.06 and emissivity 0.98 everywhere.** 0.06 is ocean-like; land chaparral
+is ~0.15-0.2, so shortwave absorbed over land runs systematically high
+(~10-15% of incident SW over the ~25% land fraction). If land-surface
+energy fidelity ever matters for the application, wire a land/sea albedo
+through the lsm_input path (the plumbing exists; MM5 would need to export
+matching varnames).

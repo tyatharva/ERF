@@ -221,9 +221,16 @@ erf.land_surface_model = "MM5"
 #  rad_freq_in_steps: radiation every N dycore steps -- see benchmark notes.)
 # ---------------------------------------------------------------------------
 erf.radiation_model        = "RRTMGP"
-# Uniform surface temperature for the LW lower boundary (this fork's RRTMGP
-# uses a constant, not the evolving skin-temperature field -- known fidelity
-# limitation). 288 K = ocean-weighted January value for this 75%-ocean domain.
+# Radiative surface temperature [RE-AUDITED 2026-07-24]: with
+# zlo=surface_layer active, radiation takes the LIVE per-column skin
+# temperature from the surface layer (MM5-updated diurnal cycle over land,
+# ERA5 SST over ocean) -- verified in Radiation::mf_to_kokkos_buffers.
+# rad_t_sfc is only the fallback for columns with neither and is inert in
+# this config. (The rad->LSM direct branch requests "t_sfc" while MM5
+# exports "theta", so it never fires -- harmless, same skin state arrives
+# via t_surf.) The REAL radiative surface limitation is the uniform
+# albedo (0.06, ocean-like -- land chaparral is ~0.15-0.2, so SW absorbed
+# over land runs high) and uniform emissivity 0.98.
 erf.rad_t_sfc              = 288.0
 # Ozone volume mixing ratio for gas optics: single tropospheric-mean value
 # (domain tops at 20 km, largely below the O3 layer; the O3-sensitive upper
@@ -252,7 +259,9 @@ amr.blocking_factor = 16
 # ---------------------------------------------------------------------------
 #  DIAGNOSTICS & VERBOSITY
 # ---------------------------------------------------------------------------
-erf.sum_interval = 1
+erf.sum_interval = 100            # integral diagnostics every 100 steps
+                                  # (per-step was the dev-era health monitor;
+                                  # ~100k-step production runs don't need it)
 erf.v = 1
 amr.v = 1
 amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
