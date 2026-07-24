@@ -5,9 +5,19 @@
 #       Exec/CanonicalTests/ChannelIslands/stage_run.sh
 # Hard-fails (with a named reason) on any missing ingredient.
 set -euo pipefail
+# Defaults reproduce the original single-run behaviour; a month segment
+# passes its own frame source and run directory:
+#   stage_run.sh /app/ERF/era5_year_2023/2023-08/Output /app/ERF/run_2023-08 \
+#       "2023-07-30 00:00:00" "2023-09-01 00:00:00" 298.9
+# The datetimes and soil anchor are applied to the staged deck BEFORE the
+# preflight runs -- the frame-coverage assertions are only meaningful
+# against the segment's real window.
 CI=/app/ERF/Exec/CanonicalTests/ChannelIslands
-RUN=/app/ERF/run_hindcast
-ERA5_OUT=/app/ERF/era5_run/Output
+ERA5_OUT=${1:-/app/ERF/era5_run/Output}
+RUN=${2:-/app/ERF/run_hindcast}
+SEG_START=${3:-}
+SEG_STOP=${4:-}
+SEG_SOIL=${5:-}
 
 fail () { echo "FATAL [stage_run]: $*" >&2; exit 1; }
 
@@ -18,6 +28,13 @@ fail () { echo "FATAL [stage_run]: $*" >&2; exit 1; }
 
 mkdir -p $RUN
 cp    $CI/inputs_hindcast                          $RUN/
+if [ -n "$SEG_START" ]; then
+    sed -i "s|^start_datetime = .*|start_datetime = \"$SEG_START\"|;    \
+            s|^stop_datetime  = .*|stop_datetime  = \"$SEG_STOP\"|;     \
+            s|^erf.mm5.soil_theta     = .*|erf.mm5.soil_theta     = $SEG_SOIL|" \
+        $RUN/inputs_hindcast
+    echo "segment deck: $SEG_START -> $SEG_STOP, soil_theta=$SEG_SOIL K"
+fi
 # Stage every terrain variant present (the deck names which one it uses;
 # previously only the 2-km file was staged while the deck referenced the
 # 3-km one).

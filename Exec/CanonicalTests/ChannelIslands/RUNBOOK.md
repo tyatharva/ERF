@@ -497,18 +497,32 @@ series. Restarts are for CRASH RECOVERY WITHIN a segment only (same
 directory, erf.restart=chk<last> -- soil then correctly restores that
 segment's own state).
 
-Per segment N (month M):
+This is fully scripted. From `~/ERF`:
 
-    1. Batch-download + process month M (+ spin-up lead days before it,
-       + the first frame of month M+1) in its own work dir; the frames
-       for the segment MUST start exactly at the segment's
-       start_datetime (positional indexing; the preflight enforces it).
-    2. Segment deck: start_datetime = month start MINUS the spin-up
-       lead (see the measured spin-up section); stop_datetime = first
-       instant of month M+1. max_step = -1.
-    3. Launch with erf.mm5.soil_theta=<month M value from the SKT table
-       below> plus the stable-segment-config flags.
-    4. In post, DISCARD the spin-up lead; analysis uses month M proper.
+    # 1. acquire the year, 12 segments (network-bound; resumable --
+    #    just re-run it after any interruption)
+    Exec/CanonicalTests/ChannelIslands/pull_year.sh download 2023
+
+    # 2. GRIB -> ERF frames (8-rank CPU job; do not overlap with GPU runs)
+    Exec/CanonicalTests/ChannelIslands/pull_year.sh process  2023
+
+    # 3. run one segment (stages, preflights, launches). ONE PER GPU.
+    Exec/CanonicalTests/ChannelIslands/launch_segment.sh 2023 08
+
+`launch_segment.sh` computes the segment window (month start minus a
+2-day spin-up lead -> first instant of month M+1), looks up that month's
+soil anchor from the SKT table below, applies both to the staged deck,
+and only then runs the preflight -- the frame-coverage assertions are
+meaningless against a template deck. Everything else comes from the
+locked production `inputs_hindcast`.
+
+In post, DISCARD the spin-up lead; analysis uses month M proper.
+
+Spin-up lead is 2 days by measurement, not by convention: on a 3-day
+diagnostic run the IC transient (KE spike then collapse, the initial ERA5
+cloud burst raining out) flushes in 12-24 h and the domain-integrated
+fields are quasi-steady after day 1. Soil needs no lead at all, because
+the soil does not evolve (see "MM5 IS INERT").
 
 Segments are independent, so they parallelize freely ACROSS MACHINES/GPUs
 -- but **one segment per GPU**. Two ERF processes do not fit on a 16 GB
