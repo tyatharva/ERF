@@ -1,69 +1,68 @@
 #!/bin/bash
-# Acquire a full year of ERA5 frames as 12 independent monthly segments.
+# Acquire and preprocess a full year of ERA5 BC/IC frames into ONE FLAT POOL.
 #
-#   Exec/CanonicalTests/ChannelIslands/pull_year.sh download 2023
-#   Exec/CanonicalTests/ChannelIslands/pull_year.sh process  2023
+#   Exec/CanonicalTests/ChannelIslands/pull_year.sh download [START END]
+#   Exec/CanonicalTests/ChannelIslands/pull_year.sh process  [START END]
 #
-# Two phases on purpose: `download` is network/CDS-queue bound and can run
-# alongside GPU work; `process` is an 8-rank CPU job and should not.
+# Defaults cover calendar 2023 with a ONE-MONTH spin-up cushion in front
+# (so the year can also be run as a single continuous job if we ever want
+# to) and one spare day at the end:  2022-12-01 -> 2024-01-02.
 #
-# Each segment is a FRESH-INIT run (see RUNBOOK "Month-segment launch
-# recipe"), so each one gets its own directory, its own frames starting
-# exactly at its own start_datetime, and its own soil anchor. Segment M
-# starts SPINUP_DAYS before month M and ends at the first instant of month
-# M+1; the lead is discarded in post.
+# Two phases on purpose: `download` is CDS-queue bound and safe to run
+# alongside GPU work; `process` is an 8-rank CPU job and is not.
 #
-# CDS credentials are mounted read-only at run time and are never copied
-# into the image.
+# WHY A FLAT POOL: erftools is a pure PREPROCESSOR -- WriteICFromERA5Data.py
+# globs era5_{3d,surf}_*.grib in its cwd, shards the list across MPI ranks,
+# and writes .bin frames to Output/. ERF only ever reads those .bin files at
+# run time; nothing is generated on the fly. So the whole year is processed
+# ONCE, here, and every later run just points at the result.
+#
+# NOTE for consumers: ERF indexes boundary frames POSITIONALLY from t=0, so
+# a run's frame[0] must BE its start_datetime. A run that does not start at
+# the pool's first frame therefore needs a directory holding just its own
+# slice -- launch_segment.sh builds that as symlinks into this pool (no
+# copying). The preflight in stage_run.sh enforces the invariant.
+#
+# CDS credentials are mounted read-only at run time, never baked into the image.
 set -euo pipefail
 
-PHASE=${1:?usage: pull_year.sh download-or-process YEAR}
-YEAR=${2:?usage: pull_year.sh download-or-process YEAR}
-SPINUP_DAYS=2
+PHASE=${1:?usage: pull_year.sh download-or-process [START END]}
+START=${2:-2022-12-01}
+END=${3:-2024-01-02}
 AREA="36.0,-123.25,31.25,-115.25"
-ROOT=/home/atyagi/ERF/era5_year_$YEAR
+POOL=/home/atyagi/ERF/era5_year
 CI=/home/atyagi/ERF/Exec/CanonicalTests/ChannelIslands
-mkdir -p "$ROOT"
+mkdir -p "$POOL"
 
-# start/stop/hours for each month, computed once
-mapfile -t SEGMENTS < <(python3 - "$YEAR" "$SPINUP_DAYS" <<'PY'
-import sys
-from datetime import datetime, timedelta
-year, lead = int(sys.argv[1]), int(sys.argv[2])
-for m in range(1, 13):
-    start = datetime(year, m, 1) - timedelta(days=lead)
-    stop  = datetime(year + (m == 12), (m % 12) + 1, 1)
-    print(f"{m:02d} {start:%Y-%m-%d} {stop:%Y-%m-%d} {int((stop-start).total_seconds()//3600)}")
-PY
-)
+HOURS=$(python3 -c "
+from datetime import datetime
+a=datetime.strptime('$START','%Y-%m-%d'); b=datetime.strptime('$END','%Y-%m-%d')
+print(int((b-a).total_seconds()//3600))")
 
-for seg in "${SEGMENTS[@]}"; do
-    read -r MM START STOP HOURS <<<"$seg"
-    DIR="$ROOT/$YEAR-$MM"
-    mkdir -p "$DIR"
-
-    if [ "$PHASE" = download ]; then
-        echo "=== $YEAR-$MM: download $START -> $STOP ($HOURS h) ==="
-        cp "$CI/era5_batch_download.py" "$DIR/"
-        docker run --rm -v /home/atyagi/ERF:/app/ERF -v ~/.cdsapirc:/root/.cdsapirc:ro \
-            -w "/app/ERF/era5_year_$YEAR/$YEAR-$MM" erf-hindcast \
-            python3 era5_batch_download.py --start "$START" --end "$STOP" --area "$AREA" \
-            2>&1 | tail -5
-        echo "    frames on disk: $(ls "$DIR"/era5_3d_*.grib 2>/dev/null | wc -l) 3D / $(ls "$DIR"/era5_surf_*.grib 2>/dev/null | wc -l) surf"
-
-    elif [ "$PHASE" = process ]; then
-        echo "=== $YEAR-$MM: process ($HOURS h from $START) ==="
-        printf 'year: %s\nmonth: %s\nday: %s\ntime: 00:00\narea: %s\n' \
-            "${START:0:4}" "${START:5:2}" "${START:8:2}" "$AREA" > "$DIR/era5_input.txt"
-        docker run --rm -v /home/atyagi/ERF:/app/ERF -v ~/.cdsapirc:/root/.cdsapirc:ro \
-            -w "/app/ERF/era5_year_$YEAR/$YEAR-$MM" erf-hindcast bash -lc "
-                cp /opt/erftools/notebooks/era5/WriteICFromERA5Data.py . &&
-                cp -r /opt/erftools/notebooks/gfs/TypicalAtmosphereData . &&
-                mpirun -n 8 python3 WriteICFromERA5Data.py era5_input.txt \
-                    --do_forecast=true --forecast_time_hours=$HOURS --interval_hours=3" 2>&1 | tail -5
-        echo "    bins: $(ls "$DIR"/Output/ERA5Data_3D/*.bin 2>/dev/null | wc -l) 3D / $(ls "$DIR"/Output/ERA5Data_Surface/*.bin 2>/dev/null | wc -l) surf"
-    else
-        echo "unknown phase: $PHASE" >&2; exit 2
-    fi
-done
-echo "PHASE $PHASE COMPLETE for $YEAR"
+case "$PHASE" in
+download)
+    echo "=== download $START -> $END ($HOURS h, $((HOURS/3+1)) frames/stream) ==="
+    cp "$CI/era5_batch_download.py" "$POOL/"
+    docker run --rm -v /home/atyagi/ERF:/app/ERF -v ~/.cdsapirc:/root/.cdsapirc:ro \
+        -w /app/ERF/era5_year erf-hindcast \
+        python3 era5_batch_download.py --start "$START" --end "$END" --area "$AREA"
+    echo "pool now: $(ls "$POOL"/era5_3d_*.grib 2>/dev/null | wc -l) 3D / $(ls "$POOL"/era5_surf_*.grib 2>/dev/null | wc -l) surf gribs"
+    ;;
+process)
+    # erftools' own downloader skips every GRIB already present, so this is
+    # pure processing. Re-runnable: rerunning reprocesses, it does not refetch.
+    echo "=== process $START -> $END ($HOURS h) ==="
+    printf 'year: %s\nmonth: %s\nday: %s\ntime: 00:00\narea: %s\n' \
+        "${START:0:4}" "${START:5:2}" "${START:8:2}" "$AREA" > "$POOL/era5_input.txt"
+    docker run --rm -v /home/atyagi/ERF:/app/ERF -v ~/.cdsapirc:/root/.cdsapirc:ro \
+        -w /app/ERF/era5_year erf-hindcast bash -lc "
+            cp /opt/erftools/notebooks/era5/WriteICFromERA5Data.py . &&
+            cp -r /opt/erftools/notebooks/gfs/TypicalAtmosphereData . &&
+            mpirun -n 8 python3 WriteICFromERA5Data.py era5_input.txt \
+                --do_forecast=true --forecast_time_hours=$HOURS --interval_hours=3"
+    echo "pool now: $(ls "$POOL"/Output/ERA5Data_3D/*.bin 2>/dev/null | wc -l) 3D / $(ls "$POOL"/Output/ERA5Data_Surface/*.bin 2>/dev/null | wc -l) surf frames"
+    ;;
+*)
+    echo "unknown phase: $PHASE" >&2; exit 2 ;;
+esac
+echo "PHASE $PHASE COMPLETE"

@@ -362,7 +362,10 @@ nudging and the wave physics are likely fighting each other -- the
 first thing to try is moving or widening the band (erf.real_width, or
 shifting the domain so the peaks clear the 30-km zone), not lowering
 cfl. Lower cfl / stronger num_diff / vert_implicit_fac are second-line
-knobs.
+knobs. (Note that finding predates the cfl 0.3 -> 0.2 change; the 34.5
+pin has NOT been retried at 0.2, and the failure it showed -- large |w|
+inside a relaxation band -- is the same family as the Hilary blowup that
+0.2 fixed. Retry before concluding anything about the pin.)
 
 ---
 

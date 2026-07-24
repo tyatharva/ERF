@@ -21,8 +21,16 @@ SEG_SOIL=${5:-}
 
 fail () { echo "FATAL [stage_run]: $*" >&2; exit 1; }
 
-[ -d "$ERA5_OUT/ERA5Data_3D" ]      || fail "$ERA5_OUT/ERA5Data_3D missing -- run the erftools ERA5 step first"
-[ -d "$ERA5_OUT/ERA5Data_Surface" ] || fail "$ERA5_OUT/ERA5Data_Surface missing -- run the erftools ERA5 step first"
+# USE_EXISTING: the caller already populated $RUN/ERA5Data_* (launch_segment.sh
+# symlinks a slice of the flat year pool, because ERF indexes frames
+# positionally and each segment must start at its own frame[0]).
+if [ "$ERA5_OUT" = USE_EXISTING ]; then
+    [ -d "$RUN/ERA5Data_3D" ] && [ -d "$RUN/ERA5Data_Surface" ] \
+        || fail "USE_EXISTING but $RUN/ERA5Data_* not populated"
+else
+    [ -d "$ERA5_OUT/ERA5Data_3D" ]      || fail "$ERA5_OUT/ERA5Data_3D missing -- run the erftools ERA5 step first"
+    [ -d "$ERA5_OUT/ERA5Data_Surface" ] || fail "$ERA5_OUT/ERA5Data_Surface missing -- run the erftools ERA5 step first"
+fi
 [ -f "$CI/channel_islands_terrain.txt" ] || fail "terrain file missing -- run dem_to_erf_terrain.py"
 [ -x /app/ERF/build/Exec/erf_exec ] || fail "erf_exec not built -- run Build/cmake_single_precision_cuda.sh"
 
@@ -43,9 +51,11 @@ cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-sw-g224-2018-12-04.nc  
 cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-lw-g256-2018-12-04.nc  $RUN/
 cp    /app/ERF/Submodules/RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-sw.nc $RUN/
 cp    /app/ERF/Submodules/RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-lw.nc $RUN/
-rm -rf $RUN/ERA5Data_3D $RUN/ERA5Data_Surface
-cp -r $ERA5_OUT/ERA5Data_3D      $RUN/ERA5Data_3D
-cp -r $ERA5_OUT/ERA5Data_Surface $RUN/ERA5Data_Surface
+if [ "$ERA5_OUT" != USE_EXISTING ]; then
+    rm -rf $RUN/ERA5Data_3D $RUN/ERA5Data_Surface
+    cp -r $ERA5_OUT/ERA5Data_3D      $RUN/ERA5Data_3D
+    cp -r $ERA5_OUT/ERA5Data_Surface $RUN/ERA5Data_Surface
+fi
 
 n3=$(ls $RUN/ERA5Data_3D/*.bin 2>/dev/null | wc -l)
 ns=$(ls $RUN/ERA5Data_Surface/*.bin 2>/dev/null | wc -l)
