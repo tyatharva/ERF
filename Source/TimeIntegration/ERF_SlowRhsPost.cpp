@@ -288,22 +288,47 @@ void erf_slow_rhs_post (int level, int finest_level,
         });
 
         // We have projected the velocities stored in S_data but we will use
-        //    the velocities stored in {avg_xmom,avg_ymom,avg_zmom} to update the scalars,
-        //    so we need to copy from S_data (projected) into these
+        //    the fluxes stored in {avg_xmom,avg_ymom,avg_zmom} to update the scalars,
+        //    so we must rebuild them from S_data (projected) EXACTLY as
+        //    AdvectionSrcForRho builds them in the compressible path:
+        //    area-weighted, map-factor-scaled, and with OMEGA (not rho w) in
+        //    the z-slot. A plain copy of the momenta advected scalars with
+        //    rho w while rho itself was advected with Omega -- zero error on
+        //    flat ground but a persistent spurious vertical scalar flux over
+        //    terrain slopes (measured: exponential qv/theta pumping over the
+        //    NE-corner mountains and the Channel Islands, e-fold ~65 s,
+        //    independent of dt and PBL scheme; absent in compressible).
         if (l_anelastic) {
             Box tbx_inc = mfi.nodaltilebox(0);
             Box tby_inc = mfi.nodaltilebox(1);
             Box tbz_inc = mfi.nodaltilebox(2);
 
+            const Array4<const Real>& ax_anel = ax->const_array(mfi);
+            const Array4<const Real>& ay_anel = ay->const_array(mfi);
+            const Array4<const Real>& az_anel = az->const_array(mfi);
+
+            const bool l_terrain_fitted = l_use_terrain;
+            const int klo_dom = domain.smallEnd(2);
+
             ParallelFor(tbx_inc, tby_inc, tbz_inc,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                avg_xmom_arr(i,j,k) = cur_xmom(i,j,k);
+                avg_xmom_arr(i,j,k) = ax_anel(i,j,k) * cur_xmom(i,j,k) / mf_uy(i,j,0);
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                avg_ymom_arr(i,j,k) = cur_ymom(i,j,k);
+                avg_ymom_arr(i,j,k) = ay_anel(i,j,k) * cur_ymom(i,j,k) / mf_vx(i,j,0);
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                avg_zmom_arr(i,j,k) = cur_zmom(i,j,k);
+                Real omega;
+                if (k == klo_dom) {
+                    omega = zero;   // no flux through the terrain face
+                } else if (l_terrain_fitted) {
+                    omega = OmegaFromW(i,j,k,cur_zmom(i,j,k),
+                                       cur_xmom,cur_ymom,
+                                       mf_ux,mf_vy,z_nd,dxInv);
+                } else {
+                    omega = cur_zmom(i,j,k);
+                }
+                avg_zmom_arr(i,j,k) = az_anel(i,j,k) * omega / (mf_mx(i,j,0) * mf_my(i,j,0));
             });
         }
 

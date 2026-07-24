@@ -39,35 +39,41 @@ void TerrainPoisson::usePrecond (bool use_precond_in)
 
 void TerrainPoisson::mask_specified_faces (Array<MultiFab,AMREX_SPACEDIM>& fluxes)
 {
-    // Prescribed-inflow projection: with use_real_bcs the fill sets the
-    // momenta on the outermost face layers (set_width = 1 in
-    // fill_from_realbdy: x-faces i = 0,1 and i = nx-1,nx plus the ring
-    // cells' transverse faces; likewise in y). Any correction applied
-    // there is overwritten at the next fill, re-injecting divergence into
-    // the ring cells every stage -- fatal for anelastic (measured: qv to
-    // 0.8 kg/kg at a ring cell, theta runaway at the lid). Zeroing the
-    // correction flux on those faces (and on the terrain/lid z-faces,
-    // where w must remain 0) makes the projection solve for a correction
-    // consistent with the specified data; ring cells adjust through their
-    // interior-facing and vertical faces.
+    // Prescribed-inflow projection: with use_real_bcs the fill overwrites
+    // the normal momenta ONLY on the true domain-boundary faces (set_width
+    // = 1 in fill_from_realbdy via realbdy_bc_bxs_xy: u at i = 0 and i =
+    // nx, v at j = 0 and j = ny; cell-centered vars and transverse
+    // velocities only in exterior ghost cells). Any correction applied on
+    // those faces is overwritten at the next fill, re-injecting divergence
+    // into the boundary cells every stage -- fatal for anelastic
+    // (measured: qv to 0.8 kg/kg at a boundary cell, theta runaway at the
+    // lid). Zeroing the correction flux on exactly those faces (and on
+    // the terrain/lid z-faces, where w must remain 0) treats the
+    // specified boundary fluxes as fixed data; boundary cells still
+    // adjust through their interior-facing lateral faces and vertical
+    // faces, so no column is over-constrained. (Do NOT mask any interior
+    // face: an earlier version masked the second face layer too, which
+    // trapped each boundary column's integrated horizontal convergence
+    // and pumped rho/theta/qv there -- measured as theta runaway in the
+    // deep dJ-weighted top cells and a qv plume entering the relaxation
+    // zone.)
     const Box& dom = m_geom.Domain();
     const int ilo = dom.smallEnd(0), ihi = dom.bigEnd(0);
     const int jlo = dom.smallEnd(1), jhi = dom.bigEnd(1);
     const int klo = dom.smallEnd(2), khi = dom.bigEnd(2);
-    const int sw  = 1;   // must match set_width in fill_from_realbdy
 
     if (m_use_real_bcs) {
         auto const& fx = fluxes[0].arrays();
         ParallelFor(fluxes[0], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
         {
-            if (i <= ilo+sw || i >= ihi+1-sw || j <= jlo+sw-1 || j >= jhi-sw+1) {
+            if (i <= ilo || i >= ihi+1) {
                 fx[b](i,j,k) = zero;
             }
         });
         auto const& fy = fluxes[1].arrays();
         ParallelFor(fluxes[1], [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
         {
-            if (j <= jlo+sw || j >= jhi+1-sw || i <= ilo+sw-1 || i >= ihi-sw+1) {
+            if (j <= jlo || j >= jhi+1) {
                 fy[b](i,j,k) = zero;
             }
         });
@@ -135,45 +141,12 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
     {
         // Matches the sign convention of terrpoisson_adotx: A phi =
         // -div(flux(phi)) with the adotx area/dJ weighting (proven equal
-        // to the production compute_divergence assembly). Ring cells (all
-        // lateral faces specified/masked) reduce to the vertical-only
-        // operator: ring w carries the column-consistent correction.
+        // to the production compute_divergence assembly).
         y[b](i,j,k) = -( (axa[b](i+1,j,k)*fxc[b](i+1,j,k) - axa[b](i,j,k)*fxc[b](i,j,k)) * dxinv[0]
                         +(aya[b](i,j+1,k)*fyc[b](i,j+1,k) - aya[b](i,j,k)*fyc[b](i,j,k)) * dxinv[1]
                         +(aza[b](i,j,k+1)*fzc[b](i,j,k+1) - aza[b](i,j,k)*fzc[b](i,j,k)) * dxinv[2] )
                       / dJa[b](i,j,k);
     });
-
-    // Ring-column deflation: with all lateral faces masked, each ring
-    // column's operator is vertical-only with capped ends, so each column
-    // contributes its own left-null functional (dJ restricted to that
-    // column). Project the output orthogonal to each.
-    if (m_use_real_bcs) {
-        const Box& domn = m_geom.Domain();
-        const int rilo = domn.smallEnd(0), rihi = domn.bigEnd(0);
-        const int rjlo = domn.smallEnd(1), rjhi = domn.bigEnd(1);
-        const int rklo = domn.smallEnd(2), rkhi = domn.bigEnd(2);
-        for (MFIter mfi(lhs); mfi.isValid(); ++mfi) {
-            Box bx2 = mfi.tilebox();
-            bx2.setRange(2, rklo, 1);
-            const Array4<Real>& yv = lhs.array(mfi);
-            const Array4<Real const>& dJv = m_dJ.const_array(mfi);
-            ParallelFor(bx2, [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
-            {
-                if (i == rilo || i == rihi || j == rjlo || j == rjhi) {
-                    Real s1 = zero, s2 = zero;
-                    for (int kk = rklo; kk <= rkhi; ++kk) {
-                        s1 += yv(i,j,kk) * dJv(i,j,kk);
-                        s2 += dJv(i,j,kk) * dJv(i,j,kk);
-                    }
-                    Real cc = s1 / s2;
-                    for (int kk = rklo; kk <= rkhi; ++kk) {
-                        yv(i,j,kk) -= cc * dJv(i,j,kk);
-                    }
-                }
-            });
-        }
-    }
 
     // Deflate the singular mode: this operator is singular (constants in
     // null(A), dJ spans null(A^T)) and the FFT preconditioner is singular
@@ -184,29 +157,15 @@ void TerrainPoisson::apply (MultiFab& lhs, MultiFab const& rhs)
     // reported 1e-8 vs true 2-44 percent residual). Projecting the output
     // orthogonal to dJ solves P A phi = rhs, equivalent for the compatible
     // rhs (its dJ component is ~1e-17 after the production mean
-    // subtraction) and keeps the Krylov space clean.
-    // Deflation weight: dJ restricted to the projected (non-ring) cells --
-    // with ring identity rows the left-null vector is dJ on the interior
-    // and zero on the ring.
-    if (!m_dJ_int.ok()) {
-        m_dJ_int.define(m_grids, m_dmap, 1, 0);
-        MultiFab::Copy(m_dJ_int, m_dJ, 0, 0, 1, 0);
-        if (m_use_real_bcs) {
-            const Box& domi = m_geom.Domain();
-            const int iilo = domi.smallEnd(0), iihi = domi.bigEnd(0);
-            const int ijlo = domi.smallEnd(1), ijhi = domi.bigEnd(1);
-            auto const& dJi = m_dJ_int.arrays();
-            ParallelFor(m_dJ_int, [=] AMREX_GPU_DEVICE (int b, int i, int j, int k)
-            {
-                if (i == iilo || i == iihi || j == ijlo || j == ijhi) {
-                    dJi[b](i,j,k) = zero;
-                }
-            });
-        }
-        m_dJ_norm2sq = MultiFab::Dot(m_dJ_int, 0, m_dJ_int, 0, 1, 0);
+    // subtraction) and keeps the Krylov space clean. With only the domain
+    // faces masked every interior face is live, so the dJ-weighted sum of
+    // the masked divergence telescopes to zero for any phi: full dJ spans
+    // null(A^T) exactly as in the unmasked operator.
+    if (m_dJ_norm2sq < zero) {
+        m_dJ_norm2sq = MultiFab::Dot(m_dJ, 0, m_dJ, 0, 1, 0);
     }
-    Real ydotdJ = MultiFab::Dot(lhs, 0, m_dJ_int, 0, 1, 0);
-    MultiFab::Saxpy(lhs, -ydotdJ/m_dJ_norm2sq, m_dJ_int, 0, 0, 1, 0);
+    Real ydotdJ = MultiFab::Dot(lhs, 0, m_dJ, 0, 1, 0);
+    MultiFab::Saxpy(lhs, -ydotdJ/m_dJ_norm2sq, m_dJ, 0, 0, 1, 0);
 }
 
 void TerrainPoisson::apply_bcs (MultiFab& phi)

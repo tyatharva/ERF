@@ -7,6 +7,32 @@
 
 using namespace amrex;
 
+// Debug probe: erf.debug_cell = i j k prints rho, rhotheta, rhoQ1, rhoQ2 at
+// that cell at each stage of ERF::Advance (budget attribution for the
+// hindcast qv-pump investigation).
+static void debug_cell_print (const MultiFab& S, const char* tag)
+{
+    static IntVect dbg(std::numeric_limits<int>::lowest(),0,0);
+    static bool parsed = false;
+    if (!parsed) {
+        parsed = true;
+        ParmParse pp("erf");
+        Vector<int> v;
+        if (pp.queryarr("debug_cell", v) && v.size() == 3) { dbg = IntVect(v[0],v[1],v[2]); }
+    }
+    if (dbg[0] == std::numeric_limits<int>::lowest()) { return; }
+    Vector<Real> vals = get_cell_data(S, dbg);
+    if (!vals.empty()) {
+        const Real r = vals[Rho_comp];
+        std::cout << "DBGCELL " << tag
+                  << " rho "  << r
+                  << " th "   << vals[RhoTheta_comp]/r
+                  << " qv "   << ((static_cast<int>(vals.size()) > RhoQ1_comp) ? vals[RhoQ1_comp]/r : Real(0.))
+                  << " qc "   << ((static_cast<int>(vals.size()) > RhoQ2_comp) ? vals[RhoQ2_comp]/r : Real(0.))
+                  << std::endl;
+    }
+}
+
 // Bound the prognostic MYNN TKE like WRF does. The MYNN-EDMF column solver
 // clips its internal qke to <= 150 m2/s2 (2*TKE), and in WRF that clipped
 // qke IS the prognostic state; in this port the dycore-advected RhoKE never
@@ -340,6 +366,8 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
         check_for_negative_theta(S_old);
     }
 
+    debug_cell_print(S_old, "pre_dycore ");
+
     // **************************************************************************************
     // Update the dycore
     // **************************************************************************************
@@ -376,6 +404,8 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
         check_for_negative_theta(S_new);
     }
 
+    debug_cell_print(S_new, "post_dycore");
+
     // **************************************************************************************
     // Update the microphysics (moisture)
     // **************************************************************************************
@@ -389,6 +419,8 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
             check_state_for_nans(S_new);
         }
     }
+
+    debug_cell_print(S_new, "post_micro ");
 
     // **************************************************************************************
     // Update the land surface model
