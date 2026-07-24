@@ -1,8 +1,10 @@
 # ============================================================================
-#  ERF INPUTS -- Channel Islands hindcast
-#  Domain: 512 x 256 km @ 1.3333 km, 48 vertical levels to 20 km
-#  Init:   HindCast from ERA5 (3-hourly). ERF is its own OSSE truth.
-#  Phase 1: test output -- SLM land model, radiation off (fastest first run).
+#  ERF INPUTS -- Channel Islands hindcast  [PRODUCTION, locked 2026-07-24]
+#  Domain: 384 x 192 km @ 3 km (128x64x32), NE pin (34.2, -117.2),
+#  32 stretched levels (dz0 = 25 m, ratio 1.16) to 17,893.69 m.
+#  SP compressible; Morrison + MYNN-EDMF + RRTMGP + MM5 + ERA5 real BCs.
+#  Init: HindCast from ERA5 (3-hourly). ERF is its own OSSE truth.
+#  Measured: full 24-h storm day in ~17.3 min wall on one RTX 4080.
 #
 #  AUDITED against Source/ (this fork). Corrections are marked [CORRECTED].
 # ============================================================================
@@ -134,17 +136,6 @@ erf.grid_stretching_ratio = 1.16
 erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
 
 # ---------------------------------------------------------------------------
-#  VERTICAL GRID  (48 surface-clustered levels; 49 face heights to 20 km)
-#  [CORRECTED] The original tail (17000 17800 18500 19100 19550 19800 19920
-#  19980 20000) had dz *shrinking* from ~1385 m at 15.8 km down to 20 m at the
-#  model top -- inverted stretching. 20-60 m cells at 17-20 km buy nothing
-#  physically (they sit inside the damping layer) and throttle the adaptive dt
-#  through the vertical advective CFL wherever gravity-wave w is nonzero.
-#  Replaced with a uniform ~462 m tail above 15.8 km; the transition sits
-#  entirely inside the top sponge (>15 km), which damps any wave reflection.
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 #  TIME STEPPING  (CFL-adaptive: ERF auto-computes the slow dt each step from
 #  the advective/acoustic CFL. Slightly conservative CFL for downslope jets.
 #  init_shrink eases the first (violent) step; change_max caps dt growth.)
@@ -218,14 +209,11 @@ erf.moisture_model = "Morrison"
 #  LAND SURFACE  (MM5: soil-column heat diffusion, Chen & Dudhia 2001 style.
 #  Compiled into every ERF build -- no build flag, no runtime data files.
 #  Land points only; ocean surface state comes from ERA5 SST via
-#  hindcast_surface_bcs. Note the driver hard-codes soil properties and a
-#  300 K column init (spin-up over the first hours for January land points).
-#  NOAHMP assets are quarantined in wps_noahmp_deferred/ if higher land
-#  fidelity is needed later.)
+#  hindcast_surface_bcs (which must stay true for the MM5 SST wiring).
+#  Note the driver hard-codes soil properties and a 300 K column init
+#  (spin-up over the first hours for January land points). NOAHMP was
+#  dropped permanently 2026-07-24.)
 # ---------------------------------------------------------------------------
-# MM5 requires the SST wiring that only activates with hindcast_surface_bcs;
-# with surface BCs off (above), run without an LSM and a fixed surface temp.
-# Restore MM5 when surface BCs return.
 erf.land_surface_model = "MM5"
 
 # ---------------------------------------------------------------------------

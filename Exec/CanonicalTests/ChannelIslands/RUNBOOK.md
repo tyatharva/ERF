@@ -4,8 +4,8 @@
 384×192 km @ 3 km (128×64×32), NE-anchored (34.2, −117.2), 3-hourly
 plotfiles, 6-hourly checkpoints — see the PRODUCTION section at the end.**
 Morrison microphysics, MYNN-EDMF PBL, RRTMGP radiation, MM5 land surface
-(soil-column model -- compiled in, no external data; NOAHMP assets parked in
-wps_noahmp_deferred/).
+(soil-column model -- compiled in, no external data; NOAHMP permanently
+dropped 2026-07-24, assets removed).
 Sections 0–6 below document the pipeline (written in the 2-km/34.5 era;
 where coordinates differ, the deck and the PRODUCTION section govern).
 
@@ -119,9 +119,9 @@ The CDS key is mounted read-only at runtime; it is never in an image layer.
 
 ## 4. Land surface: nothing to prepare
 
-MM5 needs no static or init files. (The former step 4 — the WPS/real.exe
-chain producing `wrfinput_d01` for NOAHMP — is parked in
-`wps_noahmp_deferred/`; see its README to resurrect it.)
+MM5 needs no static or init files. (NOAHMP and its WPS/real.exe input
+chain were dropped permanently on 2026-07-24 and the assets removed;
+recover from git history before that date if ever needed.)
 
 ## 5. Assemble the run directory
 
