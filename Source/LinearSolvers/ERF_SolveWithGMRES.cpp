@@ -62,7 +62,12 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
 
     gmsolver.setRestartLength(50);
 
-    tp.usePrecond(true);
+    static const int consistency_test = [] {
+        int b = 0; ParmParse pp("erf"); pp.query("poisson_consistency_test", b); return b;
+    }();
+    // Mode 4 (probe b): run WITHOUT the FFT preconditioner to test whether
+    // the GMRES recurrence is honest for the bare operator.
+    tp.usePrecond(consistency_test == 4 ? false : true);
 
     // erf.poisson_consistency_test = 1: synthetic-phi check that the
     // operator (TerrainPoisson::apply) and the applied-correction path
@@ -71,9 +76,6 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
     // divergence left after "converged" anelastic solves says they do not.
     // Writes plotfile "plt_poisson_consistency" with [Aphi, divflux, diff]
     // and aborts.
-    static const int consistency_test = [] {
-        int b = 0; ParmParse pp("erf"); pp.query("poisson_consistency_test", b); return b;
-    }();
     if (consistency_test == 1) {
         const Box& dom = Geom(lev).Domain();
         const auto dlo = lbound(dom);
@@ -120,6 +122,98 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
         Abort("poisson_consistency_test complete -- see plt_poisson_consistency");
     }
 
+    // Mode 3: identify the discrete left-null vector of A (probe c).
+    // For candidate weight vectors w in {1, dJ}: if <A x, w> = 0 for
+    // arbitrary x, then w spans null(A^T) and solvability of A phi = rhs
+    // requires <rhs, w> = 0. The production mean subtraction zeroes the
+    // dJ-weighted sum; if the actual null vector is the constant vector,
+    // the incompatible remainder is the stall floor.
+    if (consistency_test == 3) {
+        const Box& dom3 = Geom(lev).Domain();
+        const auto dlo3 = lbound(dom3);
+        const auto dhi3 = ubound(dom3);
+        const Real Ncells = Real(dom3.numPts());
+        for (int trial = 0; trial < 2; ++trial) {
+            MultiFab phi_t(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+            for (MFIter mfi(phi_t); mfi.isValid(); ++mfi) {
+                const Box& gbx = mfi.growntilebox(1);
+                const Array4<Real>& arr = phi_t.array(mfi);
+                const Real ph = (trial == 0) ? Real(0.0) : Real(1.234);
+                ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    Real X = Real(i-dlo3.x) / Real(dhi3.x-dlo3.x+1);
+                    Real Y = Real(j-dlo3.y) / Real(dhi3.y-dlo3.y+1);
+                    Real Z = Real(k-dlo3.z) / Real(dhi3.z-dlo3.z+1);
+                    arr(i,j,k) = std::sin(Real(2.0)*PI*X + ph) * std::cos(Real(4.0)*PI*Y - ph)
+                               * std::cos(PI*Z + myhalf*ph) * Real(1000.0);
+                });
+            }
+            MultiFab Aphi(rhs.boxArray(), rhs.DistributionMap(), 1, 0);
+            tp.apply(Aphi, phi_t);
+            Real s_std = Aphi.sum();
+            Real s_dJ  = MultiFab::Dot(Aphi, 0, dJ_sub, 0, 1, 0);
+            Real nA    = Aphi.norm2();
+            Real ndJ   = dJ_sub.norm2();
+            Print() << "NULLSPACE trial " << trial
+                    << ": <Ax,1>/(|Ax| sqrtN) = " << s_std/(nA*std::sqrt(Ncells))
+                    << "   <Ax,dJ>/(|Ax| |dJ|) = " << s_dJ/(nA*ndJ) << std::endl;
+        }
+        Real r_std = rhs.sum();
+        Real r_dJ  = MultiFab::Dot(rhs, 0, dJ_sub, 0, 1, 0);
+        Real nr    = rhs.norm2();
+        Print() << "NULLSPACE rhs: <rhs,1>/(|rhs| sqrtN) = " << r_std/(nr*std::sqrt(Ncells))
+                << "   <rhs,dJ>/(|rhs| |dJ|) = " << r_dJ/(nr*dJ_sub.norm2()) << std::endl;
+    }
+
+    // Mode 5: determinism + linearity of the preconditioner (and operator).
+    // GMRES assumes M^-1 is a fixed linear operator; if precond(v) differs
+    // between calls or fails superposition, the recurrence is fiction.
+    if (consistency_test == 5) {
+        MultiFab v1(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        MultiFab v2(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        const Box& dom5 = Geom(lev).Domain();
+        const auto dlo5 = lbound(dom5); const auto dhi5 = ubound(dom5);
+        for (int t = 0; t < 2; ++t) {
+            MultiFab& vv = (t==0) ? v1 : v2;
+            for (MFIter mfi(vv); mfi.isValid(); ++mfi) {
+                const Box& gbx = mfi.growntilebox(1);
+                const Array4<Real>& arr = vv.array(mfi);
+                const Real ph = (t==0) ? Real(0.4) : Real(2.7);
+                ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    Real X = Real(i-dlo5.x)/Real(dhi5.x-dlo5.x+1);
+                    Real Y = Real(j-dlo5.y)/Real(dhi5.y-dlo5.y+1);
+                    Real Z = Real(k-dlo5.z)/Real(dhi5.z-dlo5.z+1);
+                    arr(i,j,k) = std::sin(Real(6.0)*PI*X+ph)*std::sin(Real(2.0)*PI*Y-ph)
+                               * std::cos(Real(3.0)*PI*Z*Z+ph) * Real(100.0);
+                });
+            }
+        }
+        MultiFab o1(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        MultiFab o2(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        MultiFab o3(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        // Determinism: M^-1 v1 twice
+        tp.precond(o1, v1); tp.precond(o2, v1);
+        MultiFab::Subtract(o2, o1, 0, 0, 1, 0);
+        Print() << "PRECOND DETERMINISM: |M v1| L2 = " << o1.norm2()
+                << "  |diff| L2 = " << o2.norm2() << std::endl;
+        // Linearity: M^-1(v1 + 2 v2) vs M^-1 v1 + 2 M^-1 v2
+        MultiFab vsum(rhs.boxArray(), rhs.DistributionMap(), 1, 1);
+        MultiFab::LinComb(vsum, one, v1, 0, Real(2.0), v2, 0, 0, 1, 1);
+        tp.precond(o3, vsum);
+        tp.precond(o2, v2);
+        MultiFab::Saxpy(o1, Real(2.0), o2, 0, 0, 1, 0);     // o1 = Mv1 + 2 Mv2
+        MultiFab::Subtract(o3, o1, 0, 0, 1, 0);
+        Print() << "PRECOND LINEARITY: |M(v1+2v2)| basis L2 = " << o1.norm2()
+                << "  |mismatch| L2 = " << o3.norm2() << std::endl;
+        // Operator determinism for completeness
+        MultiFab a1(rhs.boxArray(), rhs.DistributionMap(), 1, 0);
+        MultiFab a2(rhs.boxArray(), rhs.DistributionMap(), 1, 0);
+        tp.apply(a1, v1); tp.apply(a2, v1);
+        MultiFab::Subtract(a2, a1, 0, 0, 1, 0);
+        Print() << "OPERATOR DETERMINISM: |A v1| L2 = " << a1.norm2()
+                << "  |diff| L2 = " << a2.norm2() << std::endl;
+        Abort("poisson_consistency_test mode 5 complete");
+    }
+
     gmsolver.solve(phi, rhs, reltol, abstol);
 
     // Iterative refinement on the TRUE residual. The GMRES recurrence
@@ -164,6 +258,14 @@ void ERF::solve_with_gmres (int lev, const Box& subdomain, MultiFab& rhs, MultiF
         if (mg_verbose > 0) {
             Print() << "GMRES refinement: " << iref << " passes, true |rhs - A phi| L2 = "
                     << truenorm << " (target " << target << ")" << std::endl;
+        }
+        if (consistency_test == 3 && truenorm > target) {
+            // Alignment of the stalled residual with candidate null vectors
+            const Real Nc = Real(Geom(lev).Domain().numPts());
+            Real c1 = res_r.sum() / (truenorm * std::sqrt(Nc));
+            Real c2 = MultiFab::Dot(res_r, 0, dJ_sub, 0, 1, 0) / (truenorm * dJ_sub.norm2());
+            Print() << "NULLSPACE stalled residual: cos(res,1) = " << c1
+                    << "   cos(res,dJ) = " << c2 << std::endl;
         }
         if (truenorm > Real(100.0) * target) {
             Print() << "WARNING: GMRES refinement stalled: true residual " << truenorm

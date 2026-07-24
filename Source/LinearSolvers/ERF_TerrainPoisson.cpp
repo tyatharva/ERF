@@ -257,6 +257,7 @@ void TerrainPoisson::precond (MultiFab& lhs, MultiFab const& rhs)
         lhs.setVal(0.);
         m_2D_fft_precond->solve(lhs, rhs_tmp, m_stretched_dz_d);
 
+
 #if 0
         AMREX_ASSERT(m_zphys_fft.local_size() <= 1);
         FArrayBox const* zfab = nullptr;

@@ -296,3 +296,38 @@ this A*Minv, or an inconsistent singular system (all-Neumann null space
 vs the dJ-weighted mean subtraction). Consequence in production: the
 un-projected divergence remainder pumps (rho theta) at ~5 K/step near
 the lid until NaN (~step 100).
+
+## 6e. Probes (c) and (b): the defect is inside AMReX GMRES's recurrence
+
+Probe (c) -- null-space compatibility (erf.poisson_consistency_test=3):
+- The discrete left-null vector of the terrain operator is dJ, NOT the
+  constant vector: <A x, dJ> normalized ~ 2e-6..4e-9 for arbitrary x while
+  <A x, 1> ~ 7e-5.
+- The production mean subtraction removes exactly the right component:
+  <rhs, dJ> ~ 1e-17 after subtraction. The system is CONSISTENT.
+- The stalled residual is orthogonal to BOTH candidate null vectors
+  (cosines ~1e-5): the stall is not a compatibility floor. CLEAN.
+
+Probe (b) -- unpreconditioned A/B (erf.poisson_consistency_test=4):
+- WITHOUT the FFT preconditioner, GMRES is HONEST: the recurrence stagnates
+  at ~16 percent relative after 2000 iterations and reports so (true
+  residual matches, 0.045 vs reported 0.038).
+- WITH the preconditioner it reports 1e-8 while the true residual is
+  2-44 percent.
+
+Mode 5 -- preconditioner properties:
+- Deterministic to the bit (|M v - M v| = 0 across calls) and linear to
+  double round-off (relative 3e-16).
+- Amplification is large and legitimate: |M^-1 v| / |v| ~ 1e8 (Poisson
+  inverse of the lowest modes).
+- Rescaling M^-1 by a frozen constant does NOT restore honesty (tried,
+  reverted).
+
+Conclusion: every GMRES precondition (operator linearity/determinism,
+preconditioner linearity/determinism, flux/operator consistency, system
+compatibility, precision) is verified; honesty appears/disappears with the
+preconditioner alone. The false-convergence defect is inside
+amrex::GMRES's recurrence/orthogonalization bookkeeping when paired with
+this legitimate M^-1 (possibly its Gram-Schmidt under the ~1e8 spectral
+spread of A*M^-1). Recommend filing against AMReX with the two one-flag
+reproducers in this fork (poisson_consistency_test=2 vs =4).
