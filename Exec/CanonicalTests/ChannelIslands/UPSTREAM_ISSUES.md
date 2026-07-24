@@ -538,3 +538,40 @@ i.e. **distance 0 cells from the boundary**. Terrain above 200 m is 8.6% of
 the domain but only 0.4% of the d>=20 interior, where the tallest remaining
 peak is 359 m. So every mountain is inside the contaminated zone and
 orographic precipitation cannot be validated in this configuration at all.
+
+### Mechanism (traced 2026-07-24, scoping only -- no fix attempted)
+
+The relaxation specifies an incomplete state. Both the specified zone
+(`ERF_BoundaryConditionsRealbdy.cpp`) and the RHS relaxation
+(`realbdy_compute_interior_ghost_rhs`, `ERF_InteriorGhostCells.cpp`) act on
+exactly four fields:
+
+    cons_read = {0, 1, 0, 0, 1, 0, ...}   // Rho NOT read; RhoTheta, RhoQ1 read
+    is_read: xvel 1, yvel 1, zvel 0       // w NOT read
+    var_map  = {xvel, yvel, cons, cons}
+    comp_map = {0, 0, RhoTheta_comp, RhoQ1_comp}
+
+So u, v, theta and qv are forced toward ERA5 while **rho and w are never
+constrained**. The imposed (rho, u) pair does not satisfy ERF's discrete
+continuity equation -- the horizontal mass-flux divergence carried by the
+imposed winds was never in balance with the local density -- and w is the
+only remaining degree of freedom that can absorb the column imbalance.
+Hence a persistent band updraft field that is present in every regime,
+scales with wind speed rather than with moisture, and at cfl 0.3 ran away
+to the +48.9 m/s dipole that NaN'd the Hilary case.
+
+Difference from the WRF pathway, which shares this relaxation code:
+`ERF_ReadFromWRFBdy.cpp` additionally reads PH (geopotential) and MU (dry
+column mass) and performs an explicit mass coupling at read time
+(`mu = mu_arr + mub_arr`, with PH/PHB) to re-derive boundary column heights
+and re-interpolate U/V/T/QV onto them. The hindcast pathway has no
+analogue: `RealBdyVars` is only {U, V, T, QV}. Whether wrfbdy-driven runs
+are actually clean has NOT been tested here (no wrfinput/wrfbdy available
+since the WPS chain was dropped) -- but the WRF path has a consistency step
+this one entirely lacks.
+
+**The needed data is already present and discarded.** The ERA5 .bin frames
+carry 8 fields [rho, u, v, w, theta, qv, qc, qr];
+`FillForecastStateMultiFabs` interpolates all of them onto the ERF grid;
+`fill_bdy_data_from_hindcast` then copies only u, v, theta, qv into the
+boundary planes. rho and w are computed and thrown away.
