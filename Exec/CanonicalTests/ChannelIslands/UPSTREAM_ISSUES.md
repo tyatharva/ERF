@@ -458,3 +458,83 @@ clean short run is not evidence of stability at the margin.** Require a
 regime to run with zero w-damping events and zero low-temperature warnings,
 not merely without NaNs. (The ChannelIslands production config now uses
 cfl 0.2, which meets that bar on the year's most violent day.)
+
+## 14. Lateral relaxation zone generates spurious updrafts, which precipitate out any moisture advected through it
+
+**This is the most consequential defect found in the hindcast pathway so
+far, and it invalidates precipitation output.** Measured 2026-07-24 on
+three full 24-h runs (2023-08-20 Hilary, 2023-09-09, 2023-01-09) with the
+locked production config.
+
+### The artifact
+
+At t=24 h, fraction of cells with w > 1 m/s, by distance from the lateral
+boundary (cells), and cloud water in the same regions:
+
+| run | band d<10 | mid 10-19 | interior d>=20 | band qc | interior qc |
+|---|---|---|---|---|---|
+| Hilary 08-20 | 11.62% | 1.38% | 0.82%  | 0.105 | 0.077 g/kg |
+| storm 01-09  | 11.55% | 4.26% | 2.63%  | 0.311 | 0.253 g/kg |
+| dry   09-09  |  9.18% | 0.56% | 0.28%  | 0.011 | 0.047 g/kg |
+
+The band carries ~9-12% of cells in updraft in EVERY regime, including the
+dry one -- 4x to 33x the interior fraction. w_rms in the band is 1.9-3.7x
+interior. This is a property of the relaxation zone, not of the weather.
+
+### The consequence
+
+Precipitation is the product of that numerical updraft field and whatever
+moisture is being advected through the boundary, so it appears only when
+both are present:
+
+| run | domain-mean 24-h precip | ERA5 same footprint | ratio | share of all precip falling in outer 10 cells |
+|---|---|---|---|---|
+| Hilary 08-20 | 181.9 mm | 16.4 mm | **11.1x** | **94.5%** |
+| storm 01-09  | 153.8 mm |  5.9 mm | **26.1x** | **87.9%** |
+| dry   09-09  |   7.5 mm |  0.0 mm | n/a       | 21.4% |
+
+The dry case is the control that exonerates the microphysics: same
+Morrison configuration, same spurious updrafts, but no moisture to condense
+-- band rain rate DECAYS to 0.05 mm/h and ERA5 also reports zero. Morrison
+is correctly raining out condensate that a numerical updraft produced.
+
+### It grows with integration time
+
+Band-mean precipitation rate (mm/h) through the Hilary run:
+
+    t (h)     3     6     9    12    15    18    21    24
+    band   1.87  2.29  2.85 10.27 25.32 24.20 33.40 36.25
+    interior 0.25 0.25 0.21  0.19  0.22  0.37  0.67  1.08
+
+Still accelerating at 24 h, and the interior is now rising too. **A
+month-long segment will be far worse than these 24-h tests show.**
+
+### Contamination radius
+
+The excess decays inward but not to zero within the relaxation width.
+Hilary 24-h rain by shell: d 0-4: 668 mm; 5-9: 118; 10-14: 28.1; 15-19:
+17.6; 20-29: 9.6; 30+: 10.6. So `real_width = 10` is NOT a sufficient
+analysis exclusion -- contamination is still 3x at d=10-19. Use d >= 20
+(60 km at 3 km) as the minimum discard, and note that even there the
+January interior runs 7.6x wetter than ERA5 (24.4 vs 3.2 mm).
+
+Corollary: an apparent orographic precipitation signal is largely this
+artifact. Interior corr(rain, terrain) collapses from +0.577 at d>=10 to
++0.105 at d>=20 for Hilary (January retains a real +0.380).
+
+### Same root cause as the stability failures
+
+The Hilary cfl-0.3 blowup was a w dipole reaching +48.9 m/s at (54,1,1..3)
+-- in this same band. Lowering cfl to 0.2 keeps the artifact numerically
+stable; it does not remove it. The unbounded band mass accumulation of
+item 8 is very likely the same defect seen through a different variable.
+`erf.hindcast_blend_band_density` constrains band DENSITY only -- it
+explicitly rescales RhoQ1 to preserve qv, so it does nothing for this.
+
+### Domain-geometry aggravation (this deck specifically)
+
+The highest terrain in the ChannelIslands domain (1,377 m) sits at j=63,
+i.e. **distance 0 cells from the boundary**. Terrain above 200 m is 8.6% of
+the domain but only 0.4% of the d>=20 interior, where the tallest remaining
+peak is 359 m. So every mountain is inside the contaminated zone and
+orographic precipitation cannot be validated in this configuration at all.
