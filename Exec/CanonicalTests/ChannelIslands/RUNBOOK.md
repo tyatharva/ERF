@@ -326,3 +326,23 @@ erf.rad_ncol_chunk=1024 amrex.the_arena_init_size=3000000000):**
 then hits a fast (~12-step) local thermal collapse (nondeterministic
 onset; transient 185-K cold pools recover earlier in the run). DP is
 unaffected. Needs its own investigation before SP anelastic production.
+
+## Pin-move measurement: 34.5 NE pin (2026-07-24)
+
+Terrain + box for the ORIGINAL 34.5/-117.2 pin are ready:
+`channel_islands_terrain_3km_345.txt` (385x193 @ 1 km, max 2906.7 m;
+generated from dem.tif in the ERA5-frame LCC), box
+prob_lo = -195790.23 -93110.31, prob_hi = 188209.77 98889.69
+(NE pin projected into the ERA5 LCC minus 384x192 km; the 34.2 recipe
+reproduces the current deck exactly, verifying the construction).
+
+**Measured (SP compressible, production deck, cfl 0.3): UNSTABLE.**
+Dies at t ~ 4.3 h (step 12,781, rad aborts on an already-NaN state).
+Last healthy snapshot shows w = -32/+21 m/s breaking mountain waves
+directly over the restored San Gabriels (2,900 m) at (114-118, 54-57,
+k~27) -- INSIDE the northern relaxation band (10 cells from yhi). The
+34.2 deck's |w| stays ~2x smaller. The 34.2 pin remains the validated
+production configuration; to pursue 34.5, the knobs to try are lower
+cfl (0.25/0.2), stronger num_diff, or vert_implicit_fac damping, and
+consider whether 2,900-m peaks belong inside the specified/relax zone
+at all (this is why the pin was moved south during development).
