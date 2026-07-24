@@ -154,8 +154,13 @@ private:
     // Conductivity
     amrex::Real m_k_soil = amrex::Real(0.2); // dry soil [W/m K]
 
-    // Theta Dirichlet value at lowest point below surface
+    // Theta Dirichlet value at lowest point below surface AND the
+    // uniform column init (erf.mm5.soil_theta)
     amrex::Real m_theta_dir = amrex::Real(300.0); // [K]
+
+    // Print soil-theta stats at several depths every N advances (0 = off)
+    int m_diag_interval = 0;
+    int m_diag_count = 0;
 
     // Thermal diffusivity
     amrex::Real m_d_soil = m_k_soil / m_cp_soil; // [m^2/s]

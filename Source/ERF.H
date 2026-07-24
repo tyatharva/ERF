@@ -1100,6 +1100,13 @@ private:
     static amrex::Real sub_cfl;
     static amrex::Real init_shrink;
     static amrex::Real change_max;
+    // Hard ceiling on the adaptive dt (erf.max_dt; < 0 disables). The CFL
+    // target alone is NOT a ceiling: on calm days the advective bound lets
+    // dt grow past the explicit vertical-diffusion stability limit
+    // (~dz^2/2K ~ 3-6 s with MYNN K ~ 50-100 in 25-m cells) -- measured
+    // NaN at dt 15.4 s on a calm start with the same config that runs
+    // storm days cleanly at dt ~2.2-2.4 s.
+    static amrex::Real max_dt;
     static amrex::Real dt_max_initial;
     static amrex::Real dt_max;
 

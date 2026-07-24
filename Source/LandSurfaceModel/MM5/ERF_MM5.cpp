@@ -1,4 +1,8 @@
 #include <ERF_MM5.H>
+#include <AMReX_ParmParse.H>
+#include <AMReX_Reduce.H>
+#include <AMReX_ParallelDescriptor.H>
+#include <limits>
 
 using namespace amrex;
 
@@ -11,6 +15,20 @@ MM5::Init (const int& /*lev*/,
 {
     m_dt = dt;
     m_geom = geom;
+
+    // erf.mm5.soil_theta sets BOTH the uniform column init AND the
+    // permanent Dirichlet anchor at the column bottom (the bottom ghost
+    // is set once here and never updated by the diffusion update). The
+    // 300 K default is 12-15 K warm for a SoCal January: with the
+    // 3-m column's fundamental-mode timescale ~4H^2/(pi^2 D) ~ 266 days,
+    // a wrong anchor is a year-long soil heat source, not a spin-up
+    // transient. erf.mm5.diag_interval > 0 prints soil-theta stats at
+    // several depths every N LSM advances (spin-up measurement).
+    {
+        ParmParse pp("erf.mm5");
+        pp.query("soil_theta", m_theta_dir);
+        pp.query("diag_interval", m_diag_interval);
+    }
 
     Box domain = geom.Domain();
     khi_lsm    = domain.smallEnd(2) - 1;
@@ -107,6 +125,43 @@ MM5::ComputeFluxes ()
 void
 MM5::AdvanceMM5 ()
 {
+    // Spin-up diagnostic: soil-theta min/mean/max at several depths.
+    // NOTE ocean columns receive no MOST top flux and sit at the init
+    // value forever -- they dilute the mean; min/max track the land
+    // signal.
+    if (m_diag_interval > 0 && (m_diag_count++ % m_diag_interval == 0)) {
+        MultiFab& th = *(lsm_fab_vars[LsmVar_MM5::theta]);
+        for (int koff : {0, 4, 14, 29}) {
+            const int k = khi_lsm - koff;
+            Real mn = std::numeric_limits<Real>::max();
+            Real mx = std::numeric_limits<Real>::lowest();
+            Real sm = 0.0; long np = 0;
+            for (MFIter mfi(th); mfi.isValid(); ++mfi) {
+                Box b = mfi.validbox(); b.setRange(2, k, 1);
+                if (!b.ok()) continue;
+                auto const& a = th.const_array(mfi);
+                Real bmn, bmx, bsm;
+                {
+                    ReduceOps<ReduceOpMin, ReduceOpMax, ReduceOpSum> rops;
+                    ReduceData<Real, Real, Real> rdata(rops);
+                    rops.eval(b, rdata, [=] AMREX_GPU_DEVICE (int i, int j, int kk) noexcept
+                              -> GpuTuple<Real, Real, Real>
+                    { return {a(i,j,kk), a(i,j,kk), a(i,j,kk)}; });
+                    auto tup = rdata.value(rops);
+                    bmn = get<0>(tup); bmx = get<1>(tup); bsm = get<2>(tup);
+                }
+                mn = std::min(mn, bmn); mx = std::max(mx, bmx);
+                sm += bsm; np += b.numPts();
+            }
+            ParallelDescriptor::ReduceRealMin(mn);
+            ParallelDescriptor::ReduceRealMax(mx);
+            ParallelDescriptor::ReduceRealSum(sm);
+            ParallelDescriptor::ReduceLongSum(np);
+            Print() << "MM5SOIL depth " << (koff + 1) * m_dz_lsm
+                    << " m: min " << mn << " mean " << sm / np
+                    << " max " << mx << std::endl;
+        }
+    }
     // Expose for GPU copy
     Real dt = m_dt;
     Real dzInv = m_lsm_geom.InvCellSize(2);

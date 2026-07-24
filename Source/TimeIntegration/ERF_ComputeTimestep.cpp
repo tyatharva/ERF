@@ -23,6 +23,9 @@ ERF::ComputeDt (int step, double cur_time_d)
     int n_factor = 1;
     for (int lev = 0; lev <= finest_level; ++lev) {
         dt_tmp[lev] = amrex::min(dt_tmp[lev], change_max*dt[lev]);
+        if (max_dt > Real(0.0)) {
+            dt_tmp[lev] = amrex::min(dt_tmp[lev], max_dt);
+        }
         n_factor *= nsubsteps[lev];
         dt_0 = amrex::min(dt_0, n_factor*dt_tmp[lev]);
 

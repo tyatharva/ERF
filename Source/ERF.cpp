@@ -60,6 +60,7 @@ Real ERF::cfl            = Real(0.8);
 Real ERF::sub_cfl        = one;
 Real ERF::init_shrink    = one;
 Real ERF::change_max     = Real(1.1);
+Real ERF::max_dt         = Real(-1.0);   // erf.max_dt: dt ceiling (<0 = none)
 Real ERF::dt_max_initial = Real(2.0e100);
 Real ERF:: dt_max        = Real(1.0e9);
 
@@ -2476,6 +2477,7 @@ ERF::ReadParameters ()
         pp.query("substepping_cfl", sub_cfl);
         pp.query("init_shrink", init_shrink);
         pp.query("change_max", change_max);
+        pp.query("max_dt", max_dt);
         pp.query("dt_max_initial", dt_max_initial);
         pp.query("dt_max", dt_max);
 
