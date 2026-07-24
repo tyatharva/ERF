@@ -503,6 +503,8 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
         const int jmin   = vbx.smallEnd(1);
         const int offset = m_col_offsets[mfi.index()];
         const Array4<const Real>& cons_arr = m_cons_in->const_array(mfi);
+        const Array4<const Real>& bs_arr   = (m_base_state) ? m_base_state->const_array(mfi) :
+                                                              Array4<const Real>{};
         const Array4<const Real>& z_arr    = (m_z_phys) ? m_z_phys->const_array(mfi) :
                                                           Array4<const Real>{};
         const Array4<const Real>& lat_arr  = (m_lat)    ? m_lat->const_array(mfi) :
@@ -541,8 +543,18 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
             // Views at CC
             r_lay_tab(icol,ilay) = r;
 
-            p_lay_tab(icol,ilay) = getPgivenRTh(rt, qv);
-            t_lay_tab(icol,ilay) = getTgivenRandRTh(r, rt, qv);
+            // Anelastic (bs_arr set): the thermodynamic pressure is the
+            // hydrostatic reference p0(z), monotone by construction; the
+            // EOS pressure of the frozen-rho state is not (see
+            // set_base_state).
+            if (bs_arr) {
+                Real p0_c = bs_arr(i,j,k,BaseState::p0_comp);
+                p_lay_tab(icol,ilay) = p0_c;
+                t_lay_tab(icol,ilay) = getTgivenPandTh(p0_c, rt/r, R_d/Cp_d);
+            } else {
+                p_lay_tab(icol,ilay) = getPgivenRTh(rt, qv);
+                t_lay_tab(icol,ilay) = getTgivenRandRTh(r, rt, qv);
+            }
             z_del_tab(icol,ilay) = (z_arr) ? Real(0.25) * ( (z_arr(i  ,j  ,k+1) - z_arr(i  ,j  ,k))
                                                           + (z_arr(i+1,j  ,k+1) - z_arr(i+1,j  ,k))
                                                           + (z_arr(i  ,j+1,k+1) - z_arr(i  ,j+1,k))
@@ -562,8 +574,15 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
             eff_radius_qi_tab(icol,ilay) = (qi>Real(0.)) ? Real(25.0) : Real(0.);
 
             // Buffers on z-faces (nlay+1)
-            p_lev_tab(icol,ilay) = getPgivenRTh(rt_avg, qv_avg);
-            t_lev_tab(icol,ilay) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+            if (bs_arr) {
+                Real p0_f = (dz_k*bs_arr(i,j,k,BaseState::p0_comp)
+                           + dz_km1*bs_arr(i,j,k-1,BaseState::p0_comp)) / (dz_k + dz_km1);
+                p_lev_tab(icol,ilay) = p0_f;
+                t_lev_tab(icol,ilay) = getTgivenPandTh(p0_f, rt_avg/r_avg, R_d/Cp_d);
+            } else {
+                p_lev_tab(icol,ilay) = getPgivenRTh(rt_avg, qv_avg);
+                t_lev_tab(icol,ilay) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+            }
             if (ilay==(nlay-1)) {
                 Real r_hi  = cons_arr(i,j,k+1,Rho_comp);
                 Real rt_hi = cons_arr(i,j,k+1,RhoTheta_comp);
@@ -575,8 +594,15 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
                 r_avg  = (dz_k*r  + dz_kp1*r_hi ) / (dz_k + dz_kp1);
                 rt_avg = (dz_k*rt + dz_kp1*rt_hi) / (dz_k + dz_kp1);
                 qv_avg = (dz_k*qv + dz_kp1*qv_hi) / (dz_k + dz_kp1);
-                p_lev_tab(icol,ilay+1) = getPgivenRTh(rt_avg, qv_avg);
-                t_lev_tab(icol,ilay+1) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+                if (bs_arr) {
+                    Real p0_f = (dz_k*bs_arr(i,j,k,BaseState::p0_comp)
+                               + dz_kp1*bs_arr(i,j,k+1,BaseState::p0_comp)) / (dz_k + dz_kp1);
+                    p_lev_tab(icol,ilay+1) = p0_f;
+                    t_lev_tab(icol,ilay+1) = getTgivenPandTh(p0_f, rt_avg/r_avg, R_d/Cp_d);
+                } else {
+                    p_lev_tab(icol,ilay+1) = getPgivenRTh(rt_avg, qv_avg);
+                    t_lev_tab(icol,ilay+1) = getTgivenRandRTh(r_avg, rt_avg, qv_avg);
+                }
             }
 
             // 1D data structures

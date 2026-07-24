@@ -15,10 +15,11 @@ namespace rrtmgp {
 // rrtmgp-sp-minor-scaling.patch) overflows FLT_MAX in
 // gas_optical_depths_minor and would otherwise silently produce NaN
 // radiative fluxes. Cost: one reduction per radiation call.
-template <typename TauViewT, typename T2dT = TauViewT>
+template <typename TauViewT, typename T2dT = TauViewT, typename T3dT = TauViewT>
 static void validate_finite_tau (const char* which, TauViewT const& tau,
                                  T2dT const* tlay = nullptr,
-                                 T2dT const* play = nullptr)
+                                 T2dT const* play = nullptr,
+                                 T3dT const* colgas = nullptr)
 {
     long nbad = 0;
     Kokkos::parallel_reduce(tau.size(),
@@ -60,6 +61,35 @@ static void validate_finite_tau (const char* which, TauViewT const& tau,
                 KOKKOS_LAMBDA (long i, decltype(pmax)& m) { m = (pl.data()[i] > m) ? pl.data()[i] : m; },
                 Kokkos::Max<decltype(pmax)>(pmax));
             std::cout << "  p_lay range fed to gas optics: [" << pmin << "," << pmax << "]\n";
+        }
+        // Full profile of the first bad column (budget for the SP overflow hunt)
+        if constexpr (T2dT::rank == 2) {
+        if (tlay && play) {
+            auto tl = *tlay; auto pl = *play;
+            const long nlay = tl.extent(1);
+            auto th = Kokkos::create_mirror_view(Kokkos::subview(tl, i0, Kokkos::ALL));
+            auto ph = Kokkos::create_mirror_view(Kokkos::subview(pl, i0, Kokkos::ALL));
+            Kokkos::deep_copy(th, Kokkos::subview(tl, i0, Kokkos::ALL));
+            Kokkos::deep_copy(ph, Kokkos::subview(pl, i0, Kokkos::ALL));
+            std::cout << "  bad col " << i0 << " t_lay:";
+            for (long kk = 0; kk < nlay; ++kk) { std::cout << " " << th(kk); }
+            std::cout << "\n  bad col " << i0 << " p_lay:";
+            for (long kk = 0; kk < nlay; ++kk) { std::cout << " " << ph(kk); }
+            std::cout << "\n";
+        }
+        }
+        if constexpr (T3dT::rank == 3) {
+        if (colgas) {
+            auto cg = *colgas;
+            const long nlay = cg.extent(1), ngas = cg.extent(2);
+            auto ch = Kokkos::create_mirror_view(Kokkos::subview(cg, i0, Kokkos::ALL, Kokkos::ALL));
+            Kokkos::deep_copy(ch, Kokkos::subview(cg, i0, Kokkos::ALL, Kokkos::ALL));
+            for (long g = 0; g < ngas; ++g) {
+                std::cout << "  bad col " << i0 << " col_gas[" << g << "]:";
+                for (long kk = 0; kk < nlay; ++kk) { std::cout << " " << ch(kk,g); }
+                std::cout << "\n";
+            }
+        }
         }
         amrex::Abort(std::string("RRTMGP gas optics produced ") +
                      std::to_string(nbad) + " non-finite optical depths (" + which +
@@ -1077,7 +1107,7 @@ rrtmgp_lw (const int ncol,
     real3d_k col_gas("col_gas", ncol, nlay, k_dist.get_ngas()+1);
     k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                       t_sfc, gas_concs, col_gas, optics, lw_sources, view_t<RealT**>(), t_lev_limited);
-    validate_finite_tau("longwave", optics.tau, &t_lay_limited, &p_lay);
+    validate_finite_tau("longwave", optics.tau, &t_lay_limited, &p_lay, &col_gas);
     if (extra_clnsky_diag) {
         k_dist.gas_optics(ncol, nlay, top_at_1, p_lay, p_lev, t_lay_limited,
                           t_sfc, gas_concs, col_gas, optics_no_aerosols, lw_sources, view_t<RealT**>(), t_lev_limited);

@@ -272,6 +272,17 @@ private:
     // Pointer to the terrain heights
     amrex::MultiFab* m_z_phys = nullptr;
 
+public:
+    // Anelastic: radiation must see the hydrostatic reference pressure
+    // p0(z) rather than EOS(rho, rhotheta). With rho frozen at rho0 the
+    // EOS pressure inherits any base-state artifact (measured: flat-
+    // extrapolated ERA5 rho below its lowest level gives dp ~ 0 across
+    // the first layers -- exactly 0 in single precision -> col_gas = 0
+    // -> non-finite RRTMGP optical depths).
+    void set_base_state (const amrex::MultiFab* base_state) override { m_base_state = base_state; }
+private:
+    const amrex::MultiFab* m_base_state = nullptr;
+
     // Pointer to latitude and longitude
     amrex::MultiFab* m_lat = nullptr;
     amrex::MultiFab* m_lon = nullptr;

@@ -15,6 +15,10 @@ class IRadiation
 public:
     virtual ~IRadiation () = default;
 
+    // Anelastic: give the model the base state so thermodynamic pressure
+    // can be taken as the hydrostatic reference p0(z) (no-op by default).
+    virtual void set_base_state (const amrex::MultiFab* /*base_state*/) {}
+
     virtual
     void
     Init (const amrex::Geometry& geom,

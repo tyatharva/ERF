@@ -33,6 +33,13 @@ void ERF::advance_radiation (int lev,
             if (varIdx >= 0) { lsm_output_ptrs[i] = lsm.Get_Data_Ptr(lev,varIdx); }
         }
 
+        // Anelastic: radiation thermodynamics must use the hydrostatic
+        // reference pressure p0(z), not EOS of the frozen-density state
+        // (see Radiation::set_base_state).
+        if (solverChoice.anelastic[lev]) {
+            rad[lev]->set_base_state(&base_state[lev]);
+        }
+
         // Enter radiation class driver
         amrex::Real time_for_rad = t_old[lev] + start_time;
         rad[lev]->Run(lev, istep[lev], time_for_rad, dt_advance,
