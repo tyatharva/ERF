@@ -1,10 +1,13 @@
-# ChannelIslands 24-h hindcast — RUNBOOK
+# ChannelIslands hindcast — RUNBOOK
 
-Single-precision ERF, 384×192×48 @ 1 km, NE-anchored (34.5, −117.2).
+**PRODUCTION CONFIG (locked 2026-07-24): single-precision compressible,
+384×192 km @ 3 km (128×64×32), NE-anchored (34.2, −117.2), 3-hourly
+plotfiles, 6-hourly checkpoints — see the PRODUCTION section at the end.**
 Morrison microphysics, MYNN-EDMF PBL, RRTMGP radiation, MM5 land surface
 (soil-column model -- compiled in, no external data; NOAHMP assets parked in
 wps_noahmp_deferred/).
-2023-01-09 00:00 UTC → 2023-01-10 00:00 UTC, hourly plotfiles.
+Sections 0–6 below document the pipeline (written in the 2-km/34.5 era;
+where coordinates differ, the deck and the PRODUCTION section govern).
 
 All commands run in the `erf-hindcast` container with the repo bind-mounted:
 
@@ -107,6 +110,12 @@ The CDS key is mounted read-only at runtime; it is never in an image layer.
   open-ocean strip the DEM doesn't cover). ERF prints
   `Reading terrain file: ...` + `Expecting 1154 values of x, 578 ... 667012 ...`
   at startup — if the file were missing ERF aborts (no silent flat fallback).
+* **PRODUCTION (34.2 pin, 3 km):** the deck uses
+  `channel_islands_terrain_3km.txt` (385×193 @ 1 km, max 1972 m), generated
+  with the same command but `--target-dx 1000` and the 34.2 box
+  `--xlo -195131.04 --xhi 188868.96 --ylo -126372.41 --yhi 65627.59`.
+  (`channel_islands_terrain_3km_345.txt` is the measured-unstable 34.5
+  variant — see the pin-move section.)
 
 ## 4. Land surface: nothing to prepare
 
