@@ -410,3 +410,51 @@ precision is unaffected (full 24 h clean); single precision with
 radiation_model=None is also clean past the crash point (1300 steps).
 So the defect lives in the SP radiation-anelastic interplay at the
 clamped cold top.
+
+## 11. `Stop datetime` startup line prints `start_datetime` (cosmetic, but misleading)
+
+`Source/ERF.cpp` (in the datetime parse block) does:
+
+```cpp
+stop_time = static_cast<amrex::Real>(getEpochTime(stop_datetime, datetime_format));
+Print() << "Stop  datetime : " << start_datetime << std::endl;   // <-- start_
+```
+
+`stop_time` itself is correct, so runs stop at the right instant; only the
+log line is wrong. It matters because the startup banner is the natural
+place to verify a segment's window before committing GPU-days to it, and
+it currently reports every segment as zero-length. Fixed in this fork
+(one identifier). Found 2026-07-24 while staging the Aug/Sep stress tests,
+where the banner claimed `Stop datetime : 2023-08-20 00:00:00` for a run
+that correctly integrated to 2023-08-21.
+
+## 12. Hindcast band-density blending is not momentum-consistent
+
+`hindcast_blend_band_density` (this fork, `ERF_Advance.cpp`) nudges `Rho`
+in the lateral relaxation band toward the interpolated forecast and
+rescales `RhoTheta` and `RhoQ1` so that theta and qv are preserved. It does
+NOT rescale the momenta, which live in separate MultiFabs (`rU_old` etc.)
+and have already been filled by the time the blend runs. Velocity is
+therefore perturbed implicitly by `rho_old/rho_new` each step. The
+perturbation is small (alpha <= 0.021/step) and the blend is required --
+without it a calm segment inflates domain mass +33%/day -- but the
+inconsistency is real and should be closed by scaling the momenta with the
+same factor if this is ever upstreamed.
+
+Not the cause of the August blowup investigated on 2026-07-24: that case
+fails at cfl 0.3 with the blend OFF as well (nondeterministically -- see
+item 13). Lowering cfl to 0.2 makes it stable with the blend on.
+
+## 13. Run-to-run nondeterminism decides stability at marginal cfl (SP + GPU)
+
+Two byte-identical invocations of the same single-precision GPU build, same
+inputs, same `amrex.max_gpu_streams=1`, on the 2023-08-20 (Hurricane
+Hilary) case at `erf.cfl=0.3`: one completed 250 steps clean, the other
+produced whole-array non-finite RRTMGP optical depths at step 240. GPU
+reduction/atomic ordering is not bit-reproducible, and in single precision
+that is enough to decide whether a marginally-stable configuration
+survives. Practical consequence for anyone tuning this fork: **a single
+clean short run is not evidence of stability at the margin.** Require a
+regime to run with zero w-damping events and zero low-temperature warnings,
+not merely without NaNs. (The ChannelIslands production config now uses
+cfl 0.2, which meets that bar on the year's most violent day.)

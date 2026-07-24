@@ -344,7 +344,7 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
     // Tests on the reasonableness of the solution before the dycore
     // **************************************************************************************
     // Test for NaNs after dycore
-    if (check_for_nans > 1) {
+    if (check_for_nans > 1 && nan_check_step(istep[0])) {
         if (verbose > 1) {
             amrex::Print() << "Testing old state and vels for NaNs before dycore" << std::endl;
         }
@@ -381,7 +381,7 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
     // Tests on the reasonableness of the solution after the dycore
     // **************************************************************************************
     // Test for NaNs after dycore
-    if (check_for_nans > 0) {
+    if (check_for_nans > 0 && nan_check_step(istep[0])) {
         if (verbose > 1) {
             amrex::Print() << "Testing new state and vels for NaNs after dycore" << std::endl;
         }
@@ -414,7 +414,7 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
         advance_microphysics(lev, S_new, dt_lev, iteration, time);
 
         // Test for NaNs after microphysics
-        if (check_for_nans > 0) {
+        if (check_for_nans > 0 && nan_check_step(istep[0])) {
             amrex::Print() << "Testing new state for NaNs after advance_microphysics" << std::endl;
             check_state_for_nans(S_new);
         }

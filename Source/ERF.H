@@ -1269,6 +1269,17 @@ private:
 
     static int check_for_nans;
 
+    // Number of coarse steps between NaN/Inf state checks when check_for_nans
+    // is on.  Checking every step costs ~45 device reductions/step (~x1.4 wall
+    // on the ChannelIslands hindcast); an interval of ~100 makes the tripwire
+    // cheap enough to leave armed for year-long production runs.
+    static int check_for_nans_int;
+
+    // True if the NaN/Inf tripwire should fire on coarse step `step`.
+    static bool nan_check_step (int step) {
+        return (check_for_nans_int <= 1) || (step % check_for_nans_int == 0);
+    }
+
     // Diagnostic output interval
     static int sum_interval;
     static int pert_interval;

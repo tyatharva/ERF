@@ -75,6 +75,9 @@ bool ERF::use_fft       = false;
 // 1: check state/vels after dycore, state after microphysics, and state/vels at end of full time step
 // 2: add checks of state before dycore and of slow rhs
 int ERF::check_for_nans = 0;
+// ... and how often?  1 = every step (the debugging setting); larger values
+// amortize the reduction cost so the tripwire can stay on in production.
+int ERF::check_for_nans_int = 1;
 
 // Frequency of diagnostic output
 int  ERF::sum_interval  = -1;
@@ -670,7 +673,7 @@ ERF::Evolve ()
         Print() << "Coarse STEP " << step+1 << " ends." << " TIME = " << cur_time
                 << " DT = " << dt[0]  << std::endl;
 
-        if (check_for_nans > 0) {
+        if (check_for_nans > 0 && nan_check_step(step)) {
             amrex::Print() << "Testing new state and vels for NaNs at end of timestep" << std::endl;
             for (int lev = 0; lev <= finest_level; ++lev) {
                 check_state_for_nans(vars_new[lev][IntVars::cons]);
@@ -2465,6 +2468,7 @@ ERF::ReadParameters ()
 
         // Check for NaNs?
         pp.query("check_for_nans", check_for_nans);
+        pp.query("check_for_nans_int", check_for_nans_int);
 
         // Frequency of diagnostic output
         pp.query("sum_interval", sum_interval);
@@ -2879,7 +2883,7 @@ ERF::ReadParameters ()
             }
 
             stop_time = static_cast<amrex::Real>(getEpochTime(stop_datetime, datetime_format));
-            Print() << "Stop  datetime : " << start_datetime << std::endl;
+            Print() << "Stop  datetime : " << stop_datetime << std::endl;
 
         } else {
 

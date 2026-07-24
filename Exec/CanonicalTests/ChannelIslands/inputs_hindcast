@@ -53,6 +53,23 @@ erf.hindcast_lateral_sponge_strength = 0.0
 erf.hindcast_lateral_sponge_length   = 30000      # m (still used for asserts)
 erf.use_real_bcs = true
 erf.real_width   = 10                             # cells (30 km at 3 km)
+                                                  # [MEASURED] Adequate. A
+# boundary-shell analysis of a clean 3-day run shows w-variance 2-4x the
+# interior value in the outer ~10 cells, decaying smoothly and monotonically
+# inward with NO standing peak at the relaxation-zone edge, and the theta
+# gradient across that edge is the same magnitude as interior gradients. The
+# 8x jump from 0.25-deg ERA5 to 3 km is absorbed without reflection; no nest
+# and no wider band are needed. (Analysis caveat: the outer ~10 cells are
+# forcing-dominated -- exclude them from science diagnostics.)
+# [SEGMENT CONFIG 2026-07-24] Blend the ERA5 density into the relaxation band.
+# The real-BC fill sets momentum/theta/moisture in the band but leaves density
+# unconstrained, so in a calm regime with weak through-flow the domain mass
+# inflates without bound: a 2023-01-01 segment ran "clean" at +33% mass/day
+# with surface pressure reaching 150 kPa by hour 63. The Jan-9 storm day hid
+# this entirely (-0.26%/day) because vigorous through-flow ventilated the
+# domain. With the blend on, the same calm segment holds -0.6%/24 h and
+# p_max steady at ~99.9 kPa. Required for every segment.
+erf.hindcast_blend_band_density = true
 
 # Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
 erf.hindcast_zhi_sponge_damping  = true
@@ -141,7 +158,23 @@ erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
 #  init_shrink eases the first (violent) step; change_max caps dt growth.)
 # ---------------------------------------------------------------------------
 erf.substepping_type = "Implicit"
-erf.cfl              = 0.3        # slow-step CFL target (auto dt).
+erf.cfl              = 0.2        # slow-step CFL target (auto dt).
+# [LOWERED 0.3 -> 0.2, 2026-07-24] Set by the most violent day in the target
+# year, Hurricane Hilary (2023-08-20). At cfl 0.3 that case blows up ~9 model
+# minutes in: a grid-scale w dipole (+48.9 / -29.5 m/s) in the lowest three
+# cells of the ylo relaxation band drives RhoTheta to NaN (min temp -220 K),
+# w-CFL 2.87 in the 18.5-m surface-compressed cells. The dt estimate never
+# sees it because the CFL formula does not anticipate the vertical velocity
+# the IC adjustment generates. It is also MARGINAL rather than cleanly
+# reproducible: at cfl 0.3 with the blend off, two byte-identical invocations
+# gave 250 clean steps and a step-240 blowup respectively (GPU reduction
+# order is not bit-reproducible, and in SP that is enough to decide the
+# outcome). cfl 0.25 still dies at ~9 min; 0.20 clears the whole transient
+# with ZERO w-damping events and ZERO low-temperature warnings.
+# Cost is confined to active days: quiet days are capped by erf.max_dt (2.5 s)
+# and are unaffected by the cfl change; only convectively active days take the
+# extra steps. See RUNBOOK "STRESS TESTS" for the measured dt distributions.
+                                  # MEASURED (superseded, kept for history):
                                   # MEASURED with real BCs + moist physics:
                                   # resolved convective pulses (w to +-20 m/s
                                   # in 18.5-m surface-compressed cells) NaN a
@@ -153,6 +186,14 @@ erf.cfl              = 0.3        # slow-step CFL target (auto dt).
 erf.substepping_cfl  = 1.0        # acoustic substep CFL target
 erf.init_shrink      = 0.1        # first step at 10% to survive IC adjustment
 erf.change_max       = 1.1        # dt may grow at most 10% per step
+# [SEGMENT CONFIG 2026-07-24] Absolute dt ceiling. change_max is a RATE limit
+# only, so on a calm start (weak winds, no convective forcing) the CFL-adaptive
+# dt ramps unbounded: a 2023-01-01 segment reached dt = 15.4 s and NaN'd at
+# t ~ 3.1 h. Nothing in the CFL estimate sees the acoustic/microphysics
+# stiffness that actually breaks first. 2.5 s is just above the dt the storm
+# regimes self-select, so it is inert on active days and only binds on calm
+# ones. Do not raise it without re-running a calm-start segment.
+erf.max_dt           = 2.5
 erf.w_damping        = true
 erf.w_damping_const  = 0.3
 
@@ -177,8 +218,22 @@ erf.dycore_horiz_adv_type    = "WENOZ5"
 erf.dycore_vert_adv_type     = "WENOZ5"
 erf.dryscal_horiz_adv_type   = "WENOZ5"
 erf.dryscal_vert_adv_type    = "WENOZ5"
-erf.moistscal_horiz_adv_type = "WENOZ5"
-erf.moistscal_vert_adv_type  = "WENOZ5"
+# [SEGMENT CONFIG 2026-07-24] Moist scalars on Upwind_3rd, NOT WENOZ5.
+# Measured on a calm 2023-01-01 start: WENOZ5 on the moist scalars drives the
+# Morrison number-concentration components (RhoQ8) negative at sharp cloud
+# edges and they NaN within ~16 steps of a frame transition. Upwind_3rd is
+# monotone enough to survive; 37,798 steps clean afterwards.
+# DO NOT copy this to dryscal: Upwind_3rd on the dry scalars produces a
+# density NaN at step 1 in the domain corners (separate, unfixed fork bug --
+# see UPSTREAM_ISSUES.md).
+erf.moistscal_horiz_adv_type = "Upwind_3rd"
+erf.moistscal_vert_adv_type  = "Upwind_3rd"
+# [SEGMENT CONFIG 2026-07-24] Do not advect the MYNN TKE field. With it on,
+# RhoKE goes Inf in the xhi lateral relaxation band ~380 s after the first
+# boundary-frame transition (measured at cell (126,56,6)): the advected TKE
+# has no consistent boundary value to relax toward. MYNN still evolves TKE
+# locally through its own source/sink terms.
+erf.advect_tke = false
 
 # ---------------------------------------------------------------------------
 #  TURBULENCE / PBL
@@ -212,29 +267,50 @@ erf.variable_coriolis = true
 erf.moisture_model = "Morrison"
 
 # ---------------------------------------------------------------------------
-#  LAND SURFACE  (MM5: soil-column heat diffusion, Chen & Dudhia 2001 style.
-#  Compiled into every ERF build -- no build flag, no runtime data files.
-#  Land points only; ocean surface state comes from ERA5 SST via
-#  hindcast_surface_bcs (which must stay true for the MM5 SST wiring).
-#  Note the driver hard-codes soil properties and a 300 K column init
-#  (spin-up over the first hours for January land points). NOAHMP was
-#  dropped permanently 2026-07-24.)
+#  LAND SURFACE  --  MM5 IS INERT IN THIS CONFIGURATION.  [MEASURED 2026-07-24]
+#
+#  This is not a caveat, it is the operative fact. SurfaceLayer only couples to
+#  an LSM when the LSM exports >= 4 flux fields
+#  (AMREX_ALWAYS_ASSERT(n_valid_lsm_flux == 0 || n_valid_lsm_flux >= 4));
+#  MM5 exports 1, so the coupling pointers are null and NOTHING flows in
+#  either direction. Verified directly: the soil column is bit-identical at
+#  every depth (0.1/0.5/1.5/3 m) after 3 simulated days.
+#
+#  Therefore, over land:
+#    * the surface temperature is EXACTLY erf.mm5.soil_theta, a constant,
+#    * that constant is what MOST uses for the surface-layer fluxes,
+#    * that constant is what RRTMGP uses as the radiating skin temperature,
+#    * there is no diurnal cycle and no soil spin-up (nothing to spin up).
+#  Ocean surface state is unaffected -- it comes from ERA5 SST through
+#  hindcast_surface_bcs (which must stay true).
+#
+#  This makes soil_theta the single most important land knob in the deck, and
+#  it MUST be set per segment to that month's domain land-mean ERA5 SKIN
+#  temperature (skt) -- not the 300 K driver default, and not deep-soil stl4.
+#  2023 land-mean skt by month (K):
+#    Jan 283.2  Feb 283.2  Mar 284.4  Apr 289.2  May 291.5  Jun 293.9
+#    Jul 300.1  Aug 298.9  Sep 296.1  Oct 293.9  Nov 288.9  Dec 286.5
+#  The hard-coded 300 K default is right for July and ~17 K too warm in
+#  January. Segments are fresh-init and run in parallel, so each one simply
+#  carries its own value -- see RUNBOOK.md "PER-SEGMENT SOIL ANCHOR".
+#  (NOAHMP, the only radiatively-live LSM in this fork, was dropped
+#  permanently 2026-07-24.)
 # ---------------------------------------------------------------------------
 erf.land_surface_model = "MM5"
+erf.mm5.soil_theta     = 283.2    # K -- 2023-01 land-mean skt. SET PER SEGMENT.
 
 # ---------------------------------------------------------------------------
 #  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.
 #  rad_freq_in_steps: radiation every N dycore steps -- see benchmark notes.)
 # ---------------------------------------------------------------------------
 erf.radiation_model        = "RRTMGP"
-# Radiative surface temperature [RE-AUDITED 2026-07-24]: with
-# zlo=surface_layer active, radiation takes the LIVE per-column skin
-# temperature from the surface layer (MM5-updated diurnal cycle over land,
-# ERA5 SST over ocean) -- verified in Radiation::mf_to_kokkos_buffers.
-# rad_t_sfc is only the fallback for columns with neither and is inert in
-# this config. (The rad->LSM direct branch requests "t_sfc" while MM5
-# exports "theta", so it never fires -- harmless, same skin state arrives
-# via t_surf.)
+# Radiative surface temperature [CORRECTED 2026-07-24]: with zlo=surface_layer
+# active, radiation takes the per-column skin temperature from the surface
+# layer -- verified in Radiation::mf_to_kokkos_buffers. Over OCEAN that is the
+# live ERA5 SST. Over LAND it is the constant erf.mm5.soil_theta, because MM5
+# is inert (see the LAND SURFACE section above): there is no diurnal skin-
+# temperature cycle over land in this configuration. rad_t_sfc below is only
+# the fallback for columns with neither source and never fires here.
 # Surface ALBEDO [ADDED 2026-07-24]: per-column, time-varying from the
 # ERA5 forecast-albedo field carried as field 6 of the surface frames
 # (erftools_fal_patch.py; MODIS climatological annual cycle + model
@@ -274,6 +350,16 @@ amr.blocking_factor = 16
 erf.sum_interval = 100            # integral diagnostics every 100 steps
                                   # (per-step was the dev-era health monitor;
                                   # ~100k-step production runs don't need it)
+# [PRODUCTION TRIPWIRE 2026-07-24] NaN/Inf check ARMED, but sampled.
+# check_state_for_nans tests NaN *and* Inf (SP overflow shows up as Inf one
+# step before it becomes NaN) and aborts with the component and the first 20
+# offending cell indices. Every-step checking costs ~45 device reductions per
+# step -- measured ~x1.4 wall (37 ms/step vs 27) -- which is fine for
+# debugging and not for a year. At interval 100 (~3.7 min of model time at
+# dt 2.24 s) the cost is ~0.4% of wall and a blowup is still caught long
+# before it can fill months of plotfiles with NaNs.
+erf.check_for_nans     = 1
+erf.check_for_nans_int = 100
 erf.v = 1
 amr.v = 1
 amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging

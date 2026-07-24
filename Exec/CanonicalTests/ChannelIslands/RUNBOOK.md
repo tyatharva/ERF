@@ -3,9 +3,12 @@
 **PRODUCTION CONFIG (locked 2026-07-24): single-precision compressible,
 384×192 km @ 3 km (128×64×32), NE-anchored (34.2, −117.2), hourly
 plotfiles, 6-hourly checkpoints — see the PRODUCTION section at the end.**
-Morrison microphysics, MYNN-EDMF PBL, RRTMGP radiation, MM5 land surface
-(soil-column model -- compiled in, no external data; NOAHMP permanently
-dropped 2026-07-24, assets removed).
+Morrison microphysics, MYNN-EDMF PBL, RRTMGP radiation, and MM5 nominally
+selected as the land surface model -- but **MM5 is INERT: land surface
+temperature is exactly the constant `erf.mm5.soil_theta`, which must be set
+per segment to that month's mean ERA5 skin temperature.** Read "MM5 IS
+INERT" below before interpreting any land field. (NOAHMP permanently
+dropped 2026-07-24, assets removed.)
 Sections 0–6 below document the pipeline (written in the 2-km/34.5 era;
 where coordinates differ, the deck and the PRODUCTION section govern).
 
@@ -119,8 +122,10 @@ The CDS key is mounted read-only at runtime; it is never in an image layer.
 
 ## 4. Land surface: nothing to prepare
 
-MM5 needs no static or init files. (NOAHMP and its WPS/real.exe input
-chain were dropped permanently on 2026-07-24 and the assets removed;
+MM5 needs no static or init files -- and does no work either: it is inert
+(see "MM5 IS INERT" below). The only land-surface input that matters is the
+per-segment `erf.mm5.soil_theta` constant. (NOAHMP and its WPS/real.exe
+input chain were dropped permanently on 2026-07-24 and the assets removed;
 recover from git history before that date if ever needed.)
 
 ## 5. Assemble the run directory
@@ -418,14 +423,19 @@ bind-mount as in section 1 (`git config --global --add safe.directory "*"`
 first -- the kokkos AlwaysCheckGit probe fails on dubious ownership
 otherwise).
 
-## Radiative surface state (audited 2026-07-24)
+## Radiative surface state (audited 2026-07-24; CORRECTED same day)
 
-Radiation does NOT use a constant surface temperature in the production
-config: with zlo=surface_layer, t_sfc per column is the live surface-layer
-skin temperature (MM5 diurnal cycle over land, ERA5 SST over ocean);
-erf.rad_t_sfc=288 is an inert fallback. The rad->LSM direct input requests
-"t_sfc" while MM5 exports "theta" -- that branch never fires, harmlessly
-(the same skin state arrives via t_surf).
+With zlo=surface_layer, radiation takes t_sfc per column from the surface
+layer (verified in Radiation::mf_to_kokkos_buffers), and erf.rad_t_sfc=288
+is an inert fallback. What that per-column value actually is:
+
+- **over ocean:** the live, time-varying ERA5 SST. Correct.
+- **over land:** the CONSTANT `erf.mm5.soil_theta`. There is no diurnal
+  cycle. MM5 is inert -- see "MM5 IS INERT" below.
+
+An earlier revision of this section claimed a "live MM5 diurnal cycle over
+land". That was wrong and is retracted: land skin temperature is a single
+number for the whole segment.
 
 **Surface albedo (FIXED 2026-07-24): per-column, time-varying from ERA5
 forecast albedo.** The surface frames carry fal as field 6
@@ -475,93 +485,171 @@ re-downloaded, short/corrupt batches are deleted and re-fetched. The
 surface variable list includes forecast_albedo and must stay in sync
 with erftools_fal_patch.py.
 
-## Month-segment date recipe (the concrete procedure; audit item #4)
+## Month-segment launch recipe (FRESH-INIT PARALLEL SEGMENTS -- the only supported mode)
 
-The year runs as 12 restart-chained segments. THE RULE THAT MATTERS:
-**start_datetime stays FIXED at the year start for every segment** --
-checkpoint times are seconds-since-start_datetime, and ERF indexes ERA5
-frames positionally from t=0, so changing it breaks both. Only
-stop_datetime advances. The frames directory ACCUMULATES (frame[0] must
-always be the year-start frame; the preflight enforces this).
+**Each month is an INDEPENDENT fresh-init run**: its own run directory,
+its own start/stop datetimes, its own ERA5 frames, its own
+erf.mm5.soil_theta anchor. **Do NOT restart-chain segments**: the LSM
+state is checkpointed (with the anchor ghost), so a restarted segment
+silently keeps the PREVIOUS month's soil and the soil_theta knob is
+inert; the boundary-plane startup cost also grows with chained frame
+series. Restarts are for CRASH RECOVERY WITHIN a segment only (same
+directory, erf.restart=chk<last> -- soil then correctly restores that
+segment's own state).
 
-    Segment 1:  start_datetime = "2023-01-01 00:00:00"
-                stop_datetime  = "2023-02-01 00:00:00"
-                launch:  erf_exec inputs_hindcast
-    Segment N:  edit ONLY stop_datetime -> first instant of month N+1
-                launch:  erf_exec inputs_hindcast erf.restart=chk<last>
-    (final segment: stop_datetime = "2024-01-01 00:00:00")
+Per segment N (month M):
 
-Per segment, before launching: batch-download + process ONLY the new
-month in a per-month work dir (era5_run_YYYYMM), then copy its .bin
-frames into era5_run/Output/ERA5Data_{3D,Surface}/ and re-run
-stage_run.sh (the preflight then re-verifies coverage through the new
-stop_datetime, frame[0] alignment, and 6-field surface frames).
+    1. Batch-download + process month M (+ spin-up lead days before it,
+       + the first frame of month M+1) in its own work dir; the frames
+       for the segment MUST start exactly at the segment's
+       start_datetime (positional indexing; the preflight enforces it).
+    2. Segment deck: start_datetime = month start MINUS the spin-up
+       lead (see the measured spin-up section); stop_datetime = first
+       instant of month M+1. max_step = -1.
+    3. Launch with erf.mm5.soil_theta=<month M value from the SKT table
+       below> plus the stable-segment-config flags.
+    4. In post, DISCARD the spin-up lead; analysis uses month M proper.
 
-Audit items #7/#8 under this workflow, stated honestly:
-- #8 (erftools processing is non-resumable and linear): ELIMINATED --
-  each segment processes only its own month's gribs (~500 files, the
-  measured 3-5 min scale), because processing globs whatever gribs sit
-  in the work dir.
-- #7 (startup reads ALL boundary frames): NOT eliminated -- the 3D
-  real-BC plane build reads every frame from the year start at each
-  (re)start, so segment-N startup grows through the year (worst ~2,921
-  frames in December; estimated 10-30 min + ~1.2 GB pinned host
-  memory). Bounded and payable, but it prices every crash-restart too.
-  MEASURE on segment 1 and revise this note with the real number.
+Segments are independent, so they parallelize freely ACROSS MACHINES/GPUs
+-- but **one segment per GPU**. Two ERF processes do not fit on a 16 GB
+card: RRTMGP's per-call working set makes the second process fail a 136.7
+MiB Kokkos allocation mid-run (measured on an RTX 4080; both stress tests
+died this way on the first attempt). Sequence segments on a single GPU.
+Startup cost per segment is a month's frames (~250), not the year's.
 
-## LAND SURFACE TEMPERATURE IS NOT A TRUSTWORTHY FIELD (audit item #3)
+## MM5 IS INERT. LAND TEMPERATURE IS A CONSTANT YOU SET. (audit item #3)
 
-Read this before using land skin/soil temperature from the OSSE output.
+State this plainly, because every earlier version of this section
+understated it:
 
-ERF's MM5 land model is a bare soil-diffusion column (125 lines): its
-only coupling is the MOST sensible-heat flux at the top. It has NO
-radiation input slot and NO surface energy balance -- this is
-STRUCTURAL, not unwired plumbing (the radiation->LSM outputs
-sw_flux_dn/cos_zenith_angle/... are consumed only by Noah-MP, which was
-dropped with its geog-data dependency; ERF's SLM is the same bare
-column, so there is no intermediate option in this fork). Consequences
-over land:
-- no direct solar heating of the ground by day, no LW cooling at night:
-  the land diurnal cycle is structurally damped;
-- no seasonal soil memory; the soil column initializes at a HARDCODED
-  uniform 300 K (not even a runtime parameter) -> warm-soil spin-up
-  bias for a January start;
-- interaction with the albedo work: radiation now sees correct land
-  reflectance (ERA5 fal), but the absorbed shortwave heats only the
-  ATMOSPHERE's surface layer via MOST -- the ground itself never
-  receives it.
-Ocean (75% of the domain) is unaffected: SST is prescribed from ERA5.
-Land-driven flows (sea breeze strength, nocturnal drainage, inland
-convective triggering) inherit a damped-diurnal bias of unquantified
-size. Cheap partial fixes if ever needed: make the 300 K init a
-runtime parameter (~5 lines; a January-appropriate constant kills most
-of the spin-up bias), or init the column from ERA5
-soil_temperature_level_1..4 (available upstream; needs a new surface
-field through the pipeline, ~a day, same shape as the fal work).
-Neither gives day-to-day radiative driving -- that requires Noah-MP.
+**The MM5 land surface model does nothing in this configuration.** It is
+not "damped", not "simplified", not "partially coupled". It is switched
+off in effect, and the land surface temperature is EXACTLY the constant
+`erf.mm5.soil_theta` for the entire segment.
 
-## Per-segment soil anchor (audit #3 follow-up; measured 2026-07-24)
+Mechanism (measured, not inferred). SurfaceLayer only wires itself to an
+LSM when that LSM exports at least four flux fields:
 
-erf.mm5.soil_theta sets both the soil-column init and the permanent 3-m
-Dirichlet anchor. Because segments (re)initialize the column, set it PER
-SEGMENT to that month's mean deep-soil temperature -- this converts the
-year-long warm-soil bias (hardcoded 300 K) into a near-correct anchor at
-zero cost. Use ERA5 monthly-mean stl4 (the 100-289 cm layer, matching
-the 3-m anchor depth), fetched for this domain's land points
-(scratch script: CDS reanalysis-era5-single-levels-monthly-means,
-variable soil_temperature_level_4 + land_sea_mask, area
-34.2,-121.2,32.8,-117.2). MEASURED land means for 2023:
+    AMREX_ALWAYS_ASSERT(n_valid_lsm_flux == 0 || n_valid_lsm_flux >= 4);
 
-    Jan 289.6  Feb 287.5  Mar 286.2  Apr 286.2  May 287.9  Jun 289.6
-    Jul 292.0  Aug 294.9  Sep 296.1  Oct 295.7  Nov 294.5  Dec 292.3
+MM5 exports one. The count is therefore 0-or-1, the coupling pointers stay
+null, and NOTHING passes in either direction -- no flux down into the soil,
+no soil temperature back up. Verified directly with the MM5SOIL diagnostic
+(`erf.mm5.diag_interval`): the soil column is bit-identical at all four
+diagnostic depths (0.1 / 0.5 / 1.5 / 3 m) after three simulated days.
 
-Launch each segment with erf.mm5.soil_theta=<month value>. NOTE the LSM
-state IS checkpointed (with ghosts): on a RESTART-chained segment the
-restored soil (including the previous anchor ghost) wins and the knob is
-inert; in the parallel fresh-init month workflow it takes effect
-directly. For other years fetch the year's own monthly means
-(climatology fallback: the table above; interannual stl4 spread here is
-small).
+What that means in practice:
+
+- Land surface temperature = `erf.mm5.soil_theta`, constant in time and
+  uniform across all land points.
+- That constant is what MOST uses to compute land surface-layer fluxes.
+- That constant is what RRTMGP uses as the land radiating temperature.
+- There is NO land diurnal cycle at all: not damped, absent.
+- There is NO soil spin-up, because nothing evolves. Do not budget time
+  for one; the 266-day relaxation timescale estimated earlier is moot.
+- Absorbed shortwave (now with correct ERA5 albedo) heats the ATMOSPHERE
+  via MOST only; the ground never receives it.
+
+Ocean -- 75% of this domain -- is unaffected: SST comes from ERA5 and is
+live and time-varying. Land-driven flows (sea breeze strength, nocturnal
+drainage, inland convective triggering) carry a no-diurnal-cycle bias of
+unquantified size. **Do not use land skin or soil temperature from the
+output as a physical field.** It is a boundary condition you chose.
+
+The only way to get real land radiative driving in this fork is Noah-MP,
+dropped permanently 2026-07-24 with its geog-data dependency. ERF's other
+LSM (SLM) is the same bare column and exports the same single flux, so
+there is no intermediate option.
+
+## Per-segment soil anchor -- USE MONTHLY-MEAN SKIN TEMPERATURE (skt)
+
+Because land temperature IS `erf.mm5.soil_theta`, this is the single most
+consequential land setting in the deck, and it must be right per segment.
+
+Set it to that month's domain land-mean ERA5 **skin temperature (skt)**.
+Not the hardcoded 300 K default. Not deep-soil stl4.
+
+Why skt and not stl4: an inert MM5 means the knob is not initializing a
+soil column that will evolve toward radiative equilibrium -- it is directly
+prescribing the radiating/flux-exchanging surface. The physical quantity
+that plays that role in ERA5 is skt. stl4 (100-289 cm) is the right depth
+to anchor a *working* soil column and the wrong quantity to impose as a
+surface temperature; it lags the surface by months (in this domain stl4
+peaks in September while skt peaks in July) and would systematically
+mis-time the seasonal cycle.
+
+MEASURED 2023 domain land-mean skt (K) -- use these:
+
+    Jan 283.2  Feb 283.2  Mar 284.4  Apr 289.2  May 291.5  Jun 293.9
+    Jul 300.1  Aug 298.9  Sep 296.1  Oct 293.9  Nov 288.9  Dec 286.5
+
+The hardcoded 300 K default happens to be right for July and is ~17 K too
+warm in January. Fetch with CDS reanalysis-era5-single-levels-monthly-means,
+variables skin_temperature + land_sea_mask, area 34.2,-121.2,32.8,-117.2,
+masking to land points. For other years fetch that year's own means; the
+table above is an acceptable climatology fallback.
+
+    (Superseded stl4 table, kept only so nobody re-derives it and thinks it
+    is the recommendation: Jan 289.6 Feb 287.5 Mar 286.2 Apr 286.2 May 287.9
+    Jun 289.6 Jul 292.0 Aug 294.9 Sep 296.1 Oct 295.7 Nov 294.5 Dec 292.3.
+    DO NOT USE.)
+
+The LSM state IS checkpointed (with ghosts), so on a RESTART-chained
+segment the restored soil wins and this knob is silently inert. The
+production workflow is fresh-init parallel segments precisely so the knob
+takes effect -- see the launch recipe above.
+
+## FINAL SEGMENT CONFIG (locked 2026-07-24)
+
+Every segment carries all of these. They are each traceable to a measured
+failure; do not drop one because a particular month runs without it.
+
+    erf.cfl                       = 0.2       # set by Hurricane Hilary
+    erf.max_dt                    = 2.5       # set by a calm January start
+    erf.moistscal_horiz_adv_type  = Upwind_3rd
+    erf.moistscal_vert_adv_type   = Upwind_3rd
+    erf.advect_tke                = false
+    erf.hindcast_blend_band_density = true
+    erf.mm5.soil_theta            = <month skt from the table below>
+    erf.check_for_nans            = 1
+    erf.check_for_nans_int        = 100
+    max_step                      = -1
+
+The two dt controls do different jobs and BOTH are needed: `max_dt` binds on
+quiet days (where the CFL estimate would let dt run to ~15 s), `cfl` binds on
+active days. Because quiet days are capped by `max_dt` anyway, lowering cfl
+from 0.3 to 0.2 costs wall time only on convectively active days.
+
+## Stress tests: the year's extreme regimes (2026-07-24)
+
+Jan 9, the only day validated during bring-up, is mid-pack for this domain.
+A survey of all 2023 ERA5 (4x daily, whole domain) picked out the real
+extremes, and the config above was validated against the worst two:
+
+| Case | Date | Why | Result |
+|---|---|---|---|
+| Hurricane Hilary | 2023-08-20 | TCWV 66 mm, 2.5x the Jan-9 storm | see below |
+| Max CAPE | 2023-09-09 | 1404 J/kg, TCWV 44 mm | see below |
+| Windstorms | 2023-02-15, 02-22 | surface winds 18 m/s | not run |
+
+**What Hilary broke.** At the bring-up cfl of 0.3 the Hilary case dies ~9
+model minutes in: a grid-scale vertical dipole (w = +48.9 / -29.5 m/s) in the
+lowest three cells of the ylo relaxation band at (54,1,1..3), w-CFL 2.87 in
+the 18.5-m surface-compressed cells, driving RhoTheta to NaN via a -220 K
+temperature. The dt estimate never anticipates it. cfl 0.25 still dies at the
+same point; cfl 0.20 clears the whole transient with zero w-damping events
+and zero low-temperature warnings.
+
+**It is marginal, not cleanly reproducible.** At cfl 0.3 with the density
+blend off, two byte-identical invocations gave 250 clean steps and a step-240
+blowup respectively (UPSTREAM_ISSUES #13). When probing stability at the
+margin in this SP GPU build, the acceptance bar is **zero w-damping and zero
+low-temperature warnings**, not merely "no NaN in one run".
+
+**One segment per GPU.** Both stress tests initially died from a failed
+136.7 MiB Kokkos allocation because two ERF processes shared a 16 GB RTX
+4080 (one process resident set: ~7.4 GB, plus RRTMGP's per-call working
+set). Parallelize segments across GPUs, never within one.
 
 ## Calm-start stability findings (segment probes, 2026-01-01 start)
 
