@@ -342,7 +342,69 @@ Last healthy snapshot shows w = -32/+21 m/s breaking mountain waves
 directly over the restored San Gabriels (2,900 m) at (114-118, 54-57,
 k~27) -- INSIDE the northern relaxation band (10 cells from yhi). The
 34.2 deck's |w| stays ~2x smaller. The 34.2 pin remains the validated
-production configuration; to pursue 34.5, the knobs to try are lower
-cfl (0.25/0.2), stronger num_diff, or vert_implicit_fac damping, and
-consider whether 2,900-m peaks belong inside the specified/relax zone
-at all (this is why the pin was moved south during development).
+production configuration. If anyone revisits 34.5: the breaking waves
+sit over peaks INSIDE the northern relaxation band, so the boundary
+nudging and the wave physics are likely fighting each other -- the
+first thing to try is moving or widening the band (erf.real_width, or
+shifting the domain so the peaks clear the 30-km zone), not lowering
+cfl. Lower cfl / stronger num_diff / vert_implicit_fac are second-line
+knobs.
+
+---
+
+## PRODUCTION: the 1-year run (locked config, measured 2026-07-24)
+
+**Configuration decision (measured basis):** 34.2 NE pin + SP compressible.
+Both dycores cost the same wall (17.3 vs 17.4 min/day); SP compressible has
+the longest validated record. 34.5 rejected (see pin-move section). The deck
+in this directory IS the production deck: 3-hourly plotfiles, 6-hourly
+checkpoints.
+
+**Cost and storage per simulated year (RTX 4080, one GPU):**
+- Wall: ~4.4 days (17.3 min/day x 365).
+- Plotfiles: 3-hourly = 2,920 files x ~23 MB ~ 67 GB.
+- Checkpoints: 6-hourly, 36 MB each = 1,460 x 36 MB ~ 53 GB if all kept.
+  Keep a rolling tail (e.g. last 8) plus monthly keepers; a cleanup cron of
+  `ls -d chk* | head -n -8 | xargs rm -rf` between segments is sufficient.
+
+**ERA5 inputs for a year:** rerun the erftools step (RUNBOOK section 2) with
+the year's dates; frames are 3-hourly. Mind CDS request limits -- chunk the
+download by month. The .bin frames are interpolated to the grid at runtime,
+so grid changes never require re-downloading GRIBs (only re-running the
+erftools conversion if the AREA changes; the area covers both pins).
+
+**Launch (production):**
+
+    docker run --rm --gpus all -v ~/ERF:/app/ERF -w /app/ERF/run_hindcast \
+        erf-hindcast bash -c '/app/ERF/build/Exec/erf_exec inputs_hindcast \
+        amrex.max_gpu_streams=1 > run_prod.log 2>&1'
+
+start_datetime / stop_datetime in the deck govern the segment; run in
+month-long segments (stop_datetime at month end, restart into the next
+month) so failures cost at most a month's tail and logs stay manageable.
+
+**Checkpoint/restart (VERIFIED end to end, not assumed):**
+
+    # restart from the latest checkpoint after a crash:
+    .../erf_exec inputs_hindcast erf.restart=chk<NNNNN> amrex.max_gpu_streams=1
+
+Measured verification (400-step A/B with chk at step 200, production deck):
+restart loads in 0.04 s, rebuilds the boundary planes from the .bin frames,
+and runs to completion with no NaNs and physical fields. Fidelity: the
+restarted run differs from the uninterrupted one by up to ~5 K theta /
+4 m/s u locally after 200 steps, which is ~16x the SP run-to-run
+nondeterminism floor (theta 0.31 K max over 400 steps, measured A-vs-A').
+So a restart is a RECOVERY, not a bitwise continuation: it splices a
+slightly different realization (radiation is recomputed on the restart
+step's cadence; same class of change as switching GPUs). For OSSE-truth
+statistics this is benign; do not expect trajectory-level reproducibility
+across a crash boundary.
+
+**Dockerfile:** the image recipe in this directory is the production
+environment (erf-env + geo stack + erftools + eccodes shim). Rebuild with
+`docker build -t erf-hindcast -f Dockerfile .`; the RRTMGP SP patch is
+applied via apply_rrtmgp_patch.sh (hash-gated; the runtime guard aborts
+with instructions if it is missing). Build both trees inside the image
+bind-mount as in section 1 (`git config --global --add safe.directory "*"`
+first -- the kokkos AlwaysCheckGit probe fails on dubious ownership
+otherwise).
