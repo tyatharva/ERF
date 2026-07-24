@@ -1,7 +1,7 @@
 # ChannelIslands hindcast — RUNBOOK
 
 **PRODUCTION CONFIG (locked 2026-07-24): single-precision compressible,
-384×192 km @ 3 km (128×64×32), NE-anchored (34.2, −117.2), 3-hourly
+384×192 km @ 3 km (128×64×32), NE-anchored (34.2, −117.2), hourly
 plotfiles, 6-hourly checkpoints — see the PRODUCTION section at the end.**
 Morrison microphysics, MYNN-EDMF PBL, RRTMGP radiation, MM5 land surface
 (soil-column model -- compiled in, no external data; NOAHMP permanently
@@ -366,12 +366,12 @@ knobs.
 **Configuration decision (measured basis):** 34.2 NE pin + SP compressible.
 Both dycores cost the same wall (17.3 vs 17.4 min/day); SP compressible has
 the longest validated record. 34.5 rejected (see pin-move section). The deck
-in this directory IS the production deck: 3-hourly plotfiles, 6-hourly
+in this directory IS the production deck: hourly plotfiles, 6-hourly
 checkpoints.
 
 **Cost and storage per simulated year (RTX 4080, one GPU):**
 - Wall: ~4.4 days (17.3 min/day x 365).
-- Plotfiles: 3-hourly = 2,920 files x ~23 MB ~ 67 GB.
+- Plotfiles: hourly = 8,760 files x ~23 MB ~ 200 GB.
 - Checkpoints: 6-hourly, 36 MB each = 1,460 x 36 MB ~ 53 GB if all kept.
   Keep a rolling tail (e.g. last 8) plus monthly keepers; a cleanup cron of
   `ls -d chk* | head -n -8 | xargs rm -rf` between segments is sufficient.

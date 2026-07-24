@@ -302,9 +302,9 @@ amr.check_per  = 21600.0           # checkpoint every 21600 s (6 h)
 # ---------------------------------------------------------------------------
 erf.plotfile_type = amrex
 erf.plot_file_1   = plt
-erf.plot_per_1    = 10800.0        # 3-hourly (production: ~2,920 files/yr,
-                                   # ~23 MB each ~ 67 GB/yr; measured I/O cost
-                                   # 7.5 ms/file = negligible)
+erf.plot_per_1    = 3600.0         # hourly (production: ~8,760 files/yr,
+                                   # ~23 MB each ~ 200 GB/yr; measured I/O
+                                   # cost 7.5 ms/file = negligible)
 erf.plot_vars_1   = density rhotheta x_velocity y_velocity z_velocity \
                     pressure temp theta pres_hse z_phys qv qc qrain \
                     qgraup qsnow vorticity_x vorticity_y vorticity_z rain_accum
