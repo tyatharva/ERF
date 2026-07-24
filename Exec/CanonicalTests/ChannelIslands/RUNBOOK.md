@@ -444,3 +444,33 @@ seasonal samples land mean 0.178-0.194 / ocean 0.061 on the raw grid;
 for 5-field frames: erf.rad_alb_land (default 0.17) over land via the
 ERA5 mask. Remaining simplifications: uniform emissivity 0.98; one
 broadband albedo fills all four SW (dir/dif x vis/nir) slots.
+
+## Year-scale ERA5 acquisition: batched downloader (validated 2026-07-24)
+
+erftools issues ONE CDS request PER TIMESTEP -- fine for a day, fatal for
+a year (5,840 queued requests). `era5_batch_download.py` (this dir) fixes
+the request pattern while keeping the whole validated processing stack:
+
+    cd ~/ERF/era5_run
+    cp ../Exec/CanonicalTests/ChannelIslands/era5_batch_download.py .
+    python3 era5_batch_download.py --start 2023-01-01 --end 2024-01-01
+    # then run WriteICFromERA5Data.py exactly as in section 2 -- its own
+    # downloader sees every per-timestep file already present and skips
+    # straight to processing.
+
+It downloads 16-day batch requests (one per stream per chunk) and splits
+them into the exact era5_{3d,surf}_YYYYMMDD_HHMM.grib files erftools
+expects. MEASURED: a full-month 3-hourly request (110,112 fields) is
+REJECTED by CDS ("cost limits exceeded"); 16 days (56,832 fields) is
+accepted -- 75 MB, 47 min including queue. Year extrapolation: ~24 3D +
+~24 surface requests, overnight hands-off. Split output verified
+BIT-IDENTICAL to per-timestep downloads (444/444 pl fields and 7/7
+surface fields, max abs diff 0.0). Forecast-stream surface variables
+are bucketed by GRIB validity time (init-time bucketing scrambles
+fluxes/zust -- the built-in uniformity check catches it).
+
+Resumable by design: re-run after any failure -- complete chunks are
+skipped via their per-timestep files, valid batch gribs are not
+re-downloaded, short/corrupt batches are deleted and re-fetched. The
+surface variable list includes forecast_albedo and must stay in sync
+with erftools_fal_patch.py.
