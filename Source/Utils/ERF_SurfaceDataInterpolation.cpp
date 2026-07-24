@@ -27,6 +27,7 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     }
     Vector<Real> xvec_h, yvec_h, zvec_h;
     Vector<Real> sst_h, q_star_h, t_star_h, u_star_h, ls_mask_h;
+    Vector<Real> alb_h, junk_h;   // field 5 = forecast albedo (fal patch); junk guards unknown extras
 
     int nx, ny, nz, ndata;
     float value;
@@ -78,6 +79,13 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
             data_h = &u_star_h;
         } else if(idx==4) {
             data_h = &ls_mask_h;
+        } else if(idx==5) {
+            data_h = &alb_h;
+        } else {
+            // Unknown extra fields must not fall through into the last
+            // named vector (that silently corrupts it) -- park them.
+            junk_h.clear();
+            data_h = &junk_h;
         }
         for(int k=0; k<nz; k++) {
             for(int j=0; j<ny; j++) {
@@ -99,8 +107,17 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, ls_mask_h.begin(), ls_mask_h.end(), ls_mask_d.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, sst_h.begin(), sst_h.end(), sst_d.begin());
 
+    // Forecast albedo (field 5, fal patch): absent in pre-patch 5-field
+    // frames -- signal that with an empty device vector.
+    const bool have_alb = (static_cast<int>(alb_h.size()) == nx*ny*nz);
+    amrex::Gpu::DeviceVector<Real> alb_d(have_alb ? nx*ny*nz : 0);
+    if (have_alb) {
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, alb_h.begin(), alb_h.end(), alb_d.begin());
+    }
+
     Real* ls_mask_d_ptr = ls_mask_d.data();
     Real* sst_d_ptr   = sst_d.data();
+    Real* alb_d_ptr   = have_alb ? alb_d.data() : nullptr;
 
     // Use the GpuArray accessors: ProbLo()/CellSize() return host pointers,
     // which are invalid when captured into a device lambda (CUDA error 700).
@@ -140,6 +157,22 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
 
             surf_arr(i, j, k, 0) = std::min(tmp_ls_mask, amrex::Real(1.0));
             surf_arr(i, j, k, 1) = tmp_sst;
+
+            // comp 2 = surface albedo (fal); -1 marks "not in this file"
+            // so downstream wiring can fall back to constants.
+            if (alb_d_ptr) {
+                Real tmp_alb;
+                bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
+                                          dxvec, dyvec,
+                                          nx, ny,
+                                          x, y,
+                                          alb_d_ptr, tmp_alb);
+                // Clamp to a physical range (bilinear blending across the
+                // coastline and GRIB packing can nick the edges).
+                surf_arr(i, j, k, 2) = amrex::min(amrex::max(tmp_alb, Real(0.03)), Real(0.95));
+            } else {
+                surf_arr(i, j, k, 2) = Real(-1.0);
+            }
         });
     }
 
@@ -251,6 +284,23 @@ ERF::SurfaceDataInterpolation(const int lev,
 
             // comp 0 = land-sea mask (1 = land), comp 1 = SST
             MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, surf_mf.nGrowVect());
+
+            // comp 2 = surface albedo (ERA5 fal). Register only when the
+            // frames carry it (comp 2 >= 0); radiation falls back to its
+            // land/sea constants otherwise. Refresh contents at every read
+            // like SST (radiation keeps the raw pointer).
+            if (surf_mf.max(2) >= zero) {
+                if (alb_lev[lev].empty() || !alb_lev[lev][0]) {
+                    alb_lev[lev].resize(1);
+                    alb_lev[lev][0] = std::make_unique<MultiFab>(
+                        surf_mf.boxArray(), surf_mf.DistributionMap(), 1,
+                        surf_mf.nGrowVect());
+                    Print() << "Hindcast surface frames provide albedo: "
+                            << "per-column field registered for radiation (min/max "
+                            << surf_mf.min(2) << " / " << surf_mf.max(2) << ")" << std::endl;
+                }
+                MultiFab::Copy(*alb_lev[lev][0], surf_mf, 2, 0, 1, surf_mf.nGrowVect());
+            }
 
             // Sanitize: ERA5 SST carries ~9999 fill values over land, and the
             // bilinear interpolation blends them into coastal sea cells (values

@@ -34,6 +34,8 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
 RUN git clone --depth 1 https://github.com/erf-model/erftools.git /opt/erftools
 COPY erftools_eccodes_compat.py /opt/erftools_eccodes_compat.py
 RUN python3 /opt/erftools_eccodes_compat.py /opt/erftools
+COPY erftools_fal_patch.py /opt/erftools_fal_patch.py
+RUN python3 /opt/erftools_fal_patch.py /opt/erftools
 ENV ERFTOOLS_HOME=/opt/erftools PYTHONPATH=/opt/erftools
 RUN python3 -c "import erftools.preprocessing; print('erftools import OK')"
 

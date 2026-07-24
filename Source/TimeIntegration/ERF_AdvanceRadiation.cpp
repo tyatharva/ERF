@@ -40,6 +40,12 @@ void ERF::advance_radiation (int lev,
             rad[lev]->set_base_state(&base_state[lev]);
         }
 
+        // Per-column surface albedo from the hindcast surface frames
+        // (ERA5 fal), when the frames carry it.
+        if (!alb_lev[lev].empty() && alb_lev[lev][0]) {
+            rad[lev]->set_albedo(alb_lev[lev][0].get());
+        }
+
         // Enter radiation class driver
         amrex::Real time_for_rad = t_old[lev] + start_time;
         rad[lev]->Run(lev, istep[lev], time_for_rad, dt_advance,

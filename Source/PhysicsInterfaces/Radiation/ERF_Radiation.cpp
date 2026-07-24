@@ -36,6 +36,7 @@ Radiation::Radiation (const int& lev,
 
     // Must specify a surface temp (LSM can overwrite)
     pp.get("rad_t_sfc", m_rad_t_sfc);
+    pp.query("rad_alb_land", m_rad_alb_land);
 
     // Radiation timestep, as a number of atm steps
     pp.query("rad_freq_in_steps", m_rad_freq_in_steps);
@@ -656,6 +657,11 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
                                                                   Array4<const Real> {};
                 const Array4<const Real>& lsm_in_arr = (lsm_input_ptrs[ivar]) ? lsm_input_ptrs[ivar]->const_array(mfi) :
                                                                                 Array4<const Real> {};
+                // Per-column surface albedo (ivar 2..5 are the four SW
+                // albedo slots); land/sea constants are the fallback.
+                const Array4<const Real>& alb_arr = (m_albedo) ? m_albedo->const_array(mfi) :
+                                                                 Array4<const Real> {};
+                const Real alb_land = m_rad_alb_land;
                 ParallelFor(sbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     // map [i,j,k] 0-based to [icol, ilay] 0-based
@@ -675,6 +681,14 @@ Radiation::mf_to_kokkos_buffers (iMultiFab* lmask,
                     // We have a SurfLayer (enforce consistency with temperature)
                     else if (tsurf_arr && (ivar==0)) {
                         rrtmgp_to_fill(icol) = tsurf_arr(i,j,k);
+                    }
+                    // Per-column albedo field (ERA5 fal) for the SW slots
+                    else if (alb_arr && (ivar>=2)) {
+                        rrtmgp_to_fill(icol) = alb_arr(i,j,k);
+                    }
+                    // Land/sea fallback for the SW albedo slots
+                    else if (ivar>=2) {
+                        rrtmgp_to_fill(icol) = is_land ? alb_land : rrtmgp_default_val;
                     }
                     // Use the default value
                     else {

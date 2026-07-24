@@ -19,6 +19,10 @@ public:
     // can be taken as the hydrostatic reference p0(z) (no-op by default).
     virtual void set_base_state (const amrex::MultiFab* /*base_state*/) {}
 
+    // Per-column surface albedo (e.g. ERA5 forecast albedo from the
+    // hindcast surface frames); no-op by default.
+    virtual void set_albedo (const amrex::MultiFab* /*albedo*/) {}
+
     virtual
     void
     Init (const amrex::Geometry& geom,

@@ -427,10 +427,20 @@ erf.rad_t_sfc=288 is an inert fallback. The rad->LSM direct input requests
 "t_sfc" while MM5 exports "theta" -- that branch never fires, harmlessly
 (the same skin state arrives via t_surf).
 
-**Known radiative fidelity limit (the real one): uniform surface albedo
-0.06 and emissivity 0.98 everywhere.** 0.06 is ocean-like; land chaparral
-is ~0.15-0.2, so shortwave absorbed over land runs systematically high
-(~10-15% of incident SW over the ~25% land fraction). If land-surface
-energy fidelity ever matters for the application, wire a land/sea albedo
-through the lsm_input path (the plumbing exists; MM5 would need to export
-matching varnames).
+**Surface albedo (FIXED 2026-07-24): per-column, time-varying from ERA5
+forecast albedo.** The surface frames carry fal as field 6
+(erftools_fal_patch.py adds it to BOTH CDS download functions -- the
+--do_forecast pipeline calls Download_ERA5_ForecastSurfaceData, which
+has its own variable list; regenerate frames after patching, since
+cached surface GRIBs predate the field). ERF reads it as comp 2 of the
+surface state, registers alb_lev, and radiation fills the four SW
+albedo slots per column (startup line: "Hindcast surface frames provide
+albedo ..."). Content is the MODIS-derived climatological annual cycle
++ model snow: it captures the land-sea step (dominant), spatial spread
+(in-domain land 0.08-0.16), snow events, and the (modest, ~0.02)
+seasonal cycle -- NOT actual-year vegetation anomalies. Validated:
+seasonal samples land mean 0.178-0.194 / ocean 0.061 on the raw grid;
+24-h production run clean (38,557 steps, 16.8 min, no NaNs). Fallback
+for 5-field frames: erf.rad_alb_land (default 0.17) over land via the
+ERA5 mask. Remaining simplifications: uniform emissivity 0.98; one
+broadband albedo fills all four SW (dir/dif x vis/nir) slots.

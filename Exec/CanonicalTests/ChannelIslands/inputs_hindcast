@@ -228,9 +228,15 @@ erf.radiation_model        = "RRTMGP"
 # rad_t_sfc is only the fallback for columns with neither and is inert in
 # this config. (The rad->LSM direct branch requests "t_sfc" while MM5
 # exports "theta", so it never fires -- harmless, same skin state arrives
-# via t_surf.) The REAL radiative surface limitation is the uniform
-# albedo (0.06, ocean-like -- land chaparral is ~0.15-0.2, so SW absorbed
-# over land runs high) and uniform emissivity 0.98.
+# via t_surf.)
+# Surface ALBEDO [ADDED 2026-07-24]: per-column, time-varying from the
+# ERA5 forecast-albedo field carried as field 6 of the surface frames
+# (erftools_fal_patch.py; MODIS climatological annual cycle + model
+# snow). Validated: in-domain land 0.08-0.16, ocean 0.06, 24-h run
+# clean. Fallback when frames lack the field: erf.rad_alb_land (default
+# 0.17) over land via the ERA5 land mask, 0.06 ocean. Remaining
+# radiative-surface simplifications: uniform emissivity 0.98, and the
+# same broadband albedo fills all four SW (dir/dif x vis/nir) slots.
 erf.rad_t_sfc              = 288.0
 # Ozone volume mixing ratio for gas optics: single tropospheric-mean value
 # (domain tops at 20 km, largely below the O3 layer; the O3-sensitive upper

@@ -280,8 +280,17 @@ public:
     // the first layers -- exactly 0 in single precision -> col_gas = 0
     // -> non-finite RRTMGP optical depths).
     void set_base_state (const amrex::MultiFab* base_state) override { m_base_state = base_state; }
+
+    // Per-column surface albedo (ERA5 fal via the hindcast surface frames).
+    // When unset, columns fall back to land/sea constants
+    // (erf.rad_alb_land over land, the 0.06 ocean default otherwise).
+    void set_albedo (const amrex::MultiFab* albedo) override { m_albedo = albedo; }
 private:
     const amrex::MultiFab* m_base_state = nullptr;
+    const amrex::MultiFab* m_albedo = nullptr;
+    // Fallback land albedo when no per-column field is provided
+    // (SoCal chaparral/scrub; ocean keeps the 0.06 default).
+    amrex::Real m_rad_alb_land = amrex::Real(0.17);
 
     // Pointer to latitude and longitude
     amrex::MultiFab* m_lat = nullptr;

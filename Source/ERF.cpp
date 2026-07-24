@@ -379,6 +379,7 @@ ERF::ERF_shared ()
     // Sea surface temps
     sst_lev.resize(nlevs_max);
     tsk_lev.resize(nlevs_max);
+    alb_lev.resize(nlevs_max);
     lmask_lev.resize(nlevs_max);
 
     // Land and soil grid type and urban fractions

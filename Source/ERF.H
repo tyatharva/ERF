@@ -951,6 +951,9 @@ private:
     // Sea Surface Temps, Skin Temperature and Land Masks (lev, ntimes)
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::MultiFab>>>  sst_lev;
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::MultiFab>>>  tsk_lev;
+    // Surface albedo from the hindcast surface frames (ERA5 fal); feeds
+    // radiation. Null when the frames predate the forecast-albedo field.
+    amrex::Vector<amrex::Vector<std::unique_ptr<amrex::MultiFab>>>  alb_lev;
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::iMultiFab>>> lmask_lev;
 
     // Land grid types and urban fraction
