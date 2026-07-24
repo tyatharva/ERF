@@ -3277,10 +3277,34 @@ ERF::check_state_for_nans(MultiFab const& S)
 
     for (int i = 0; i < S.nComp(); i++) {
 
-        if (S.contains_nan(i,1,0))
+        // contains_nan misses Inf; an SP overflow (e.g. a microphysics
+        // mass/number ratio) passes the NaN test and only becomes NaN one
+        // step later via Inf - Inf in advection. Test both.
+        if (S.contains_nan(i,1,0) || S.contains_inf(i,1,0))
         {
-            amrex::Print() << "Component " << i << " of conserved variables contains NaNs" << '\n';
+            amrex::Print() << "Component " << i << " of conserved variables contains NaNs/Infs" << '\n';
             any_have_nans = true;
+            // Report the first few NaN locations (diagnosis aid; we are
+            // aborting anyway, capped to avoid a device-printf flood)
+            Gpu::DeviceScalar<int> cnt(0);
+            int* cptr = cnt.dataPtr();
+            for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+                Box const& bx = mfi.validbox();
+                auto const& a = S.const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int ii, int jj, int kk)
+                {
+                    if (!amrex::Math::isfinite(a(ii,jj,kk,i))) {
+                        int old = Gpu::Atomic::Add(cptr, 1);
+                        if (old < 20) {
+                            AMREX_DEVICE_PRINTF("  non-finite %g at (%d,%d,%d) comp %d\n",
+                                                a(ii,jj,kk,i), ii, jj, kk, i);
+                        }
+                    }
+                });
+            }
+            Gpu::streamSynchronize();
+            amrex::Print() << "  total NaN count comp " << i << ": "
+                           << cnt.dataValue() << '\n';
         }
     }
 

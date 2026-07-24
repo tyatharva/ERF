@@ -539,3 +539,53 @@ of the spin-up bias), or init the column from ERA5
 soil_temperature_level_1..4 (available upstream; needs a new surface
 field through the pipeline, ~a day, same shape as the fal work).
 Neither gives day-to-day radiative driving -- that requires Noah-MP.
+
+## Per-segment soil anchor (audit #3 follow-up; measured 2026-07-24)
+
+erf.mm5.soil_theta sets both the soil-column init and the permanent 3-m
+Dirichlet anchor. Because segments (re)initialize the column, set it PER
+SEGMENT to that month's mean deep-soil temperature -- this converts the
+year-long warm-soil bias (hardcoded 300 K) into a near-correct anchor at
+zero cost. Use ERA5 monthly-mean stl4 (the 100-289 cm layer, matching
+the 3-m anchor depth), fetched for this domain's land points
+(scratch script: CDS reanalysis-era5-single-levels-monthly-means,
+variable soil_temperature_level_4 + land_sea_mask, area
+34.2,-121.2,32.8,-117.2). MEASURED land means for 2023:
+
+    Jan 289.6  Feb 287.5  Mar 286.2  Apr 286.2  May 287.9  Jun 289.6
+    Jul 292.0  Aug 294.9  Sep 296.1  Oct 295.7  Nov 294.5  Dec 292.3
+
+Launch each segment with erf.mm5.soil_theta=<month value>. NOTE the LSM
+state IS checkpointed (with ghosts): on a RESTART-chained segment the
+restored soil (including the previous anchor ghost) wins and the knob is
+inert; in the parallel fresh-init month workflow it takes effect
+directly. For other years fetch the year's own monthly means
+(climatology fallback: the table above; interannual stl4 spread here is
+small).
+
+## Calm-start stability findings (segment probes, 2026-01-01 start)
+
+A Jan-1 (calm) start exposed three stacked failure modes that every
+Jan-9 (storm) validation missed; all are resolved and the STABLE
+SEGMENT CONFIG is:
+
+    erf.max_dt=2.5  (dt ceiling: calm-day advective bound otherwise
+        lets dt grow to ~15 s and cross the explicit vertical-diffusion
+        stability limit)
+    erf.moistscal_horiz_adv_type=Upwind_3rd
+    erf.moistscal_vert_adv_type=Upwind_3rd
+        (WENOZ5 on Morrison scalars NaN'd a number-concentration
+        component at step 16 in boundary-band rows; upwind is clean)
+    erf.advect_tke=false
+        (RhoKE went Inf at the xhi relax band ~380 s after the first
+        3-h frame transition with TKE advected under WENOZ5 dryscal;
+        not advecting TKE is standard for MYNN-class schemes --
+        production/dissipation dominate at 3 km)
+
+DO NOT set dryscal_*_adv_type=Upwind_3rd: that path is broken in this
+fork (density NaN at step 1 in corner cells).
+
+Verified: 24 h Jan-1 with erf.check_for_nans=1 armed: 37,798 steps,
+8 frame transitions, zero non-finite trips. erf.check_for_nans also
+detects Inf and prints locations (contains_nan alone misses Inf -- an
+SP overflow becomes NaN only one step later via Inf-Inf).
