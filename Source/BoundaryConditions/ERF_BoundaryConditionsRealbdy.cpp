@@ -694,5 +694,146 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
             } // mfi
         } // vdir
     }
+
+    // ***********************************************************************************
+    // Global mass constraint for the NSCBC lateral path (erf.nscbc_mass_tau)
+    //
+    // The characteristic count says how many conditions are ADMISSIBLE; it says nothing
+    // about the discrete global mass budget.  In a limited-area domain that has to be
+    // imposed separately, which is standard practice rather than invention: Flather
+    // (1976) is derived from mass conservation, and ROMS/NEMO pair radiation OBCs with
+    // an explicit barotropic inflow-outflow adjustment to preserve total volume.  ERF
+    // already does the same thing for the anelastic path in enforceInOutSolvability.
+    //
+    // Here the total wall mass flux is rescaled to the value the ERA5 column-mass
+    // tendency asks for.  That target is trustworthy: the ERA5 field is mass-consistent
+    // under ERF's OWN discrete operator to an equivalent |w| of 6.4 mm/s (measured by
+    // hindcast_check_mass_consistency), so we are rescaling toward a known small number.
+    //
+    //   Phi_desired = (M - M_tgt) / tau        (net OUTWARD flux; M > M_tgt => expel)
+    //   du          = (Phi_desired - Phi_now) / sum_outflow(rho*A)
+    //   u_n -> u_n + du        on OUTFLOW faces only
+    //
+    // The correction is ADDITIVE, not multiplicative.  A multiplicative rescaling was
+    // tried first and is unusable: with Phi_desired ~ 0 it demands lambda = -Phi_in/Phi_out,
+    // which in a net-convergent synoptic regime is many-fold, and multiplying outflow
+    // velocities by that factor collapsed the CFL and killed the run inside 30 steps.
+    // The additive form is what ROMS/NEMO actually apply to the barotropic mode, and its
+    // magnitude is set by the imbalance divided by the wall's mass-flux capacity -- of
+    // order 0.6 m/s for the +96 %/day drift being corrected here.
+    //
+    // du is a single scalar applied uniformly.  It deliberately has NO wall-normal
+    // structure -- a spatially varying wall-normal correction would rebuild exactly the
+    // grad(F) gradient this scheme exists to remove.  With set_width = 1 there is no
+    // wall-normal extent to ramp over in any case.
+    //
+    // Runs last so it has the final word on the wall-normal velocity, after both the
+    // characteristic pass and the barotropic wall flux correction.
+    // ***********************************************************************************
+    static const Real l_mass_tau = [] {
+        Real t=Real(-1.0); ParmParse pp("erf"); pp.query("nscbc_mass_tau", t); return t; }();
+
+    if (nscbc_lateral() && (l_mass_tau > Real(0.0)) && !cons_only &&
+        solverChoice.init_type == InitType::HindCast &&
+        !forecast_state_interp[lev].empty())
+    {
+        MultiFab& cons_mf = *mfs[Vars::cons];
+        const MultiFab& tgt_mf = forecast_state_interp[lev][Vars::cons];
+        const Box  dom_g = geom[lev].Domain();
+        const auto glo = lbound(dom_g);
+        const auto ghi = ubound(dom_g);
+        const Real dxg = geom[lev].CellSize(0);
+        const Real dyg = geom[lev].CellSize(1);
+        const Real dzg = geom[lev].CellSize(2);
+
+        // Total model and target mass.  Volume = detJ * dx*dy*dz (terrain-following
+        // Jacobian); map factors are ~1.00 over this domain and are neglected, as they
+        // are in compute_wall_flux_correction.
+        const Real cellvol = dxg*dyg*dzg;
+        Real M    = cellvol * amrex::ReduceSum(cons_mf, *detJ_cc[lev], 0,
+                        [=] AMREX_GPU_HOST_DEVICE (Box const& bx,
+                                                   Array4<const Real> const& c,
+                                                   Array4<const Real> const& J) -> Real {
+                            Real s = 0.0;
+                            AMREX_LOOP_3D(bx, i, j, k, { s += c(i,j,k,Rho_comp)*J(i,j,k); });
+                            return s; });
+        Real Mt   = cellvol * amrex::ReduceSum(tgt_mf, *detJ_cc[lev], 0,
+                        [=] AMREX_GPU_HOST_DEVICE (Box const& bx,
+                                                   Array4<const Real> const& c,
+                                                   Array4<const Real> const& J) -> Real {
+                            Real s = 0.0;
+                            AMREX_LOOP_3D(bx, i, j, k, { s += c(i,j,k,Rho_comp)*J(i,j,k); });
+                            return s; });
+
+        // Wall mass flux, split into inward and outward parts.  Face area for an x-wall
+        // is ax*dy*dz; corner cells own two walls and contribute to both.
+        MultiFab wf(cons_mf.boxArray(), cons_mf.DistributionMap(), 3, 0);
+        wf.setVal(0.0);
+        for (MFIter mfi(wf,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box& bx = mfi.tilebox();
+            const Array4<Real>&       w  = wf.array(mfi);
+            const Array4<const Real>& cs = cons_mf.const_array(mfi);
+            const Array4<const Real>& uu = (*mfs[Vars::xvel]).const_array(mfi);
+            const Array4<const Real>& vv = (*mfs[Vars::yvel]).const_array(mfi);
+            const Array4<const Real>& axa = ax[lev]->const_array(mfi);
+            const Array4<const Real>& aya = ay[lev]->const_array(mfi);
+
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                Real fsum = Real(0.0), csum = Real(0.0);
+                Real rho  = cs(i,j,k,Rho_comp);
+                Real f, a;
+                if (i == glo.x) { a = axa(glo.x  ,j,k)*dyg*dzg; f = rho*(-uu(glo.x  ,j,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
+                if (i == ghi.x) { a = axa(ghi.x+1,j,k)*dyg*dzg; f = rho*( uu(ghi.x+1,j,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
+                if (j == glo.y) { a = aya(i,glo.y  ,k)*dxg*dzg; f = rho*(-vv(i,glo.y  ,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
+                if (j == ghi.y) { a = aya(i,ghi.y+1,k)*dxg*dzg; f = rho*( vv(i,ghi.y+1,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
+                w(i,j,k,0) = amrex::min(fsum, Real(0.0));   // inward  (negative)
+                w(i,j,k,1) = amrex::max(fsum, Real(0.0));   // outward (positive)
+                w(i,j,k,2) = csum;                          // rho*A on outflow faces
+            });
+        }
+        Real Phi_in  = wf.sum(0);
+        Real Phi_out = wf.sum(1);
+
+        // Mass-flux capacity of the outflow faces: sum of rho*A over faces currently
+        // carrying mass out.  This converts a flux deficit into a velocity increment.
+        Real cap = wf.sum(2);
+        Real Phi_des = (M - Mt) / l_mass_tau;
+        Real du = Real(0.0);
+        if (cap > Real(0.0)) { du = (Phi_des - (Phi_in + Phi_out)) / cap; }
+        du = amrex::min(amrex::max(du, Real(-2.0)), Real(2.0));
+
+        for (int vdir = 0; vdir < 2; ++vdir)
+        {
+            MultiFab& mf = (vdir == 0) ? *mfs[Vars::xvel] : *mfs[Vars::yvel];
+            Box domv = dom_g; domv.convert(mf.boxArray().ixType());
+            for (MFIter mfi(mf,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                Box gbx = mfi.growntilebox(ngvect_vels);
+                Box b_xlo, b_xhi, b_ylo, b_yhi;
+                realbdy_bc_bxs_xy(gbx, domv, 1, b_xlo, b_xhi, b_ylo, b_yhi, ngvect_vels);
+                const Array4<Real>& vel = mf.array(mfi);
+                // Scale OUTFLOW faces only, by a single uniform factor.
+                if (vdir == 0) {
+                    ParallelFor(b_xlo, b_xhi,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    { if (vel(i,j,k) < Real(0.0)) vel(i,j,k) -= du; },   // outward at xlo is -x
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    { if (vel(i,j,k) > Real(0.0)) vel(i,j,k) += du; });
+                } else {
+                    ParallelFor(b_ylo, b_yhi,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    { if (vel(i,j,k) < Real(0.0)) vel(i,j,k) -= du; },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    { if (vel(i,j,k) > Real(0.0)) vel(i,j,k) += du; });
+                }
+            }
+        }
+    }
 }
 #endif

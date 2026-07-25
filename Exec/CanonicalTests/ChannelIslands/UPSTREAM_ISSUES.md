@@ -1034,3 +1034,60 @@ implements for the anelastic path: `enforceInOutSolvability`
 (`ERF_PoissonSolve.cpp:465`), which scales outflow to match inflow. Applied to
 the NSCBC wall fluxes with the target net flux set from the ERA5 column-mass
 tendency, it is the missing third piece. Not yet built.
+
+### Global mass constraint: fixes the budget, does NOT fix the wall
+
+Added `erf.nscbc_mass_tau`. The total wall mass flux is corrected to the value the
+ERA5 column-mass tendency asks for -- standard practice for limited-area models
+that use characteristic/radiation OBCs (Flather 1976 is derived from mass
+conservation; ROMS/NEMO adjust barotropic inflow-outflow to preserve volume), and
+the same thing ERF already does for the anelastic path in `enforceInOutSolvability`.
+The target is trustworthy because the ERA5 field is mass-consistent under ERF's own
+discrete operator to an equivalent |w| of 6.4 mm/s.
+
+    Phi_desired = (M - M_tgt)/tau ;  du = (Phi_desired - Phi_now)/sum_outflow(rho*A)
+    u_n -> u_n + du   on outflow faces only, du a single uniform scalar
+
+**The correction must be additive, not multiplicative.** Rescaling outflow by
+lambda = (Phi_desired - Phi_in)/Phi_out was tried first: with Phi_desired ~ 0 it
+demands lambda = -Phi_in/Phi_out, which in a net-convergent synoptic regime is
+many-fold. It hit the guard rail, collapsed the CFL and killed every run inside
+30-180 steps. The additive form is bounded by the imbalance divided by the wall's
+mass-flux capacity, ~0.6 m/s here.
+
+| config | d=0 | band d=3-10 | interior bg | mass drift |
+|---|---|---|---|---|
+| control (Davies) | 0.20% | **49.85%** | 10.88% | +0.453 %/day |
+| relax-off floor | 55.48% | 0.69% | 2.86% | +5.346 %/day |
+| NSCBC extrap, no constraint | 49.13% | 0.00% | 2.46% | +174.6 %/day |
+| **NSCBC extrap + constraint, tau=600** | **46.12%** | 0.34% | 3.55% | **-7.26 %/day** |
+| NSCBC extrap + constraint, tau=1800 | 46.14% | 0.37% | 3.60% | -13.34 %/day |
+| NSCBC Riemann + constraint, tau=600 | 61.75% | 2.07% | 2.52% | +65.75 %/day |
+
+Three things.
+
+1. **The budget improves 24x** for the extrapolation outflow (+174.6 -> -7.26 %/day)
+   and is now bounded rather than runaway. It is still 16x worse than the Davies
+   control's +0.453 %/day. The residual is most likely metric error in the flux sum
+   (rho taken at the wall CELL not the face; uniform reference dz against a stretched
+   grid with dz_min = 18.5 m) -- the constraint drives the flux *it computes* to the
+   target exactly, so whatever it mismeasures shows up as drift.
+2. **No band structure reappeared.** d=3-10 stays at 0.14-0.79%, so the uniform
+   additive correction did not rebuild a wall-normal gradient. There is a mild
+   shoulder at d=11-16 (2.5-4.7% against nsc0's 0.06-3.4%) which is diffuse and does
+   not have the monotone ramp signature; it is not a returning grad(F).
+3. **The d=0 prediction is FALSIFIED, and this is a separate mechanism.**
+   The prediction on record was that the loud wall cell is the local face of the
+   global imbalance, so fixing the budget should relieve it. The budget improved 24x
+   and d=0 moved 49.13% -> 46.12% -- three points, i.e. not at all. For the Riemann
+   variant it went the wrong way, 61.42% -> 61.75%.
+
+**The loud wall cell is therefore an unexplained defect independent of the global
+mass budget.** It is not the ramp (removing the ramp is what exposed it), not the
+global budget (fixed, no effect), and not the w specification (measured: the
+ERA5-consistent w is 6.4 mm/s, and the MPAS w=0 A/B moved d=0 by 0.25 points).
+The remaining untested candidate is that rho at the boundary is only ZEROTH-order
+extrapolated: the derivation says it must be computed from the interior via the
+outgoing u_n - c characteristic, and zero-gradient is the crudest possible stand-in
+for that. That is the next thing to try, and it is stated here as a hypothesis, not
+a conclusion.
