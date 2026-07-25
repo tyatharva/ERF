@@ -146,7 +146,6 @@ namespace RealBdyVars {
 namespace HindcastBdyVars {
     enum {
         RHO = RealBdyVars::NumTypes,   // 4  (cell-centered)
-        W,                             // 5  (z-face-staggered)
         NumTypes
     };
 }

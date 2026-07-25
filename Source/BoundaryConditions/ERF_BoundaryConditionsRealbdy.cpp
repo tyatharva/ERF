@@ -51,24 +51,32 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                              0, 0, 0,
                              0, 0, 0,
                              0, 0};
-    // HINDCAST ONLY (UPSTREAM_ISSUES #14): also specify rho and/or w from the
-    // hindcast boundary planes. Gated on knobs no metgrid/wrfbdy deck sets --
-    // required, because HindcastBdyVars::{RHO,W} deliberately alias
-    // WRFBdyVars::{PH,MU}. Separate knobs: rho is the consistency constraint,
-    // w only suppresses the symptom.
+    // HINDCAST ONLY (UPSTREAM_ISSUES #14): also specify rho at the wall from
+    // the hindcast boundary planes, so the imposed wall mass flux is rho* u*
+    // -- the same flux the band interior is relaxed toward -- rather than
+    // rho_model u* built on a zero-gradient density. Gated on a knob no
+    // metgrid/wrfbdy deck sets, because HindcastBdyVars::RHO deliberately
+    // aliases WRFBdyVars::PH. Implied by the mass-consistent lateral forcing,
+    // still separately settable for A/B.
+    //
+    // w is deliberately NOT specifiable here: the frame's w slot carries ERA5
+    // omega in Pa/s, not a geometric vertical velocity, and the correct Omega
+    // follows from the mass budget closing rather than from imposition (cf.
+    // the abandoned lateral WfromOmega experiment, upstream PR #2872).
     static const bool l_bdy_rho = [] {
-        bool b=false; ParmParse pp("erf"); pp.query("hindcast_bdy_rho", b); return b; }();
-    static const bool l_bdy_w = [] {
-        bool b=false; ParmParse pp("erf"); pp.query("hindcast_bdy_w", b); return b; }();
+        bool b=false, mc=false; ParmParse pp("erf");
+        pp.query("hindcast_bdy_rho", b);
+        pp.query("hindcast_mass_consistent_bdy", mc);
+        return b || mc; }();
     const bool l_have_ext = (!bdy_data_xlo.empty()) &&
-        (static_cast<int>(bdy_data_xlo[0].size()) >= HindcastBdyVars::NumTypes);
+        (static_cast<int>(bdy_data_xlo[0].size()) > HindcastBdyVars::RHO);
     if (l_bdy_rho && l_have_ext) { cons_read[Rho_comp] = 1; }
 
     Vector<Vector<int>> is_read;
     is_read.push_back( cons_read );
     is_read.push_back( {1} ); // xvel
     is_read.push_back( {1} ); // yvel
-    is_read.push_back( {(l_bdy_w && l_have_ext) ? 1 : 0} ); // zvel
+    is_read.push_back( {0} ); // zvel
 
     // Real BC mapping (WRF/MetGrid)
     Vector<int> cons_map = {HindcastBdyVars::RHO, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
@@ -80,7 +88,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     ind_map.push_back( cons_map );
     ind_map.push_back( {RealBdyVars::U} ); // xvel
     ind_map.push_back( {RealBdyVars::V} ); // yvel
-    ind_map.push_back( {HindcastBdyVars::W} ); // zvel (only read when gated on)
+    ind_map.push_back( {0} );                  // zvel (never read; see note above)
 
     // Bndry plane mapping
     Vector<int> bnd_cons_map = {Rho_comp, BCVars::RhoTheta_bc_comp, RhoKE_comp, RhoScalar_comp,

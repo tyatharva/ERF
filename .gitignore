@@ -95,3 +95,4 @@ Exec/CanonicalTests/ChannelIslands/channel_islands_terrain.txt
 __pycache__/
 /precip_check/*.grib
 /precip_check/*.npz
+/bdyfix/

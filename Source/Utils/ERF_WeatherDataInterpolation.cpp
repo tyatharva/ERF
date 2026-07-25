@@ -425,20 +425,18 @@ ERF::fill_bdy_data_from_hindcast ()
     const int BdyEnd0 = l_use_moisture ? MetGridBdyVars::NumTypes
                                        : MetGridBdyVars::NumTypes-1;
 
-    // Optionally carry rho and w through to the boundary planes as well
+    // Optionally carry rho through to the boundary planes as well
     // (UPSTREAM_ISSUES #14: the relaxation constrains only u,v,theta,qv, so
     // the imposed winds carry a mass-flux divergence the local density was
     // never in balance with, and the band absorbs it as spurious w). The
-    // frames already hold both fields and FillForecastStateMultiFabs has
-    // already interpolated them onto the ERF grid -- they were simply
-    // dropped here. Two independent knobs on purpose: rho is the physical
-    // consistency constraint, w only suppresses the symptom, so they must
-    // be testable apart. See HindcastBdyVars.
-    bool l_bdy_rho = false, l_bdy_w = false;
+    // frames already hold rho and FillForecastStateMultiFabs has already
+    // interpolated it onto the ERF grid -- it was simply dropped here.
+    // See HindcastBdyVars.
+    bool l_bdy_rho = false, l_mass_consistent = false;
     { ParmParse pp("erf");
       pp.query("hindcast_bdy_rho", l_bdy_rho);
-      pp.query("hindcast_bdy_w",   l_bdy_w); }
-    const int BdyEnd = (l_bdy_rho || l_bdy_w) ? HindcastBdyVars::NumTypes : BdyEnd0;
+      pp.query("hindcast_mass_consistent_bdy", l_mass_consistent); }
+    const int BdyEnd = (l_bdy_rho || l_mass_consistent) ? HindcastBdyVars::NumTypes : BdyEnd0;
 
     // Same arena convention as init_from_metgrid: CPU+GPU accessible
     Arena* Arena_Used = The_Arena();
@@ -500,12 +498,6 @@ ERF::fill_bdy_data_from_hindcast ()
                 bdy_data_xhi[itime][nvar].resize(xhi_plane_y_stag, 1, Arena_Used);
                 bdy_data_ylo[itime][nvar].resize(ylo_plane_y_stag, 1, Arena_Used);
                 bdy_data_yhi[itime][nvar].resize(yhi_plane_y_stag, 1, Arena_Used);
-            } else if (nvar==HindcastBdyVars::W) {
-                // w lives on z faces
-                bdy_data_xlo[itime][nvar].resize(convert(xlo_plane_no_stag,{0,0,1}), 1, Arena_Used);
-                bdy_data_xhi[itime][nvar].resize(convert(xhi_plane_no_stag,{0,0,1}), 1, Arena_Used);
-                bdy_data_ylo[itime][nvar].resize(convert(ylo_plane_no_stag,{0,0,1}), 1, Arena_Used);
-                bdy_data_yhi[itime][nvar].resize(convert(yhi_plane_no_stag,{0,0,1}), 1, Arena_Used);
             } else {
                 bdy_data_xlo[itime][nvar].resize(xlo_plane_no_stag, 1, Arena_Used);
                 bdy_data_xhi[itime][nvar].resize(xhi_plane_no_stag, 1, Arena_Used);
@@ -531,7 +523,6 @@ ERF::fill_bdy_data_from_hindcast ()
             else if (nvar==MetGridBdyVars::T)  { src = &fcons; scomp = RhoTheta_comp; } // plain theta
             else if (nvar==MetGridBdyVars::QV) { src = &fcons; scomp = RhoQ1_comp;    } // plain qv
             else if (nvar==HindcastBdyVars::RHO) { src = &fcons; scomp = Rho_comp;    } // density
-            else if (nvar==HindcastBdyVars::W)   { src = &forecast_state_1[lev][Vars::zvel]; scomp = 0; }
             strip_to_global_fab(*src, scomp, bdy_data_xlo[itime][nvar].box(), bdy_data_xlo[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_xhi[itime][nvar].box(), bdy_data_xhi[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_ylo[itime][nvar].box(), bdy_data_ylo[itime][nvar]);
@@ -613,6 +604,164 @@ ERF::init_thermo_from_hindcast (const int lev)
     Print() << "HindCast init: base state and thermodynamic state rebuilt from "
             << "the interpolated ERA5 frame (theta/qv coupling); lev " << lev
             << " rho min/max " << cons.min(Rho_comp) << " " << cons.max(Rho_comp) << std::endl;
+
+    hindcast_check_mass_consistency(lev);
+}
+
+/**
+ * Measure the discrete continuity residual of the ERA5 target field under ERF's
+ * OWN operator, i.e. the one in AdvectionSrcForRho:
+ *
+ *     (detJ/m^2) drho/dt + dFx/dx + dFy/dy + dFz/dzeta = 0,
+ *     Fx = ax*(rho u)/mf_uy,  Fy = ay*(rho v)/mf_vx,  Fz = az*Omega/m^2.
+ *
+ * Omega is hard-zeroed at k = klo and the lid is a SlipWall, so Fz telescopes
+ * out of a column sum and
+ *
+ *     R(i,j) = sum_k [ (detJ/m^2) d(rho_t)/dt + d(Fx_t)/dx + d(Fy_t)/dy ] dzeta
+ *
+ * (subscript t = the ERA5 target field) must vanish for ANY field the band can
+ * be relaxed toward -- it is the compatibility condition of the two-point
+ * problem for Omega_t. Integrating upward from Omega_t = 0 gives the vertical
+ * mass flux the imposed horizontal fluxes demand; |Omega_t|/rho_t is its
+ * equivalent vertical velocity, directly
+ * comparable to the w > 1 m/s band criterion. R != 0 means no relaxation
+ * target can be mass-consistent and the target divergence itself needs the
+ * column-mass correction.
+ */
+void
+ERF::hindcast_check_mass_consistency (const int lev)
+{
+    const Real dT = solverChoice.hindcast_data_interval_in_hrs * Real(3600.0);
+    if (dT <= zero) { return; }
+
+    const MultiFab& fc1  = forecast_state_1[lev][Vars::cons];
+    const MultiFab& fc2  = forecast_state_2[lev][Vars::cons];
+    const MultiFab& ftgt = forecast_state_interp[lev][Vars::cons];
+    const MultiFab& xvel = vars_new[lev][Vars::xvel];
+    const MultiFab& yvel = vars_new[lev][Vars::yvel];
+
+    const auto dxInv  = geom[lev].InvCellSizeArray();
+    const Real dzeta  = geom[lev].CellSize(2);
+    const Box& domain = geom[lev].Domain();
+    const auto dom_lo = lbound(domain);
+    const auto dom_hi = ubound(domain);
+    const int  bw     = (real_width > 0) ? real_width : 1;
+
+    // (band |Omega*|/rho* max, band top-residual max, interior same two)
+    ReduceOps<ReduceOpMax,ReduceOpMax,ReduceOpMax,ReduceOpMax> reduce_op;
+    ReduceData<Real,Real,Real,Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    bool z_split = false;
+    for (MFIter mfi(ftgt); mfi.isValid(); ++mfi)
+    {
+        const Box& bx = mfi.tilebox();
+        // The upward recursion needs the whole column on one box.
+        if (bx.smallEnd(2) != dom_lo.z || bx.bigEnd(2) != dom_hi.z) { z_split = true; continue; }
+        const Box bx2 = makeSlab(bx,2,bx.smallEnd(2));
+
+        const Array4<const Real>& r1  = fc1.const_array(mfi);
+        const Array4<const Real>& r2  = fc2.const_array(mfi);
+        const Array4<const Real>& rt  = ftgt.const_array(mfi);
+        const Array4<const Real>& u   = xvel.const_array(mfi);
+        const Array4<const Real>& v   = yvel.const_array(mfi);
+        const Array4<const Real>& axa = ax[lev]->const_array(mfi);
+        const Array4<const Real>& aya = ay[lev]->const_array(mfi);
+        const Array4<const Real>& dJ  = detJ_cc[lev]->const_array(mfi);
+        const Array4<const Real>& mfx = mapfac[lev][MapFacType::m_x]->const_array(mfi);
+        const Array4<const Real>& mfy = mapfac[lev][MapFacType::m_y]->const_array(mfi);
+        const Array4<const Real>& mfu = mapfac[lev][MapFacType::u_y]->const_array(mfi);
+        const Array4<const Real>& mfv = mapfac[lev][MapFacType::v_x]->const_array(mfi);
+
+        const int klo = dom_lo.z, khi = dom_hi.z;
+
+        reduce_op.eval(bx2, reduce_data, [=] AMREX_GPU_DEVICE (int i, int j, int) -> ReduceTuple
+        {
+            // Clamp into the valid region: the target's physical-boundary
+            // ghosts are zero-initialized, and the wall face uses the
+            // zero-gradient density that fill_from_realbdy imposes.
+            auto rho_at = [=] (int ii, int jj, int kk) {
+                ii = amrex::min(amrex::max(ii,dom_lo.x),dom_hi.x);
+                jj = amrex::min(amrex::max(jj,dom_lo.y),dom_hi.y);
+                return rt(ii,jj,kk,Rho_comp);
+            };
+
+            const Real msq = mfx(i,j,0) * mfy(i,j,0);
+            Real Fz   = Real(0.0);   // az*Omega_t/m^2, vanishes at the terrain
+            Real wmax = Real(0.0);
+
+            for (int k = klo; k <= khi; ++k) {
+                const Real rc = rho_at(i,j,k);
+
+                const Real rux_lo = u(i  ,j,k) * myhalf*(rho_at(i-1,j,k) + rc);
+                const Real rux_hi = u(i+1,j,k) * myhalf*(rc + rho_at(i+1,j,k));
+                const Real rvy_lo = v(i,j  ,k) * myhalf*(rho_at(i,j-1,k) + rc);
+                const Real rvy_hi = v(i,j+1,k) * myhalf*(rc + rho_at(i,j+1,k));
+
+                const Real Fx_lo = axa(i  ,j,k) * rux_lo / mfu(i  ,j,0);
+                const Real Fx_hi = axa(i+1,j,k) * rux_hi / mfu(i+1,j,0);
+                const Real Fy_lo = aya(i,j  ,k) * rvy_lo / mfv(i,j  ,0);
+                const Real Fy_hi = aya(i,j+1,k) * rvy_hi / mfv(i,j+1,0);
+
+                const Real drdt = (r2(i,j,k,Rho_comp) - r1(i,j,k,Rho_comp)) / dT;
+
+                const Real res = dJ(i,j,k)/msq * drdt
+                               + (Fx_hi - Fx_lo) * dxInv[0]
+                               + (Fy_hi - Fy_lo) * dxInv[1];
+
+                Fz -= res * dzeta;               // Fz_{k+1} = Fz_k - dzeta*res
+                const Real w_eq = (Fz * msq) / amrex::max(rc, Real(1.e-6));
+                wmax = amrex::max(wmax, std::abs(w_eq));
+            }
+
+            // Fz after the loop is the flux the lid would have to pass; the
+            // SlipWall forbids it, so this is the incompatibility.
+            const Real w_top = std::abs((Fz * msq) / amrex::max(rho_at(i,j,khi), Real(1.e-6)));
+
+            const bool in_band = (i < dom_lo.x + bw) || (i > dom_hi.x - bw) ||
+                                 (j < dom_lo.y + bw) || (j > dom_hi.y - bw);
+
+            return { in_band ? wmax : Real(0.0), in_band ? w_top : Real(0.0),
+                     in_band ? Real(0.0) : wmax, in_band ? Real(0.0) : w_top };
+        });
+    }
+
+    ReduceTuple hv = reduce_data.value(reduce_op);
+    Real band_w = amrex::get<0>(hv), band_top = amrex::get<1>(hv);
+    Real int_w  = amrex::get<2>(hv), int_top  = amrex::get<3>(hv);
+    ParallelDescriptor::ReduceRealMax(band_w);
+    ParallelDescriptor::ReduceRealMax(band_top);
+    ParallelDescriptor::ReduceRealMax(int_w);
+    ParallelDescriptor::ReduceRealMax(int_top);
+
+    if (z_split) {
+        Warning("hindcast mass-consistency check skipped boxes split in z");
+    }
+
+    // The model's rho is the HSE-rebalanced density (erf_enforce_hse above),
+    // not the raw interpolated ERA5 density. Relaxing rho toward the raw field
+    // would drive the state off its own discrete hydrostatic balance, so
+    // report the discrepancy: it is the difference between "mass-consistent"
+    // and "hydrostatically consistent" targets.
+    Real rdiff_max = zero, rdiff_l1 = zero, rsum = zero;
+    {
+        MultiFab diff(ftgt.boxArray(), ftgt.DistributionMap(), 1, 0);
+        MultiFab::Copy   (diff, ftgt, Rho_comp, 0, 1, 0);
+        MultiFab::Subtract(diff, vars_new[lev][Vars::cons], Rho_comp, 0, 1, 0);
+        rdiff_max = diff.norm0();
+        rdiff_l1  = diff.norm1();
+        rsum      = vars_new[lev][Vars::cons].norm1(Rho_comp);
+    }
+    Print() << "[mass-consistency] target rho vs model (HSE-rebalanced) rho: max|drho| = "
+            << rdiff_max << " kg/m^3, mean|drho|/mean(rho) = "
+            << ((rsum > zero) ? rdiff_l1/rsum : zero) << std::endl;
+    Print() << "[mass-consistency] ERA5 target under ERF's discrete continuity operator, lev "
+            << lev << ":\n"
+            << "    band (" << bw << " cells): max implied |w| = " << band_w
+            << " m/s, max lid incompatibility = " << band_top << " m/s\n"
+            << "    interior          : max implied |w| = " << int_w
+            << " m/s, max lid incompatibility = " << int_top << " m/s" << std::endl;
 }
 
 void

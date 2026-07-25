@@ -504,6 +504,10 @@ public:
     // rho qv) from the interpolated ERA5 frame at initialization time.
     void init_thermo_from_hindcast(const int lev);
 
+    // Diagnostic: discrete continuity residual of the ERA5 target field
+    // measured with ERF's own operator (see the definition for the identity).
+    void hindcast_check_mass_consistency(const int lev);
+
 #ifdef ERF_USE_NETCDF
     // Fill the real-BC boundary planes (bdy_data_xlo/xhi/ylo/yhi) from the
     // interpolated hindcast frames so the specified/relaxation-zone

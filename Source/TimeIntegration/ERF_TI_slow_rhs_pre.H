@@ -337,6 +337,11 @@
                                                    start_bdy_time, final_bdy_time, bdy_time_interval,
                                                    bdy_factor, real_width, fine_geom,
                                                    S_rhs, S_data,
+                                                   // ERA5 target density for the mass-consistent
+                                                   // relaxation (null unless HindCast supplies it)
+                                                   (solverChoice.init_type == InitType::HindCast)
+                                                       ? &forecast_state_interp[level][Vars::cons]
+                                                       : nullptr,
                                                    bdy_data_xlo, bdy_data_xhi,
                                                    bdy_data_ylo, bdy_data_yhi,
                                                    m_r2d);

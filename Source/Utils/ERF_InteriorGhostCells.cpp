@@ -168,6 +168,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                                     const Geometry& geom,
                                     Vector<MultiFab>& S_rhs,
                                     Vector<MultiFab>& S_cur_data,
+                                    const MultiFab* fcons_tgt,
                                     Vector<Vector<FArrayBox>>& bdy_data_xlo,
                                     Vector<Vector<FArrayBox>>& bdy_data_xhi,
                                     Vector<Vector<FArrayBox>>& bdy_data_ylo,
@@ -226,19 +227,47 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     FArrayBox V_xlo, V_xhi, V_ylo, V_yhi;
     FArrayBox T_xlo, T_xhi, T_ylo, T_yhi;
     FArrayBox Q_xlo, Q_xhi, Q_ylo, Q_yhi;
+    FArrayBox R_xlo, R_xhi, R_ylo, R_yhi;
 
     // Variable index map (WRFBdyVars -> Vars)
-    Vector<int> var_map  = {Vars::xvel,    Vars::yvel,    Vars::cons,    Vars::cons   };
-    Vector<int> ivar_map = {IntVars::xmom, IntVars::ymom, IntVars::cons, IntVars::cons};
+    Vector<int> var_map  = {Vars::xvel,    Vars::yvel,    Vars::cons,    Vars::cons,    Vars::cons   };
+    Vector<int> ivar_map = {IntVars::xmom, IntVars::ymom, IntVars::cons, IntVars::cons, IntVars::cons};
 
     // Variable icomp map
-    Vector<int> comp_map = {0, 0, RhoTheta_comp, RhoQ1_comp};
+    Vector<int> comp_map = {0, 0, RhoTheta_comp, RhoQ1_comp, Rho_comp};
 
     // Indices
     int  ivarU  = RealBdyVars::U;
     int  ivarV  = RealBdyVars::V;
     int  ivarT  = RealBdyVars::T;
     int  ivarQV = RealBdyVars::QV;
+    int  ivarR  = RealBdyVars::NumTypes;   // = HindcastBdyVars::RHO; not a bdy plane
+
+    // MASS-CONSISTENT LATERAL FORCING (erf.hindcast_mass_consistent_bdy).
+    //
+    // Omega is zero at k = klo (hard-zeroed) and at the SlipWall lid, so the
+    // vertical mass flux telescopes out of a column sum of the discrete
+    // continuity equation: the column mass tendency is determined ENTIRELY by
+    // the horizontal fluxes. Prescribing rho*u and rho*v in the band therefore
+    // already prescribes the column mass tendency, while rho itself is relaxed
+    // toward nothing -- so the level-by-level residual has only Delta_z(rho
+    // Omega) to go into, and Omega (hence w) becomes the residual variable.
+    //
+    // The fix is to make the target a COMPLETE state that solves ERF's own
+    // discrete continuity equation:
+    //   - relax Rho_comp toward the ERA5 density rho* (it is otherwise the
+    //     only prognostic field in the band with no constraint at all);
+    //   - build the momentum target from rho* u* rather than rho_model u*,
+    //     which removes the spurious u* Delta_x(rho_model) term -- the model's
+    //     own density structure entering the target's divergence as a mass
+    //     source.
+    // w is deliberately NOT specified: Omega comes out right as a consequence
+    // of the mass budget closing, not by imposition.
+    static const bool mass_consistent = [] {
+        bool b = false; amrex::ParmParse pp("erf");
+        pp.query("hindcast_mass_consistent_bdy", b); return b;
+    }();
+    const bool l_mass_consistent = mass_consistent && (fcons_tgt != nullptr);
     // Relax QV too when the state carries moisture and the boundary planes
     // include it (WRF relaxes moisture in the zone; previously only U/V/T
     // were nudged while QV was set in the specified cells only, leaving a
@@ -247,6 +276,18 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                       (!bdy_data_xlo.empty()) &&
                       (static_cast<int>(bdy_data_xlo[0].size()) > RealBdyVars::QV);
     int BdyEnd = l_relax_qv ? RealBdyVars::NumTypes : RealBdyVars::NumTypes-1;
+    // Rho is appended past the bdy-plane vars; its target comes from
+    // fcons_tgt, not from a boundary plane. QV is skipped inside the loops
+    // when the state has none.
+    //
+    // erf.hindcast_relax_rho separates the two halves of the mass-consistent
+    // forcing for A/B: false keeps the rho* u* momentum target but drops the
+    // rho relaxation itself.
+    static const bool relax_rho_bdy = [] {
+        bool b = true; amrex::ParmParse pp("erf");
+        pp.query("hindcast_relax_rho", b); return b;
+    }();
+    if (l_mass_consistent && relax_rho_bdy) { BdyEnd = ivarR + 1; }
 
 
     // NOTE: The sizing of the temporary BDY FABS is
@@ -255,6 +296,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     // Size the FABs
     //==========================================================
     for (int ivar(ivarU); ivar < BdyEnd; ivar++) {
+        if (ivar == ivarQV && !l_relax_qv) { continue; }
         int ivar_idx = var_map[ivar];
         Box domain   = geom.Domain();
         auto ixtype  = S_cur_data[ivar_idx].boxArray().ixType();
@@ -283,6 +325,9 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         } else if (ivar  == ivarQV){
             Q_xlo.resize(bx_xlo,1,The_Async_Arena()); Q_xhi.resize(bx_xhi,1,The_Async_Arena());
             Q_ylo.resize(bx_ylo,1,The_Async_Arena()); Q_yhi.resize(bx_yhi,1,The_Async_Arena());
+        } else if (ivar  == ivarR){
+            R_xlo.resize(bx_xlo,1,The_Async_Arena()); R_xhi.resize(bx_xhi,1,The_Async_Arena());
+            R_ylo.resize(bx_ylo,1,The_Async_Arena()); R_yhi.resize(bx_yhi,1,The_Async_Arena());
         } else {
             continue;
         }
@@ -298,6 +343,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     // Populate FABs from bdy interpolation (primitive vars)
     //==========================================================
     for (int ivar(ivarU); ivar < BdyEnd; ivar++) {
+        if (ivar == ivarQV && !l_relax_qv) { continue; }
         int ivar_idx = var_map[ivar];
         Box domain   = geom.Domain();
         auto ixtype  = S_cur_data[ivar_idx].boxArray().ixType();
@@ -305,8 +351,8 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         const auto& dom_lo = lbound(domain);
         const auto& dom_hi = ubound(domain);
 
-        // BndryReg idx and limiting
-        int bdy_comp = bnd_map[ivar];
+        // BndryReg idx and limiting (Rho has no bdy-plane slot)
+        int bdy_comp = bnd_map[(ivar < RealBdyVars::NumTypes) ? ivar : int(RealBdyVars::U)];
         const auto& dom_cc_lo = lbound(geom.Domain());
         const auto& dom_cc_hi = ubound(geom.Domain());
 
@@ -338,22 +384,47 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             } else if (ivar  == ivarQV){
                 arr_xlo = Q_xlo.array(); arr_xhi = Q_xhi.array();
                 arr_ylo = Q_ylo.array(); arr_yhi = Q_yhi.array();
+            } else if (ivar  == ivarR){
+                arr_xlo = R_xlo.array(); arr_xhi = R_xhi.array();
+                arr_ylo = R_ylo.array(); arr_yhi = R_yhi.array();
             } else {
                 continue;
             }
 
+            // Rho has no boundary plane -- its target is read from fcons_tgt
+            // below. Bind the plane arrays to a valid slot so the (unused)
+            // Array4s are well formed.
+            const int pvar = (ivar < RealBdyVars::NumTypes) ? ivar : int(RealBdyVars::U);
+
             // Boundary data at fixed time intervals
-            const auto& bdatxlo_n   = bdy_data_xlo[n_time   ][ivar].const_array();
-            const auto& bdatxlo_np1 = bdy_data_xlo[n_time_p1][ivar].const_array();
-            const auto& bdatxhi_n   = bdy_data_xhi[n_time   ][ivar].const_array();
-            const auto& bdatxhi_np1 = bdy_data_xhi[n_time_p1][ivar].const_array();
-            const auto& bdatylo_n   = bdy_data_ylo[n_time   ][ivar].const_array();
-            const auto& bdatylo_np1 = bdy_data_ylo[n_time_p1][ivar].const_array();
-            const auto& bdatyhi_n   = bdy_data_yhi[n_time   ][ivar].const_array();
-            const auto& bdatyhi_np1 = bdy_data_yhi[n_time_p1][ivar].const_array();
+            const auto& bdatxlo_n   = bdy_data_xlo[n_time   ][pvar].const_array();
+            const auto& bdatxlo_np1 = bdy_data_xlo[n_time_p1][pvar].const_array();
+            const auto& bdatxhi_n   = bdy_data_xhi[n_time   ][pvar].const_array();
+            const auto& bdatxhi_np1 = bdy_data_xhi[n_time_p1][pvar].const_array();
+            const auto& bdatylo_n   = bdy_data_ylo[n_time   ][pvar].const_array();
+            const auto& bdatylo_np1 = bdy_data_ylo[n_time_p1][pvar].const_array();
+            const auto& bdatyhi_n   = bdy_data_yhi[n_time   ][pvar].const_array();
+            const auto& bdatyhi_np1 = bdy_data_yhi[n_time_p1][pvar].const_array();
 
             // Current density to convert to conserved vars
             Array4<Real> r_arr = S_cur_data[IntVars::cons].array(mfi);
+
+            // Density used to couple the primitive bdy values, and the Rho
+            // target itself. With the mass-consistent forcing both are the
+            // ERA5 density rho*, so the momentum target is rho* u* and its
+            // divergence is ERA5's rather than the model's. fcons_tgt shares
+            // the cell-centered BoxArray/DM, so indexing it with this mfi is
+            // the same pattern already used for r_arr above.
+            Array4<const Real> rt_arr = (l_mass_consistent) ? fcons_tgt->const_array(mfi)
+                                                            : Array4<const Real>{};
+            const bool l_mc = l_mass_consistent;
+            const int  l_iv = ivar;
+            const int  l_ir = ivarR;
+            // fcons_tgt's physical-boundary ghosts are zero-initialized, so
+            // clamp into the valid region (the wall face then sees the same
+            // zero-gradient density fill_from_realbdy imposes).
+            const int cx_lo = dom_cc_lo.x, cx_hi = dom_cc_hi.x;
+            const int cy_lo = dom_cc_lo.y, cy_hi = dom_cc_hi.y;
 
             // Limiting offset
             int offset = width - 1;
@@ -365,15 +436,27 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 int ii = std::max(i , dom_lo.x); ii = std::min(ii, dom_lo.x+offset);
                 int jj = std::max(j , dom_lo.y); jj = std::min(jj, dom_hi.y);
 
+                // Coupling density: rho* under the mass-consistent forcing, so
+                // the momentum target is rho* u* and its divergence is ERA5's
+                // rather than carrying u* grad(rho_model) as a mass source.
+                auto RHO = [=] (int a, int b, int c) -> Real {
+                    if (!l_mc) { return r_arr(a,b,c); }
+                    a = amrex::min(amrex::max(a,cx_lo),cx_hi);
+                    b = amrex::min(amrex::max(b,cy_lo),cy_hi);
+                    return rt_arr(a,b,c,Rho_comp);
+                };
                 Real rho_interp;
-                if (ivar==ivarU) {
-                    rho_interp = myhalf * ( r_arr(i-1,j  ,k) + r_arr(i,j,k) );
+                if (l_iv==l_ir) {
+                    rho_interp = RHO(i,j,k);            // Rho target is rho* itself
+                } else if (ivar==ivarU) {
+                    rho_interp = myhalf * ( RHO(i-1,j  ,k) + RHO(i,j,k) );
                 } else if (ivar==ivarV) {
-                    rho_interp = myhalf * ( r_arr(i  ,j-1,k) + r_arr(i,j,k) );
+                    rho_interp = myhalf * ( RHO(i  ,j-1,k) + RHO(i,j,k) );
                 } else {
-                    rho_interp = r_arr(i,j,k);
+                    rho_interp = RHO(i,j,k);
                 }
 
+                if (l_iv == l_ir) { arr_xlo(i,j,k) = rho_interp; return; }
                 if (bdatxlo) {
                     int ii2 = std::min(std::max(i , dom_cc_lo.x), dom_cc_hi.x);
                     int jj2 = std::min(std::max(j , dom_cc_lo.y), dom_cc_hi.y);
@@ -388,15 +471,27 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 int ii = std::max(i , dom_hi.x-offset); ii = std::min(ii, dom_hi.x);
                 int jj = std::max(j , dom_lo.y);        jj = std::min(jj, dom_hi.y);
 
+                // Coupling density: rho* under the mass-consistent forcing, so
+                // the momentum target is rho* u* and its divergence is ERA5's
+                // rather than carrying u* grad(rho_model) as a mass source.
+                auto RHO = [=] (int a, int b, int c) -> Real {
+                    if (!l_mc) { return r_arr(a,b,c); }
+                    a = amrex::min(amrex::max(a,cx_lo),cx_hi);
+                    b = amrex::min(amrex::max(b,cy_lo),cy_hi);
+                    return rt_arr(a,b,c,Rho_comp);
+                };
                 Real rho_interp;
-                if (ivar==ivarU) {
-                    rho_interp = myhalf * ( r_arr(i-1,j  ,k) + r_arr(i,j,k) );
+                if (l_iv==l_ir) {
+                    rho_interp = RHO(i,j,k);            // Rho target is rho* itself
+                } else if (ivar==ivarU) {
+                    rho_interp = myhalf * ( RHO(i-1,j  ,k) + RHO(i,j,k) );
                 } else if (ivar==ivarV) {
-                    rho_interp = myhalf * ( r_arr(i  ,j-1,k) + r_arr(i,j,k) );
+                    rho_interp = myhalf * ( RHO(i  ,j-1,k) + RHO(i,j,k) );
                 } else {
-                    rho_interp = r_arr(i,j,k);
+                    rho_interp = RHO(i,j,k);
                 }
 
+                if (l_iv == l_ir) { arr_xhi(i,j,k) = rho_interp; return; }
                 if (bdatxhi) {
                     int ii2 = std::min(std::max(i , dom_cc_lo.x), dom_cc_hi.x);
                     int jj2 = std::min(std::max(j , dom_cc_lo.y), dom_cc_hi.y);
@@ -413,15 +508,27 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 int ii = std::max(i , dom_lo.x); ii = std::min(ii, dom_hi.x);
                 int jj = std::max(j , dom_lo.y); jj = std::min(jj, dom_lo.y+offset);
 
+                // Coupling density: rho* under the mass-consistent forcing, so
+                // the momentum target is rho* u* and its divergence is ERA5's
+                // rather than carrying u* grad(rho_model) as a mass source.
+                auto RHO = [=] (int a, int b, int c) -> Real {
+                    if (!l_mc) { return r_arr(a,b,c); }
+                    a = amrex::min(amrex::max(a,cx_lo),cx_hi);
+                    b = amrex::min(amrex::max(b,cy_lo),cy_hi);
+                    return rt_arr(a,b,c,Rho_comp);
+                };
                 Real rho_interp;
-                if (ivar==ivarU) {
-                    rho_interp = myhalf * ( r_arr(i-1,j  ,k) + r_arr(i,j,k) );
+                if (l_iv==l_ir) {
+                    rho_interp = RHO(i,j,k);            // Rho target is rho* itself
+                } else if (ivar==ivarU) {
+                    rho_interp = myhalf * ( RHO(i-1,j  ,k) + RHO(i,j,k) );
                 } else if (ivar==ivarV) {
-                    rho_interp = myhalf * ( r_arr(i  ,j-1,k) + r_arr(i,j,k) );
+                    rho_interp = myhalf * ( RHO(i  ,j-1,k) + RHO(i,j,k) );
                 } else {
-                    rho_interp = r_arr(i,j,k);
+                    rho_interp = RHO(i,j,k);
                 }
 
+                if (l_iv == l_ir) { arr_ylo(i,j,k) = rho_interp; return; }
                 if (bdatylo) {
                     int ii2 = std::min(std::max(i , dom_cc_lo.x), dom_cc_hi.x);
                     int jj2 = std::min(std::max(j , dom_cc_lo.y), dom_cc_hi.y);
@@ -436,15 +543,27 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 int ii = std::max(i , dom_lo.x);        ii = std::min(ii, dom_hi.x);
                 int jj = std::max(j , dom_hi.y-offset); jj = std::min(jj, dom_hi.y);
 
+                // Coupling density: rho* under the mass-consistent forcing, so
+                // the momentum target is rho* u* and its divergence is ERA5's
+                // rather than carrying u* grad(rho_model) as a mass source.
+                auto RHO = [=] (int a, int b, int c) -> Real {
+                    if (!l_mc) { return r_arr(a,b,c); }
+                    a = amrex::min(amrex::max(a,cx_lo),cx_hi);
+                    b = amrex::min(amrex::max(b,cy_lo),cy_hi);
+                    return rt_arr(a,b,c,Rho_comp);
+                };
                 Real rho_interp;
-                if (ivar==ivarU) {
-                    rho_interp = myhalf * ( r_arr(i-1,j  ,k) + r_arr(i,j,k) );
+                if (l_iv==l_ir) {
+                    rho_interp = RHO(i,j,k);            // Rho target is rho* itself
+                } else if (ivar==ivarU) {
+                    rho_interp = myhalf * ( RHO(i-1,j  ,k) + RHO(i,j,k) );
                 } else if (ivar==ivarV) {
-                    rho_interp = myhalf * ( r_arr(i  ,j-1,k) + r_arr(i,j,k) );
+                    rho_interp = myhalf * ( RHO(i  ,j-1,k) + RHO(i,j,k) );
                 } else {
-                    rho_interp = r_arr(i,j,k);
+                    rho_interp = RHO(i,j,k);
                 }
 
+                if (l_iv == l_ir) { arr_yhi(i,j,k) = rho_interp; return; }
                 if (bdatyhi) {
                     int ii2 = std::min(std::max(i , dom_cc_lo.x), dom_cc_hi.x);
                     int jj2 = std::min(std::max(j , dom_cc_lo.y), dom_cc_hi.y);
@@ -465,6 +584,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
     auto ProbHi = geom.ProbHiArray();
 
     for (int ivar(ivarU); ivar < BdyEnd; ivar++) {
+        if (ivar == ivarQV && !l_relax_qv) { continue; }
         int ivar_idx = ivar_map[ivar];
         int icomp    = comp_map[ivar];
 
@@ -505,6 +625,14 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             } else if (ivar  == ivarQV){
                 arr_xlo  = Q_xlo.array(); arr_xhi = Q_xhi.array();
                 arr_ylo  = Q_ylo.array(); arr_yhi = Q_yhi.array();
+                rhs_arr  = S_rhs[IntVars::cons].array(mfi);
+                data_arr = S_cur_data[IntVars::cons].array(mfi);
+            } else if (ivar  == ivarR){
+                // Rho relaxation toward rho*. This runs BEFORE the normal-face
+                // product-rule overwrite below, so that overwrite picks up the
+                // rho tendency including this term rather than a stale one.
+                arr_xlo  = R_xlo.array(); arr_xhi = R_xhi.array();
+                arr_ylo  = R_ylo.array(); arr_yhi = R_yhi.array();
                 rhs_arr  = S_rhs[IntVars::cons].array(mfi);
                 data_arr = S_cur_data[IntVars::cons].array(mfi);
             } else {
@@ -586,7 +714,13 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            Real rho_tend = rhs_cons(i,j,k);
+            // i == ihi is the x-face at nx, so cell (i,j,k) is the FIRST GHOST:
+            // S_rhs[cons] there is never written (every RHS writer works on
+            // mfi.tilebox()) and F_slow is setVal(0) once at construction, so
+            // reading rhs_cons(i,...) silently drops the u*drho/dt term on the
+            // hi walls while it stays live on the lo walls. Use the adjacent
+            // valid cell, mirroring the lo side.
+            Real rho_tend = rhs_cons(i-1,j,k);
             Real rho_val  = Real(0.5) * (cons_arr(i,j,k) + cons_arr(i-1,j,k));
             Real u_tend, u_val;
             if (btenxhi) {
@@ -616,7 +750,8 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            Real rho_tend = rhs_cons(i,j,k);
+            // See the x-hi note: (i,j,k) here is the first ghost in y.
+            Real rho_tend = rhs_cons(i,j-1,k);
             Real rho_val  = Real(0.5) * (cons_arr(i,j,k) + cons_arr(i,j-1,k));
             Real v_tend, v_val;
             if (btenyhi) {
