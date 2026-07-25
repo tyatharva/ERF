@@ -422,8 +422,23 @@ ERF::fill_bdy_data_from_hindcast ()
     final_bdy_time    = start_time + (ntimes-1) * bdy_time_interval;
 
     const bool l_use_moisture = (solverChoice.moisture_type != MoistureType::None);
-    const int BdyEnd = l_use_moisture ? MetGridBdyVars::NumTypes
-                                      : MetGridBdyVars::NumTypes-1;
+    const int BdyEnd0 = l_use_moisture ? MetGridBdyVars::NumTypes
+                                       : MetGridBdyVars::NumTypes-1;
+
+    // Optionally carry rho and w through to the boundary planes as well
+    // (UPSTREAM_ISSUES #14: the relaxation constrains only u,v,theta,qv, so
+    // the imposed winds carry a mass-flux divergence the local density was
+    // never in balance with, and the band absorbs it as spurious w). The
+    // frames already hold both fields and FillForecastStateMultiFabs has
+    // already interpolated them onto the ERF grid -- they were simply
+    // dropped here. Two independent knobs on purpose: rho is the physical
+    // consistency constraint, w only suppresses the symptom, so they must
+    // be testable apart. See HindcastBdyVars.
+    bool l_bdy_rho = false, l_bdy_w = false;
+    { ParmParse pp("erf");
+      pp.query("hindcast_bdy_rho", l_bdy_rho);
+      pp.query("hindcast_bdy_w",   l_bdy_w); }
+    const int BdyEnd = (l_bdy_rho || l_bdy_w) ? HindcastBdyVars::NumTypes : BdyEnd0;
 
     // Same arena convention as init_from_metgrid: CPU+GPU accessible
     Arena* Arena_Used = The_Arena();
@@ -485,6 +500,12 @@ ERF::fill_bdy_data_from_hindcast ()
                 bdy_data_xhi[itime][nvar].resize(xhi_plane_y_stag, 1, Arena_Used);
                 bdy_data_ylo[itime][nvar].resize(ylo_plane_y_stag, 1, Arena_Used);
                 bdy_data_yhi[itime][nvar].resize(yhi_plane_y_stag, 1, Arena_Used);
+            } else if (nvar==HindcastBdyVars::W) {
+                // w lives on z faces
+                bdy_data_xlo[itime][nvar].resize(convert(xlo_plane_no_stag,{0,0,1}), 1, Arena_Used);
+                bdy_data_xhi[itime][nvar].resize(convert(xhi_plane_no_stag,{0,0,1}), 1, Arena_Used);
+                bdy_data_ylo[itime][nvar].resize(convert(ylo_plane_no_stag,{0,0,1}), 1, Arena_Used);
+                bdy_data_yhi[itime][nvar].resize(convert(yhi_plane_no_stag,{0,0,1}), 1, Arena_Used);
             } else {
                 bdy_data_xlo[itime][nvar].resize(xlo_plane_no_stag, 1, Arena_Used);
                 bdy_data_xhi[itime][nvar].resize(xhi_plane_no_stag, 1, Arena_Used);
@@ -509,6 +530,8 @@ ERF::fill_bdy_data_from_hindcast ()
             else if (nvar==MetGridBdyVars::V)  { src = &fyvel; scomp = 0; }
             else if (nvar==MetGridBdyVars::T)  { src = &fcons; scomp = RhoTheta_comp; } // plain theta
             else if (nvar==MetGridBdyVars::QV) { src = &fcons; scomp = RhoQ1_comp;    } // plain qv
+            else if (nvar==HindcastBdyVars::RHO) { src = &fcons; scomp = Rho_comp;    } // density
+            else if (nvar==HindcastBdyVars::W)   { src = &forecast_state_1[lev][Vars::zvel]; scomp = 0; }
             strip_to_global_fab(*src, scomp, bdy_data_xlo[itime][nvar].box(), bdy_data_xlo[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_xhi[itime][nvar].box(), bdy_data_xhi[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_ylo[itime][nvar].box(), bdy_data_ylo[itime][nvar]);
@@ -588,7 +611,8 @@ ERF::init_thermo_from_hindcast (const int lev)
     }
 
     Print() << "HindCast init: base state and thermodynamic state rebuilt from "
-            << "the interpolated ERA5 frame (theta/qv coupling)." << std::endl;
+            << "the interpolated ERA5 frame (theta/qv coupling); lev " << lev
+            << " rho min/max " << cons.min(Rho_comp) << " " << cons.max(Rho_comp) << std::endl;
 }
 
 void

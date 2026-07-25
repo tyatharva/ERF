@@ -51,14 +51,27 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                              0, 0, 0,
                              0, 0, 0,
                              0, 0};
+    // HINDCAST ONLY (UPSTREAM_ISSUES #14): also specify rho and/or w from the
+    // hindcast boundary planes. Gated on knobs no metgrid/wrfbdy deck sets --
+    // required, because HindcastBdyVars::{RHO,W} deliberately alias
+    // WRFBdyVars::{PH,MU}. Separate knobs: rho is the consistency constraint,
+    // w only suppresses the symptom.
+    static const bool l_bdy_rho = [] {
+        bool b=false; ParmParse pp("erf"); pp.query("hindcast_bdy_rho", b); return b; }();
+    static const bool l_bdy_w = [] {
+        bool b=false; ParmParse pp("erf"); pp.query("hindcast_bdy_w", b); return b; }();
+    const bool l_have_ext = (!bdy_data_xlo.empty()) &&
+        (static_cast<int>(bdy_data_xlo[0].size()) >= HindcastBdyVars::NumTypes);
+    if (l_bdy_rho && l_have_ext) { cons_read[Rho_comp] = 1; }
+
     Vector<Vector<int>> is_read;
     is_read.push_back( cons_read );
     is_read.push_back( {1} ); // xvel
     is_read.push_back( {1} ); // yvel
-    is_read.push_back( {0} ); // zvel
+    is_read.push_back( {(l_bdy_w && l_have_ext) ? 1 : 0} ); // zvel
 
     // Real BC mapping (WRF/MetGrid)
-    Vector<int> cons_map = {Rho_comp, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
+    Vector<int> cons_map = {HindcastBdyVars::RHO, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
                             RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
                             RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
                             RhoQ7_comp, RhoQ8_comp, RhoQ9_comp,
@@ -67,7 +80,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     ind_map.push_back( cons_map );
     ind_map.push_back( {RealBdyVars::U} ); // xvel
     ind_map.push_back( {RealBdyVars::V} ); // yvel
-    ind_map.push_back( {0} );              // zvel
+    ind_map.push_back( {HindcastBdyVars::W} ); // zvel (only read when gated on)
 
     // Bndry plane mapping
     Vector<int> bnd_cons_map = {Rho_comp, BCVars::RhoTheta_bc_comp, RhoKE_comp, RhoScalar_comp,
@@ -175,7 +188,9 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                                 dest_arr(i,j,k,comp_idx) = oma   * bdatxlo_n  (ii,jj,k,0)
                                                          + alpha * bdatxlo_np1(ii,jj,k,0);
                         }
-                        if (var_idx == Vars::cons) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
+                        // Rho itself is stored directly; everything else in cons
+                        // is a rho-weighted quantity built from a plain bdy value.
+                        if (var_idx == Vars::cons && comp_idx != Rho_comp) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
@@ -190,7 +205,9 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                                 dest_arr(i,j,k,comp_idx) = oma   * bdatxhi_n  (ii,jj,k,0)
                                                          + alpha * bdatxhi_np1(ii,jj,k,0);
                         }
-                        if (var_idx == Vars::cons) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
+                        // Rho itself is stored directly; everything else in cons
+                        // is a rho-weighted quantity built from a plain bdy value.
+                        if (var_idx == Vars::cons && comp_idx != Rho_comp) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                     });
 
                     // y-faces (do not include exterior x ghost cells)
@@ -206,7 +223,9 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                             dest_arr(i,j,k,comp_idx) = oma   * bdatylo_n  (i,jj,k,0)
                                                      + alpha * bdatylo_np1(i,jj,k,0);
                         }
-                        if (var_idx == Vars::cons) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
+                        // Rho itself is stored directly; everything else in cons
+                        // is a rho-weighted quantity built from a plain bdy value.
+                        if (var_idx == Vars::cons && comp_idx != Rho_comp) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
@@ -219,7 +238,9 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                             dest_arr(i,j,k,comp_idx) = oma   * bdatyhi_n  (i,jj,k,0)
                                                      + alpha * bdatyhi_np1(i,jj,k,0);
                         }
-                        if (var_idx == Vars::cons) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
+                        // Rho itself is stored directly; everything else in cons
+                        // is a rho-weighted quantity built from a plain bdy value.
+                        if (var_idx == Vars::cons && comp_idx != Rho_comp) dest_arr(i,j,k,comp_idx) *= dest_arr(i,j,k,Rho_comp);
                     });
                 } // mfi
 

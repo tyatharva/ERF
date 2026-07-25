@@ -128,6 +128,29 @@ namespace RealBdyVars {
     };
 }
 
+// HINDCAST-ONLY extension of the real-BC boundary planes.
+//
+// The relaxation specifies u, v, theta and qv but never rho or w, so the
+// imposed (rho,u) pair cannot satisfy discrete continuity and the band
+// absorbs the mass-flux imbalance as spurious vertical motion (measured:
+// 9-12% of band cells with w > 1 m/s in EVERY regime, vs ~1% interior --
+// UPSTREAM_ISSUES #14). The ERA5 frames already carry rho and w all the way
+// onto the ERF grid; fill_bdy_data_from_hindcast simply discarded them.
+//
+// These indices continue past RealBdyVars::NumTypes and are ONLY valid for
+// planes built by fill_bdy_data_from_hindcast. They deliberately COLLIDE
+// with WRFBdyVars::PH (4) and WRFBdyVars::MU (5), so every consumer must
+// gate on erf.hindcast_bdy_rho / erf.hindcast_bdy_w, which no metgrid or
+// wrfbdy deck sets. RealBdyVars::NumTypes is left at 4 so the BdyEnd logic
+// in realbdy_compute_interior_ghost_rhs is unchanged.
+namespace HindcastBdyVars {
+    enum {
+        RHO = RealBdyVars::NumTypes,   // 4  (cell-centered)
+        W,                             // 5  (z-face-staggered)
+        NumTypes
+    };
+}
+
 namespace WRFBdyVars {
     enum {
         U  = 0,
