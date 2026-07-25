@@ -6,8 +6,9 @@ the control and mass-consistent boundary runs, plus the domain mass drift.
 import yt, numpy as np, glob, sys
 yt.set_log_level(50)
 
-DMAX = 21
-CFGS = ['ctl', 'mc']
+DMAX = 26
+import os
+CFGS = os.environ.get('CFGS','ctl2,wfc').split(',')
 root = '/app/ERF/bdyfix'
 
 res, mass = {}, {}
@@ -24,17 +25,17 @@ for cfg in CFGS:
     d3 = np.repeat(d2[:, :, None], nz, axis=2)
     res[cfg] = [(100 * (np.abs(w[d3 == k]) > 1).mean(),
                  float(np.sqrt((w[d3 == k] ** 2).mean()))) for k in range(DMAX)]
-    # interior background: everything at least 25 cells in
-    bg = np.abs(w[d3 >= 25])
-    res[cfg].append((100 * (bg > 1).mean(), float(np.sqrt((w[d3 >= 25] ** 2).mean()))))
+    # interior background: everything at least 30 cells in
+    bg = np.abs(w[d3 >= 30])
+    res[cfg].append((100 * (bg > 1).mean(), float(np.sqrt((w[d3 >= 30] ** 2).mean()))))
     print(f'{cfg}: {pl[-1].split("/")[-1]}  grid {nx}x{ny}x{nz}', file=sys.stderr)
 
-print('\n  shell |      control w>1   w_rms |  mass-consistent w>1   w_rms |  ratio')
+print(f'\n  shell |   {CFGS[0]:>10s} w>1   w_rms | {CFGS[1]:>16s} w>1   w_rms |  ratio')
 print('  ------+-------------------------+-----------------------------+-------')
 for k in range(DMAX):
-    c, m = res['ctl'][k], res['mc'][k]
+    c, m = res[CFGS[0]][k], res[CFGS[1]][k]
     r = (m[0] / c[0]) if c[0] > 1e-9 else float('nan')
     print(f'  d={k:2d}  | {c[0]:15.2f}% {c[1]:7.3f} | {m[0]:19.2f}% {m[1]:7.3f} | {r:5.2f}')
-c, m = res['ctl'][DMAX], res['mc'][DMAX]
+c, m = res[CFGS[0]][DMAX], res[CFGS[1]][DMAX]
 print('  ------+-------------------------+-----------------------------+-------')
-print(f'  d>=25 | {c[0]:15.2f}% {c[1]:7.3f} | {m[0]:19.2f}% {m[1]:7.3f} |   (interior background)')
+print(f'  d>=30 | {c[0]:15.2f}% {c[1]:7.3f} | {m[0]:19.2f}% {m[1]:7.3f} |   (interior background)')

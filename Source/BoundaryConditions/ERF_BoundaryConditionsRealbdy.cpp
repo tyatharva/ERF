@@ -310,5 +310,80 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
             } // is_read
         } // comp
     } // var
+
+    // Barotropic wall mass-flux correction (erf.hindcast_wall_flux_correction).
+    //
+    // Delivers the column-mass constraint through the wall FLUX rather than a
+    // volumetric source in the rho equation: the wall-normal velocity picks up
+    // a single depth-independent increment sized so the imposed flux carries
+    // the column's mass error. The rho equation keeps a pure flux divergence,
+    // so the acoustic solver is never forced, and the increment has no
+    // vertical structure to project onto vertical modes.
+    static const bool l_wall_corr = [] {
+        bool b=false; ParmParse pp("erf");
+        pp.query("hindcast_wall_flux_correction", b); return b; }();
+    static const Real l_wall_tau = [] {
+        Real t=Real(3600.0); ParmParse pp("erf");
+        pp.query("hindcast_wall_flux_tau", t); return t; }();
+
+    if (l_wall_corr && !cons_only &&
+        solverChoice.init_type == InitType::HindCast &&
+        !forecast_state_interp[lev].empty())
+    {
+        const MultiFab& cons_mf = *mfs[Vars::cons];
+        MultiFab dvel(cons_mf.boxArray(), cons_mf.DistributionMap(), 1, 1);
+        compute_wall_flux_correction(geom[lev], cons_mf,
+                                     forecast_state_interp[lev][Vars::cons],
+                                     l_wall_tau, dvel);
+
+        const auto dlo = lbound(geom[lev].Domain());
+        const auto dhi = ubound(geom[lev].Domain());
+        const IntVect ngv = ngvect_vels;
+
+        for (int vdir = 0; vdir < 2; ++vdir)
+        {
+            MultiFab& mf = (vdir == 0) ? *mfs[Vars::xvel] : *mfs[Vars::yvel];
+            Box domv = geom[lev].Domain();
+            domv.convert(mf.boxArray().ixType());
+
+            for (MFIter mfi(mf,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                Box gbx = mfi.growntilebox(ngv);
+                Box b_xlo, b_xhi, b_ylo, b_yhi;
+                realbdy_bc_bxs_xy(gbx, domv, 1, b_xlo, b_xhi, b_ylo, b_yhi, ngv);
+
+                const Array4<Real>&       vel = mf.array(mfi);
+                const Array4<const Real>& dv  = dvel.const_array(mfi);
+
+                if (vdir == 0) {
+                    // u is the normal velocity at the x walls; + is inward at
+                    // x-lo and outward at x-hi.
+                    ParallelFor(b_xlo, b_xhi,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        int jj = amrex::min(amrex::max(j,dlo.y),dhi.y);
+                        vel(i,j,k) += dv(dlo.x,jj,k);
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        int jj = amrex::min(amrex::max(j,dlo.y),dhi.y);
+                        vel(i,j,k) -= dv(dhi.x,jj,k);
+                    });
+                } else {
+                    ParallelFor(b_ylo, b_yhi,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        int ii = amrex::min(amrex::max(i,dlo.x),dhi.x);
+                        vel(i,j,k) += dv(ii,dlo.y,k);
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        int ii = amrex::min(amrex::max(i,dlo.x),dhi.x);
+                        vel(i,j,k) -= dv(ii,dhi.y,k);
+                    });
+                }
+            } // mfi
+        } // vdir
+    }
 }
 #endif

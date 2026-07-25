@@ -158,6 +158,68 @@ realbdy_bc_bxs_xy (const Box& bx,
  * @param[in] bdy_data_yhi boundary data on interior of high y-face
  */
 void
+compute_wall_flux_correction (const Geometry& geom,
+                              const MultiFab& cons_model,
+                              const MultiFab& cons_tgt,
+                              Real tau,
+                              MultiFab& dvel)
+{
+    BL_PROFILE("compute_wall_flux_correction()");
+
+    dvel.setVal(0.0);
+
+    const Box& domain = geom.Domain();
+    const auto dom_lo = lbound(domain);
+    const auto dom_hi = ubound(domain);
+    const Real dx     = geom.CellSize(0);
+    const Real dy     = geom.CellSize(1);
+    const Real dz     = geom.CellSize(2);
+
+    for (MFIter mfi(dvel); mfi.isValid(); ++mfi)
+    {
+        const Box& bx = mfi.tilebox();
+        // The column sums require the whole column on one box.
+        if (bx.smallEnd(2) != dom_lo.z || bx.bigEnd(2) != dom_hi.z) { continue; }
+
+        const Box bx2 = makeSlab(bx,2,bx.smallEnd(2));
+        const Array4<const Real>& rm = cons_model.const_array(mfi);
+        const Array4<const Real>& rt = cons_tgt.const_array(mfi);
+        const Array4<Real>&       dv = dvel.array(mfi);
+
+        const int klo = dom_lo.z, khi = dom_hi.z;
+
+        ParallelFor(bx2, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
+        {
+            // Only columns that own a domain-wall face are corrected.
+            const bool wx = (i == dom_lo.x) || (i == dom_hi.x);
+            const bool wy = (j == dom_lo.y) || (j == dom_hi.y);
+            if (!wx && !wy) { return; }
+
+            Real M = Real(0.0), Mt = Real(0.0);
+            for (int k = klo; k <= khi; ++k) {
+                M  += rm(i,j,k,Rho_comp) * dz;
+                Mt += rt(i,j,k,Rho_comp) * dz;
+            }
+            if (M <= Real(0.0)) { return; }
+
+            // Corner columns own an x-wall and a y-wall; splitting the
+            // correction between them avoids double counting.
+            const Real split = (wx && wy) ? Real(0.5) : Real(1.0);
+            const Real len   = wx ? dx : dy;
+            dv(i,j,klo) = split * len * (Mt/M - Real(1.0)) / tau;
+        });
+
+        // Barotropic: broadcast the k=klo value up the column so consumers can
+        // index it at any k.
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            dv(i,j,k) = dv(i,j,klo);
+        });
+    }
+    dvel.FillBoundary(geom.periodicity());
+}
+
+void
 realbdy_compute_interior_ghost_rhs (const Real& time,
                                     const Real& delta_t,
                                     const Real& start_bdy_time,
@@ -649,6 +711,26 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
 
     // Set normal velocity RHS at the boundary
     //==========================================================
+    // The barotropic wall flux correction is folded into u_val/v_val here as
+    // well as into the Dirichlet value in fill_from_realbdy, so the product
+    // rule keeps the wall momentum consistent with the density it is built
+    // from instead of fighting the imposed value.
+    static const bool l_wall_corr = [] {
+        bool b=false; amrex::ParmParse pp("erf");
+        pp.query("hindcast_wall_flux_correction", b); return b; }();
+    static const Real l_wall_tau = [] {
+        Real t=Real(3600.0); amrex::ParmParse pp("erf");
+        pp.query("hindcast_wall_flux_tau", t); return t; }();
+    const bool l_wc = l_wall_corr && (fcons_tgt != nullptr);
+
+    MultiFab dvelc;
+    if (l_wc) {
+        dvelc.define(S_cur_data[IntVars::cons].boxArray(),
+                     S_cur_data[IntVars::cons].DistributionMap(), 1, 1);
+        compute_wall_flux_correction(geom, S_cur_data[IntVars::cons], *fcons_tgt,
+                                     l_wall_tau, dvelc);
+    }
+
     Box domain  = geom.Domain();
     Box domainx = convert(domain, IntVect(1,0,0));
     Box domainy = convert(domain, IntVect(0,1,0));
@@ -686,6 +768,10 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
 
         Array4<const Real> rhs_cons = S_rhs[IntVars::cons].const_array(mfi);
         Array4<const Real> cons_arr = S_cur_data[IntVars::cons].const_array(mfi);
+        Array4<const Real> dvarr    = l_wc ? dvelc.const_array(mfi) : Array4<const Real>{};
+        const auto wlo = lbound(geom.Domain());
+        const auto whi = ubound(geom.Domain());
+        const bool l_wc_l = l_wc;
 
         const auto& bdatxlo_n   = bdy_data_xlo[n_time   ][ivarU].const_array();
         const auto& bdatxlo_np1 = bdy_data_xlo[n_time_p1][ivarU].const_array();
@@ -710,6 +796,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 u_tend   = (bdatxlo_np1(i,j,k) - bdatxlo_n(i,j,k)) / bdy_time_interval;
                 u_val    = oma * bdatxlo_n(i,j,k) + alpha * bdatxlo_np1(i,j,k);
             }
+            if (l_wc_l) { u_val += dvarr(wlo.x, amrex::min(amrex::max(j,wlo.y),whi.y), k); }
                 rhs_xmom(i,j,k) = rho_val * u_tend + u_val * rho_tend;
             },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
@@ -730,6 +817,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 u_tend   = (bdatxhi_np1(i,j,k) - bdatxhi_n(i,j,k)) / bdy_time_interval;
                 u_val    = oma * bdatxhi_n(i,j,k) + alpha * bdatxhi_np1(i,j,k);
             }
+            if (l_wc_l) { u_val -= dvarr(whi.x, amrex::min(amrex::max(j,wlo.y),whi.y), k); }
             rhs_xmom(i,j,k) = rho_val * u_tend + u_val * rho_tend;
         });
 
@@ -746,6 +834,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 v_tend   = (bdatylo_np1(i,j,k) - bdatylo_n(i,j,k)) / bdy_time_interval;
                 v_val    = oma * bdatylo_n(i,j,k) + alpha * bdatylo_np1(i,j,k);
             }
+            if (l_wc_l) { v_val += dvarr(amrex::min(amrex::max(i,wlo.x),whi.x), wlo.y, k); }
             rhs_ymom(i,j,k) = rho_val * v_tend + v_val * rho_tend;
         },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
@@ -761,6 +850,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 v_tend   = (bdatyhi_np1(i,j,k) - bdatyhi_n(i,j,k)) / bdy_time_interval;
                 v_val    = oma * bdatyhi_n(i,j,k) + alpha * bdatyhi_np1(i,j,k);
             }
+            if (l_wc_l) { v_val -= dvarr(amrex::min(amrex::max(i,wlo.x),whi.x), whi.y, k); }
             rhs_ymom(i,j,k) = rho_val * v_tend + v_val * rho_tend;
         });
     } // mfi

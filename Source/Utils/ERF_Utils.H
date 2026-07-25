@@ -140,6 +140,26 @@ void realbdy_compute_interior_ghost_rhs (const amrex::Real& total_time,
                                          std::unique_ptr<ReadBndryPlanes>& m_r2d);
 
 /*
+ * Barotropic wall mass-flux correction (HindCast real BCs).
+ *
+ * Fills dvel (cell-centered, 1 comp, nonzero only on the outermost ring of
+ * columns) with the increment to ADD to the INWARD wall-normal velocity so the
+ * wall flux carries each column's mass error:
+ *
+ *     dM/dt = (M_tgt - M)/tau  supplied by  (dvel/dx)*M
+ *  => dvel  = dx * (M_tgt/M - 1) / tau,     M = sum_k rho dz
+ *
+ * This delivers the mass constraint through a boundary FLUX, not a volumetric
+ * source in the rho equation, so the acoustic solver is never forced; and it
+ * is barotropic, so it adds no vertical structure.
+ */
+void compute_wall_flux_correction (const amrex::Geometry& geom,
+                                   const amrex::MultiFab& cons_model,
+                                   const amrex::MultiFab& cons_tgt,
+                                   amrex::Real tau,
+                                   amrex::MultiFab& dvel);
+
+/*
  * Compute relaxation region RHS at fine-crse interface
  */
 void
