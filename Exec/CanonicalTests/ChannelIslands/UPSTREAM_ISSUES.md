@@ -1157,3 +1157,74 @@ carries no monotone ramp signature.
 constraint it halved the drift versus plain extrapolation (+96.0 vs +174.6 %/day);
 with it, it is far worse (+65.8 vs -7.3 %/day). The extrapolation variant is used
 throughout.
+
+### Jan-9 wet test: the band precipitation artifact is gone; the interior is wetter
+
+24 h, Jan-9 2023, both on the same binary. NSCBC = `nscbc_lateral=1 nscbc_outflow=0
+nscbc_parts=31 nscbc_mass_tau=60`. Both ran clean: 24 h complete, exit 0, zero
+w-damping / low-temperature / negative-theta warnings.
+
+**Reference correction.** ERA5 over the *whole grib footprint* is 13.46 mm, but that
+footprint is much larger than the ERF domain and extends into wetter terrain. Over
+the matching ERF footprint it is **5.91 mm** (d>=0), **3.17 mm** (d>=20), peak
+33.1 mm. Every ratio below uses the matched footprint. Note also that ERA5 at 25 km
+peaks at 33.1 mm against ~130 mm observed, so it under-resolves the maximum by ~4x
+and is a poor denominator for peak comparison.
+
+**The historical 26x does not reproduce.** Davies on the current binary gives 5.97x
+(matched footprint) or 2.61x (grib footprint) -- not 26x. Whatever that number
+measured, it is not what this deck and this code now do, and the like-for-like
+control below is the number to use.
+
+| metric | ERA5 (matched) / obs | Davies | NSCBC |
+|---|---|---|---|
+| domain mean | 5.91 mm | 35.30 mm (5.97x) | 30.36 mm (5.14x) |
+| d>=20 mean | 3.17 mm | 13.61 mm (4.29x) | 22.77 mm (7.18x) |
+| d>=20 max | ~130 mm obs | 222.1 mm (1.71x) | 244.9 mm (1.88x) |
+| mass drift, settled | -- | +0.775 %/day | **-0.098 %/day** |
+| band w, d=6 (ocean walls) | -- | **15.5%** | **0.5%** |
+
+**The decisive result is the per-wall precipitation.** 24-h wall-normal winds:
+xlo +10.53, ylo +12.65 m/s inward (inflow, ocean, 12 m terrain); xhi -10.55,
+yhi -15.03 m/s outward (outflow, land, 264/279 m).
+
+| d | Davies xlo | NSCBC xlo | Davies ylo | NSCBC ylo |
+|---|---|---|---|---|
+| 0 | **141.09** | 2.35 | 33.99 | 0.07 |
+| 1 | **175.66** | 5.13 | 60.11 | 0.35 |
+| 5 | 82.26 | 8.96 | 22.61 | 2.18 |
+| 25 | 9.78 | 25.12 | 9.68 | 20.05 |
+
+Davies dumps **141-176 mm of spurious 24-h rain in the first two cells of the flat
+ocean inflow wall**, decaying inward over ~10 cells -- the band w artifact expressed
+in precipitation. NSCBC puts 2.35 mm there. That artifact is eliminated.
+
+**Spin-up and contamination separate cleanly.** Under NSCBC the deficit appears only
+on the two INFLOW walls (xlo 2.35, ylo 0.07 mm at d=0, recovering over ~10-12 and
+~14-16 cells = 30-48 km); the excess appears only on the two OUTFLOW walls, which
+are also the two LAND walls, and stratifying by terrain at d>=20 shows it is
+orographic: flat cells (<100 m) mean 22.11 / max 101.1 mm, 100-400 m cells mean
+72.34 / max 244.9 mm. The interior maximum sits at d=31 on 283 m terrain -- deep
+interior, not boundary. Over flat water at d>=20 the max is 101 mm, *below* the
+~130 mm observed. So the 30-48 km recovery is Roberge spin-up from the 10 zeroed
+hydrometeors (an order of magnitude short of their 300 km worst case), and the
+boundary scheme's own contaminated region is d=0-2.
+
+**The interior is wetter under NSCBC (22.77 vs 13.61 mm) while the total is lower
+(30.36 vs 35.30 mm).** Hypothesis, not established: the Davies band's spurious
+ascent wrings moisture out at the inflow edge before it enters, so removing the
+artifact lets that moisture reach the interior and rain there. Davies' near-exact
+d>=20 match to the grib-footprint ERA5 mean (13.61 vs 13.46) was a coincidence of
+denominators, and against the matched footprint it is 4.29x, not 1.01x.
+
+**The d=11-16 shoulder does not appear in precipitation**, and on the wet day it is
+not distinct in w either (d=13 3.5%, *below* the 5.37% interior background; d=16
+6.7%, marginally above).
+
+### Minor ERF bug: a clipped final step corrupts rain_accum
+
+When the last step is clipped onto `stop_datetime` (here dt = 0.0117 s), ERF writes
+an extra plotfile in which `rain_accum` is NaN over 5852 of 8192 columns while every
+prognostic field is clean and the run exits 0. The preceding output at the same
+wall-clock time is correct. Any analysis that takes the last plotfile silently gets
+a NaN precipitation field.
