@@ -857,3 +857,89 @@ interior, not just the sponge.
 The cost of switching it off is the reason Davies relaxation exists: the bare
 Dirichlet wall goes to 55% at d=0 and mass drift worsens 12x. This is the
 over-specification tradeoff, measured -- not an argument for keeping the ramp.
+
+### The interior contamination is acoustic, and it is source-limited not reflection-limited
+
+Domain 128x64x32 at 3 km = 384 x 192 km. `d >= 25` is >= 75 km from the nearest
+wall. At 1200 steps, t = 1869 s. Carrier arrival times over 75 km:
+
+| carrier | speed | time to 75 km | arrived by t=1869 s? |
+|---|---|---|---|
+| acoustic | c = sqrt(gamma R T) = 335 m/s at 280 K | 224 s | yes, 8.3x over |
+| gravity wave | c* ~ 25-30 m/s (the speed WRF/ERF radiation BCs use) | 2500-3000 s | **no** |
+| advection | ~10 m/s | 7500 s | no |
+
+So the 10.88% interior background at 1869 s can only have been carried by sound.
+Extending the control to 3600 steps (t = 5649 s), by which time gravity waves
+*have* arrived, separates the two:
+
+| t (s) | bg (d>=25), relax on | bg, relax off |
+|---|---|---|
+| 604 | 5.60% | 2.57% |
+| 1233 | **36.76%** | 1.99% |
+| 1869 | 10.88% | 2.86% |
+| 3793 | 11.27% | -- |
+| 5649 | 11.43% | -- |
+
+The level is set by 1869 s and moves 0.55 points over the next 3780 s, so the
+gravity-wave share of the deep-interior contamination is <= 5%: **it is ~95%
+acoustic, measured rather than inferred.** The 36.76% transient at t = 1233 s
+is within 8% of the 1146 s acoustic transit of the long axis, consistent with a
+single coherent pulse sweep [inferred].
+
+That raises the question of whether the acoustically rigid lateral wall (`open`
+== `foextrap`, ghost rho_theta = first interior value, dp/dn = 0, plus `gpx`
+forced to zero on the real-BC path) is trapping the radiated energy. Two
+independent lines say no:
+
+1. **Saturation.** The interior level is flat from 1.6 to 4.9 long-axis acoustic
+   transits. A high-Q cavity would keep filling. It does not.
+2. **Direct test.** The existing lateral Rayleigh layer (`erf.hindcast_lateral_
+   sponge_strength`, 30 km deep) at 0.003 and 0.01 /s. At 0.01 /s a wave takes
+   90 s to traverse the layer, so it is damped by exp(-0.9) ~ 0.41 per pass,
+   ~60% energy absorption. Interior background: 10.88% (off) -> 10.86% (0.003)
+   -> 10.77% (0.01). **Nothing.** Caveat: that sponge damps rho_u toward the
+   *initial* state with its own xi^2 ramp, so it adds a source while absorbing,
+   and being velocity-only it is impedance-mismatched and partially reflecting.
+   A null result alone would not be conclusive; combined with (1) it is.
+
+**Conclusion: the band radiates directly inward and that first pass sets the
+interior level. A non-reflecting lateral treatment cannot reach the 2.86% floor
+-- only removing the ramp source can.** The NSCBC outflow radiation condition
+remains a well-posedness fix worth making, but it is not the lever for this
+metric.
+
+### Kill condition for the Helmholtz-projection fix: FIRES
+
+The proposed fix replaces the relaxation forcing C_raw = F*(A-B) with its
+divergence-free part, C_proj = C_raw - grad(phi), lap(phi) = div(C_raw), so that
+grad(F).(A-B) vanishes by construction. C_raw was dumped from the control
+trajectory at step 1200 (`erf.realbdy_dump_relax_step`) and decomposed offline
+per level on the band annulus, phi = 0 outside the band (exact, since C_raw = 0
+there -- verified: energy outside the band is identically 0) and homogeneous
+Neumann at the wall so the wall flux is left to the wall flux correction.
+Divergence is removed to 1e-10 and `retained` reproduces `ratio^2` to 0.3%,
+confirming a true orthogonal projection.
+
+| real_width | \|\|C_proj\|\|/\|\|C_raw\|\| | energy retained | curl-free share |
+|---|---|---|---|
+| 10 | **0.376** | 14.2% | **85.8%** |
+| 15 | **0.250** | 6.3% | **93.8%** |
+
+**86-94% of the relaxation forcing is a pure gradient.** The reason is
+structural, not incidental: C_raw = F(n)*(A-B) with F a monotone function of
+wall-normal distance alone. For a locally uniform error (A-B) = (a,0) the
+forcing is C = (F(x)a, 0) = grad(a * integral F dx) -- *exactly* a gradient. The
+ramp IS the gradient content. And it gets worse as the ramp gets smoother
+(0.376 -> 0.250 from width 10 to 15), the same 1/width signature seen from the
+other side.
+
+Projecting therefore destroys 86-94% of the nudging, and specifically destroys
+the divergent part -- which is precisely what mass drift is made of. The
+surviving rotational remnant carries no mass constraint at all, so mass drift
+would be at or worse than the relax-off +5.346 %/day. The streamfunction
+fallback (solve lap(psi) = curl C_raw, build C = (-d psi/dy, d psi/dx)) dies on
+the same number: it reconstructs the rotational Helmholtz component, which *is*
+the 14%.
+
+**The projection approach is not viable. Nothing was built.**

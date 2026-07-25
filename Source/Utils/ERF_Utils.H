@@ -31,6 +31,22 @@ inline int realbdy_relax_split ()
 }
 
 /*
+ * erf.realbdy_dump_relax_step (default -1 = never)
+ *
+ * Diagnostic only.  At this step, write the raw relaxation momentum forcing
+ * C_raw = F*(A-B) (up to the constant F1) to a plotfile "relaxdump" so its
+ * Helmholtz decomposition can be computed offline.  Does not alter the
+ * solution -- the forcing is dumped whether or not it is applied here.
+ */
+inline int realbdy_dump_relax_step ()
+{
+    static const int s_step = [] {
+        int v = -1; amrex::ParmParse pp("erf"); pp.query("realbdy_dump_relax_step", v); return v;
+    }();
+    return s_step;
+}
+
+/*
  * Create a new BoxArray in which every grid touches the bottom boundary
  */
 void ChopGrids2D (amrex::BoxArray& ba, const amrex::Box& domain, int target_size);

@@ -368,7 +368,12 @@ void ERF::advance_dycore (int level,
     // Euler update, so this is a pure ORDERING change -- the relaxation coefficient, the ramp
     // and the target are all untouched.
     // ***************************************************************************************
-    if (realbdy_relax_split() && solverChoice.use_real_bcs && (level == 0) && (real_width > 0))
+    const bool do_relax_split = (realbdy_relax_split() != 0);
+    const bool do_relax_dump  = (realbdy_dump_relax_step() >= 0 &&
+                                 istep[level] == realbdy_dump_relax_step());
+
+    if ((do_relax_split || do_relax_dump) &&
+        solverChoice.use_real_bcs && (level == 0) && (real_width > 0))
     {
         Vector<MultiFab> relax_rhs(IntVars::NumTypes);
         for (int i(0); i < IntVars::NumTypes; ++i) {
@@ -391,23 +396,49 @@ void ERF::advance_dycore (int level,
                                            bdy_data_ylo, bdy_data_yhi,
                                            m_r2d);
 
-        for (int i(0); i < IntVars::NumTypes; ++i) {
-            MultiFab::Saxpy(state_new[i], dt_advance, relax_rhs[i],
-                            0, 0, state_new[i].nComp(), IntVect(0));
+        // Diagnostic dump of the raw relaxation momentum forcing C_raw = F*(A-B),
+        // for the offline Helmholtz decomposition.  Face data is stored on cells
+        // as (lo,hi) pairs per direction so the face arrays reconstruct exactly.
+        if (do_relax_dump) {
+            MultiFab dump(state_new[IntVars::cons].boxArray(),
+                          state_new[IntVars::cons].DistributionMap(), 4, 0);
+            for (MFIter mfi(dump,TileNoZ()); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                const Array4<Real>&       d  = dump.array(mfi);
+                const Array4<const Real>& cx = relax_rhs[IntVars::xmom].const_array(mfi);
+                const Array4<const Real>& cy = relax_rhs[IntVars::ymom].const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    d(i,j,k,0) = cx(i  ,j  ,k);
+                    d(i,j,k,1) = cx(i+1,j  ,k);
+                    d(i,j,k,2) = cy(i  ,j  ,k);
+                    d(i,j,k,3) = cy(i  ,j+1,k);
+                });
+            }
+            WriteSingleLevelPlotfile("relaxdump", dump,
+                                     {"Cx_lo","Cx_hi","Cy_lo","Cy_hi"},
+                                     fine_geom, old_time, istep[level]);
+            Print() << "Wrote relaxdump at step " << istep[level] << std::endl;
         }
 
-        // The prognostic carrier between timesteps is the VELOCITY (the next
-        // ERF::Advance rebuilds the momenta with VelocityToMomentum), so the
-        // momentum increment above has to be pushed back into xvel/yvel or it
-        // is silently discarded.  Face density at the outermost face still uses
-        // the pre-update ghost value; that face is Dirichlet-set by the real BC
-        // path immediately afterwards, so it never reaches the next step.
-        MomentumToVelocity(xvel_new, yvel_new, zvel_new,
-                           state_new[IntVars::cons],
-                           state_new[IntVars::xmom],
-                           state_new[IntVars::ymom],
-                           state_new[IntVars::zmom],
-                           domain, domain_bcs_type);
+        if (do_relax_split) {
+            for (int i(0); i < IntVars::NumTypes; ++i) {
+                MultiFab::Saxpy(state_new[i], dt_advance, relax_rhs[i],
+                                0, 0, state_new[i].nComp(), IntVect(0));
+            }
+
+            // The prognostic carrier between timesteps is the VELOCITY (the next
+            // ERF::Advance rebuilds the momenta with VelocityToMomentum), so the
+            // momentum increment above has to be pushed back into xvel/yvel or it
+            // is silently discarded.  Face density at the outermost face still uses
+            // the pre-update ghost value; that face is Dirichlet-set by the real BC
+            // path immediately afterwards, so it never reaches the next step.
+            MomentumToVelocity(xvel_new, yvel_new, zvel_new,
+                               state_new[IntVars::cons],
+                               state_new[IntVars::xmom],
+                               state_new[IntVars::ymom],
+                               state_new[IntVars::zmom],
+                               domain, domain_bcs_type);
+        }
     }
 #endif
 
