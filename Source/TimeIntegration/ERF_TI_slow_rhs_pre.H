@@ -343,4 +343,24 @@
             }
         }
 #endif
+
+        // WRF-style relaxation zone at the coarse/fine interface
+        // (erf.cf_width > 0, one-way coupling). Upstream registers the
+        // coarse data for this (RegisterCoarseData in ERF_Advance.cpp) but
+        // never consumes it; with only the hard FillSet/interp interface the
+        // nest acts as a sealed cavity and rings to NaN (measured on the
+        // ChannelIslands hindcast nest: coherent whole-nest w oscillation,
+        // blowup at t~216 s under BOTH compressible and anelastic nest
+        // solvers). This relaxes cons (incl. rho) and all three momenta
+        // (incl. zmom) over cf_width cells toward the time-interpolated
+        // parent solution.
+        if (level > 0 && cf_width > 0) {
+            fine_compute_interior_ghost_rhs(old_stage_time, slow_dt,
+                                            cf_width, cf_set_width,
+                                            fine_geom,
+                                            &FPr_c[level-1], &FPr_u[level-1],
+                                            &FPr_v[level-1], &FPr_w[level-1],
+                                            domain_bcs_type,
+                                            S_rhs, S_data);
+        }
     }; // end slow_rhs_fun_pre

@@ -575,3 +575,112 @@ carry 8 fields [rho, u, v, w, theta, qv, qc, qr];
 `FillForecastStateMultiFabs` interpolates all of them onto the ERF grid;
 `fill_bdy_data_from_hindcast` then copies only u, v, theta, qv into the
 boundary planes. rho and w are computed and thrown away.
+
+## 15. SP + AMR: t_old = time - Real(1.e200) overflows float to -inf and
+## ErrorEst's FillPatchCrseLevel then wipes the just-initialized level 0
+
+In a single-precision build, `Real(1.e200)` is +inf, so the "never been
+advanced" sentinel `t_old[lev] = time - Real(1.e200)` (ERF_MakeNewLevel.cpp,
+ERF.cpp init_only, WRFInput/Metgrid init) sets t_old = -inf.
+`amrex::almostEqual(time, -inf)` is TRUE for any finite time (|x-y| = inf
+<= eps*|x+y| = inf), so `FillPatchCrseLevel` takes the `time == t_old`
+branch and sources `vars_old` -- which at init is never-written define
+memory. Single-level runs never hit this because the only pre-first-step
+caller of FillPatchCrseLevel on the full state is `ErrorEst`, which runs
+only when `max_level > 0`. Net effect: with amr.max_level=1 (even with no
+refinement box at all), the freshly HindCast-initialized level-0 state is
+replaced by garbage (rho ~ 0) during InitFromScratch; radiation then
+aborts on all-NaN gas-optics inputs while the dycore itself limps along.
+Diagnosed with MASS SL/ML = 0 / (nest-fraction) at t=0.
+FIX (this fork): use a finite sentinel `Real(1.e30)` at all five sites.
+DP builds are unaffected (1.e200 is finite in double).
+
+## 16. SP + AMR: ERFFillPatcher::Fill time-window assert uses an absolute
+## float-epsilon; subcycled fine times legitimately drift a few ulp of t
+
+`ERF_FillPatcher.H` asserted `time` within `[m_crse_times[0]-eps,
+m_crse_times[1]+eps]` with `eps = numeric_limits<float>::epsilon()`
+(absolute, ~1.19e-7). In SP, one ulp of elapsed time t is 1.19e-7*t --
+already 4e-7 at t = 3.35 s, 8e-3 s at t = 86400 s. Fine-level and
+coarse-level clocks accumulate a few ulp apart under subcycling, so the
+assert fires within seconds of model time (observed: level-1 step 36,
+t = 3.2032070 vs window edge 3.2032068). FIX (this fork): tolerance made
+relative (8 ulp of the window magnitude) and the time-interpolation
+factors clamped to [0,1]. DP hits the same issue only after ~1e9 s.
+
+## 17. Nested domains have NO active boundary relaxation -- the nest is a
+## sealed cavity and rings itself to NaN (likely the mechanism behind #3135)
+
+Upstream ERF's live nesting support fills fine-level ghosts by interpolation
+and hard-sets interface-normal momenta (ERFFillPatcher FillSet), with no
+blending zone: `cf_set_width != 0` is an unconditional Abort
+(Source/ERF.cpp:2970), `cf_width > 0` only triggers RegisterCoarseData whose
+cons data is never consumed, and `fine_compute_interior_ghost_rhs`
+(Source/Utils/ERF_InteriorGhostCells.cpp) -- a WRF-style relax zone over all
+IntVars INCLUDING rho and zmom -- has zero call sites. Measured consequence
+(ChannelIslands hindcast, 3 km parent + 1 km ocean nest): a coherent
+whole-nest w oscillation (w_rms identical at every shell d=0,1,2,5), growing
+and collapsing to NaN at t~216 s under BOTH compressible and anelastic nest
+solvers -- i.e. not an acoustic-scheme problem but wave energy trapped by a
+reflective interface. FIX (this fork): wired fine_compute_interior_ghost_rhs
+into the slow RHS for level>0 under cf_width>0 (one-way coupling), after
+correcting bit-rot: RegisterCoarseData registers MOMENTA, but the dead
+routine multiplied the FillRelax result by rho again (rho^2*u). With
+cf_width=10 the same nest runs 3500 steps with zero warnings and the nest
+rim shows w>1 fractions of 1.3-2.7% (= interior background), vs 12-24% for
+the lev-0 ERA5 band. Box-aligned stripe artifacts at nest boundaries over
+terrain (#3135, closed without diagnosis) are consistent with this
+reflective-interface mechanism.
+
+### #17 addendum: measured behavior of five c/f interface configurations
+### under a strong winter jet (Jan-9 2023, 3 km parent / 1 km nest, SP GPU)
+
+The convective regime (Sep-9 max-CAPE) is STABLE and rim-clean with
+cf_width=10 relaxation (3,500 steps, zero warnings). The winter-jet regime
+(40+ m/s crossing the nest) fails under every interface tried, each in a
+different, diagnosable way:
+
+1. relax incl. rho (cf_width=5):    NaN ~330 fine steps  (acoustic
+   destabilization by mass-equation RHS relaxation -- same failure class
+   the lev-0 band hit, which is why lev 0 uses a post-step rho blend)
+2. relax incl. rho (cf_width=10):   NaN ~600 (wider band delays, same mode)
+3. relax excl. rho:                 band rho ratchets 1.2 -> 2.5 kg/m3 in
+   ~2.5 min (continuity violation from momentum forcing with no mass
+   closure), EOS/radiation NaN ~450
+4. + post-step band rho blend toward parent (tau ~ 20 s), weaker momentum
+   relax (tau 50*dt), cf_width=20:  slows pile-up 4x, NaN ~1140
+5. + WRF-style specified zone (cf_set_width=3, fork-enabled past the
+   upstream abort; FillSet of full cons incl rho): mass budget contained
+   (rho max 1.43 vs 2.5), cold-top warnings vanish, but a near-surface
+   seam instability forms at the relax-band INNER edge (fine cell 20 of a
+   20-cell band, upwind side) and NaNs ~720.
+
+Interpretation: ERF currently has no complete nest-boundary closure; the
+pieces (FillSet, masks, relax RHS) exist but were never finished. The
+specified-zone + relax combination is closest -- the remaining defect is
+the band-to-interior transition (linear Factor taper; WRF uses exponential
+decay and applies horizontal diffusion in the relax zone).
+
+### #17 second addendum: the nested instability is STOCHASTIC, not
+### configuration-bound (2026-07-25)
+
+Re-running the exact configuration that survived 3,500 coarse steps on the
+Sep-9 convective case (same binary lineage, same knobs: cf_width=10 relax
+incl. rho, cfl 0.15, original terrain) produced deaths at coarse steps 151,
+181 (with amrex.max_gpu_streams=1 -- stream race excluded), and 211 across
+repeats; the Jan-9 jet case dies at 330-1140 depending on interface tuning.
+Failure signature is always the same: the level-1 state goes wholesale NaN
+within a few fine steps between interval checks, first observed by the
+level-1 radiation input marshaling. Per-step NaN checking (which inserts
+device syncs every step) extends survival (~600-1800 fine steps) but does
+not prevent death. The one 3,500-step clean run was a lucky draw of the
+same SP-GPU run-to-run nondeterminism documented in #13.
+
+Status: the two-level HindCast path (this fork's wiring of upstream's
+incomplete nest machinery) is not production-viable in single precision on
+GPU. Next diagnostics, in order of information value: (1) compute-sanitizer
+initcheck/racecheck over ~20 steps of the 2-level case; (2) a
+double-precision control build (DP stable => SP conditioning of the c/f
+interpolation/relaxation; DP unstable => algorithmic defect in the nest
+path); (3) upstream escalation with this ladder -- upstream CI has no SP
+GPU multilevel real-case coverage that would have caught any of #15-#17.

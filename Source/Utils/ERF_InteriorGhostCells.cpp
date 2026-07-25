@@ -663,9 +663,16 @@ fine_compute_interior_ghost_rhs (const Real& time,
 {
     BL_PROFILE_REGION("fine_compute_interior_ghost_RHS()");
 
-    // Relaxation constants
-    Real F1 = one/(Real(10.)*delta_t);
-    Real F2 = one/(Real(50.)*delta_t);
+    // Relaxation constants. The upstream (dead-code) constants gave a
+    // tau = 10*dt momentum relaxation -- strong enough that under a winter
+    // jet the band's forced momenta violate discrete continuity faster than
+    // the density blend can absorb (measured: band rho 1.2 -> 2.5 in ~2.5
+    // min, Jan-9). erf.cf_nudge_factor relaxes that timescale.
+    static const Real nudge_fac = [] {
+        Real f = Real(10.); amrex::ParmParse pp("erf"); pp.query("cf_nudge_factor", f); return f;
+    }();
+    Real F1 = one/(nudge_fac*delta_t);
+    Real F2 = one/(Real(5.)*nudge_fac*delta_t);
 
     // Vector of MFs to hold data (dm differs w/ fine patch)
     Vector<MultiFab> fmf_p_v;
@@ -707,32 +714,17 @@ fine_compute_interior_ghost_rhs (const Real& time,
             set_mask_val   = FPr_c->GetSetMaskVal();
             relax_mask_val = FPr_c->GetRelaxMaskVal();
         }
+        // NOTE: RegisterCoarseData in ERF_Advance.cpp registers the coarse
+        // MOMENTA (state_old/new[IntVars::xmom] etc.), so the FillRelax
+        // result here is already momentum. The original (dead) version of
+        // this routine multiplied by an interpolated rho, which would give
+        // rho^2 * u -- that conversion is removed.
         else if (ivar_idx == IntVars::xmom)
         {
             FPr_u->FillRelax(fmf_p, time, void_bc, domain_bcs_type);
             mask           = FPr_u->GetMask();
             set_mask_val   = FPr_u->GetSetMaskVal();
             relax_mask_val = FPr_u->GetRelaxMaskVal();
-
-#ifdef _OPENMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-            for ( MFIter mfi(fmf_p,TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                Box tbx = mfi.tilebox();
-
-                const Array4<Real>& prim_arr = fmf_p.array(mfi);
-                const Array4<const Real>& rho_arr  = fmf_p_v[0].const_array(mfi);
-                const Array4<const int>&  mask_arr = mask->const_array(mfi);
-
-                ParallelFor(tbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    if (mask_arr(i,j,k) == relax_mask_val) {
-                        Real rho_interp = myhalf * ( rho_arr(i-1,j,k) + rho_arr(i,j,k) );
-                        prim_arr(i,j,k) *= rho_interp;
-                    }
-                });
-            } // mfi
         }
         else if (ivar_idx == IntVars::ymom)
         {
@@ -740,26 +732,6 @@ fine_compute_interior_ghost_rhs (const Real& time,
             mask           = FPr_v->GetMask();
             set_mask_val   = FPr_v->GetSetMaskVal();
             relax_mask_val = FPr_v->GetRelaxMaskVal();
-
-#ifdef _OPENMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-            for ( MFIter mfi(fmf_p,TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                Box tbx = mfi.tilebox();
-
-                const Array4<Real>& prim_arr = fmf_p.array(mfi);
-                const Array4<const Real>& rho_arr  = fmf_p_v[0].const_array(mfi);
-                const Array4<const int>&  mask_arr = mask->const_array(mfi);
-
-                ParallelFor(tbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    if (mask_arr(i,j,k) == relax_mask_val) {
-                        Real rho_interp = myhalf * ( rho_arr(i,j-1,k) + rho_arr(i,j,k) );
-                        prim_arr(i,j,k) *= rho_interp;
-                    }
-                });
-            } // mfi
         }
         else if (ivar_idx == IntVars::zmom)
         {
@@ -767,26 +739,6 @@ fine_compute_interior_ghost_rhs (const Real& time,
             mask           = FPr_w->GetMask();
             set_mask_val   = FPr_w->GetSetMaskVal();
             relax_mask_val = FPr_w->GetRelaxMaskVal();
-
-#ifdef _OPENMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-            for ( MFIter mfi(fmf_p,TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                Box tbx = mfi.tilebox();
-
-                const Array4<Real>& prim_arr = fmf_p.array(mfi);
-                const Array4<const Real>& rho_arr  = fmf_p_v[0].const_array(mfi);
-                const Array4<const int>&  mask_arr = mask->const_array(mfi);
-
-                ParallelFor(tbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    if (mask_arr(i,j,k) == relax_mask_val) {
-                        Real rho_interp = myhalf * ( rho_arr(i,j,k-1) + rho_arr(i,j,k) );
-                        prim_arr(i,j,k) *= rho_interp;
-                    }
-                });
-            } // mfi
         } else {
             Abort("Dont recognize this variable type in fine_compute_interior_ghost_RHS");
         }
@@ -838,8 +790,20 @@ fine_compute_interior_ghost_rhs (const Real& time,
             int Relax_z = width - Spec_z;
             Real num    = Real(Spec_z + Relax_z);
             Real denom  = Real(Relax_z - 1);
+            // erf.cf_relax_rho=false skips relaxing Rho through the slow RHS
+            // (a mass-equation relaxation can destabilize the acoustic
+            // substepping under strong cross-boundary flow -- measured:
+            // nest SE-corner rho blowup ~150 fine steps, Jan-9 jet).
+            // DEFAULT true: rho relaxation is part of the configuration
+            // verified stable on the Sep-9 convective case (3,500 steps
+            // zero-warning); skipping it lets band mass ratchet instead.
+            static const bool relax_rho = [] {
+                bool b = true; amrex::ParmParse pp("erf"); pp.query("cf_relax_rho", b); return b;
+            }();
+            const bool skip_rho = (!relax_rho) && (ivar_idx == IntVars::cons);
             ParallelFor(tbx, num_var, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
             {
+               if (skip_rho && (n + icomp == Rho_comp)) { return; }
                if (mask_arr(i,j,k) == relax_mask_val) {
 
                    // Indices

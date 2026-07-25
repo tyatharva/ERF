@@ -2289,7 +2289,7 @@ void
 ERF::init_only (int lev, Real elapsed_time)
 {
     t_new[lev] = elapsed_time;
-    t_old[lev] = elapsed_time - Real(1.e200);
+    t_old[lev] = elapsed_time - Real(1.e30); // finite in SP (see ERF_MakeNewLevel.cpp)
 
     auto& lev_new = vars_new[lev];
     auto& lev_old = vars_old[lev];
@@ -2968,7 +2968,13 @@ ERF::ParameterSanityChecks ()
     AMREX_ALWAYS_ASSERT(real_width >= 0);
 
     if (cf_set_width != 0) {
-        Abort("You must set cf_set_width == 0");
+        // Fork: upstream aborts here unconditionally. The FillPatcher's
+        // specified-zone machinery (BuildMask nghost>0 + FPr_c FillSet of the
+        // full cons vector incl rho) is intact and is the WRF-style closure
+        // for the c/f mass budget: pure relaxation leaves band density
+        // unconstrained and it ratchets under strong cross-boundary flow
+        // (measured, Jan-9 jet). Keep the width sanity checks below.
+        Warning("cf_set_width > 0: WRF-style specified zone at the coarse/fine boundary (fork-enabled; upstream forbids this)");
     }
     if (cf_width < 0 || cf_set_width < 0 || cf_width < cf_set_width) {
         Abort("You must set cf_width >= cf_set_width >= 0");

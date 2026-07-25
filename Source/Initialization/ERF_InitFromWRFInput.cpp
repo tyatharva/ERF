@@ -1084,7 +1084,7 @@ ERF::init_from_wrfinput (int lev, MultiFab& mf_PSFC_lev)
             Print() << "start_bdy_time is " << std::setprecision(timeprecision) << start_bdy_time
                     << " from wrfbdy but note that time variable in simulation is elapsed time" << std::endl;
             t_new[lev] = zero;
-            t_old[lev] = -Real(1.e200);
+            t_old[lev] = -Real(1.e30); // finite in SP (see ERF_MakeNewLevel.cpp)
         } else {
             t_new[lev] = t_new[0];
             t_old[lev] = t_old[0];

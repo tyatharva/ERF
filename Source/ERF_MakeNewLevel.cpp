@@ -309,7 +309,7 @@ ERF::MakeNewLevelFromCoarse (int lev, Real time, const BoxArray& ba,
     // Note that t_new = time here is elapsed time
     //
     t_new[lev] = time;
-    t_old[lev] = time - Real(1.e200);
+    t_old[lev] = time - Real(1.e30); // finite in SP: Real(1.e200) overflows float to inf and almostEqual(t,-inf) is true, so FillPatchCrseLevel would source never-initialized vars_old (multilevel init wipe)
 
     // ********************************************************************************************
     // Build the data structures for metric quantities used with terrain-fitted coordinates
@@ -690,7 +690,7 @@ ERF::RemakeLevel (int lev, Real time, const BoxArray& ba, const DistributionMapp
     // Note that t_new = time here is elapsed time
     //
     t_new[lev] = time;
-    t_old[lev] = time - Real(1.e200);
+    t_old[lev] = time - Real(1.e30); // finite in SP: Real(1.e200) overflows float to inf and almostEqual(t,-inf) is true, so FillPatchCrseLevel would source never-initialized vars_old (multilevel init wipe)
 
     // ********************************************************************************************
     // Build the data structures for calculating diffusive/turbulent terms

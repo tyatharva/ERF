@@ -875,7 +875,7 @@ rrtmgp_sw (const int ncol,
 
     k_dist.gas_optics(nday, nlay, top_at_1, p_lay_day, p_lev_day,
                       t_lay_limited, gas_concs_day, col_gas, optics, toa_flux);
-    validate_finite_tau("shortwave", optics.tau);
+    validate_finite_tau("shortwave", optics.tau, &t_lay_limited, &p_lay_day, &col_gas);
     if (extra_clnsky_diag) {
         k_dist.gas_optics(nday, nlay, top_at_1, p_lay_day, p_lev_day,
                           t_lay_limited, gas_concs_day, col_gas, optics_no_aerosols, toa_flux);

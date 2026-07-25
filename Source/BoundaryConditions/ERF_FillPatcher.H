@@ -122,15 +122,22 @@ void
 ERFFillPatcher::Fill (amrex::MultiFab& mf, amrex::Real time,
                       BC& cbc, amrex::Vector<amrex::BCRec> const& bcs, int mask_val)
 {
-    constexpr amrex::Real eps = std::numeric_limits<float>::epsilon();
+    // The tolerance must be RELATIVE to the elapsed-time magnitude: in single
+    // precision one ulp of t = 86400 s is ~8e-3 s, so an absolute float-eps
+    // window rejects legitimate subcycled fine times after a few seconds of
+    // model time (fine and coarse clocks accumulate a few ulp apart).
+    constexpr amrex::Real releps = std::numeric_limits<float>::epsilon();
+    const amrex::Real eps = releps + amrex::Real(8.0) * releps *
+        amrex::max(amrex::Math::abs(m_crse_times[0]), amrex::Math::abs(m_crse_times[1]));
 
     AMREX_ALWAYS_ASSERT((time >= m_crse_times[0]-eps) && (time <= m_crse_times[1]+eps));
 
-    // Time interpolation factors
+    // Time interpolation factors (clamped: time may sit an ulp outside the window)
     amrex::Real fac_new = amrex::Real(0.0);
     amrex::Real fac_old = amrex::Real(1.0);
-    if (amrex::Math::abs(m_dt_crse) > eps) {
+    if (amrex::Math::abs(m_dt_crse) > releps) {
         fac_new = (time - m_crse_times[0]) / m_dt_crse;
+        fac_new = amrex::max(amrex::Real(0.0), amrex::min(amrex::Real(1.0), fac_new));
         fac_old = amrex::Real(1.0) - fac_new;
     }
 

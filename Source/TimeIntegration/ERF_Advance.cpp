@@ -97,6 +97,34 @@ static void hindcast_blend_band_density (MultiFab& S, const MultiFab& fcons,
     }
 }
 
+// Nest-band variant of the density blend (see nest-band comment in
+// ERF::Advance). Free function for the same CUDA extended-lambda reason as
+// hindcast_blend_band_density above.
+static void nest_blend_band_density (MultiFab& S, const MultiFab& tgt,
+                                     const iMultiFab& cf_mask, const int relax_val,
+                                     const Real alpha, const bool has_moist)
+{
+    for (MFIter mfi(S); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.tilebox();
+        const Array4<Real>& s_arr = S.array(mfi);
+        const Array4<Real const>& t_arr = tgt.const_array(mfi);
+        const Array4<int const>& m_arr = cf_mask.const_array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            if (m_arr(i,j,k) == relax_val) {
+                Real r_o = s_arr(i,j,k,Rho_comp);
+                Real r_n = (one - alpha) * r_o + alpha * t_arr(i,j,k,Rho_comp);
+                Real scale = r_n / r_o;
+                s_arr(i,j,k,Rho_comp)       = r_n;
+                s_arr(i,j,k,RhoTheta_comp) *= scale;
+                if (has_moist) {
+                    s_arr(i,j,k,RhoQ1_comp) *= scale;
+                }
+            }
+        });
+    }
+}
+
 static void bound_mynn_tke (MultiFab& S)
 {
     const Real tke_max = Real(75.0);   // = qke_max/2, matching the internal clip
@@ -155,6 +183,68 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
         FillPatchFineLevel(lev, time, {&S_old, &U_old, &V_old, &W_old},
                            {&S_old, &rU_old[lev], &rV_old[lev], &rW_old[lev]},
                            base_state[lev], base_state[lev]);
+    }
+
+    // Momentum-consistent variant of the band-density blend (legacy call site
+    // below, just before the dycore): running the blend BEFORE
+    // VelocityToMomentum means the momenta are formed from the blended
+    // density, so velocity is preserved exactly instead of being perturbed by
+    // rho_old/rho_new in the band every step (UPSTREAM_ISSUES #12). The
+    // FillBoundary syncs interior ghost rho so face averages at box seams see
+    // blended values; physical-domain ghosts keep the pre-blend fill (the
+    // outermost face factor is stale by O(alpha), and that cell is
+    // relax-specified during the step anyway).
+    static const bool blend_momentum = [] {
+        bool b = false; ParmParse pp("erf"); pp.query("hindcast_blend_momentum", b); return b;
+    }();
+    static const bool blend_band_density_on = [] {
+        bool b = false; ParmParse pp("erf"); pp.query("hindcast_blend_band_density", b); return b;
+    }();
+    if (blend_band_density_on && blend_momentum &&
+        solverChoice.init_type == InitType::HindCast &&
+        solverChoice.hindcast_lateral_forcing) {
+        const bool l_has_moist = (solverChoice.moisture_type != MoistureType::None);
+        hindcast_blend_band_density(S_old, forecast_state_interp[lev][Vars::cons],
+                                    Geom(lev), dt_lev, solverChoice, l_has_moist);
+        S_old.FillBoundary(Geom(lev).periodicity());
+    }
+
+    // Nest-band density blend (lev > 0): the c/f relaxation zone relaxes
+    // momenta/theta/qv through the slow RHS but must NOT relax rho there
+    // (mass-equation RHS relaxation destabilizes the acoustic substepping;
+    // measured: SE-corner rho blowup in ~150 fine steps under the Jan-9
+    // jet), yet with no rho constraint at all the band accumulates mass
+    // (rho 1.18 -> 2.47 in ~450 fine steps, same run). Mirror the lev-0
+    // solution: a gentle post-step blend of band rho toward the
+    // time-interpolated parent, rescaling RhoTheta/RhoQ1 so theta and qv
+    // are preserved, applied before VelocityToMomentum so momenta stay
+    // consistent.
+    static const Real l_cf_blend_alpha_gate = [] {
+        Real a = Real(0.0); ParmParse pp("erf"); pp.query("cf_blend_alpha", a); return a;
+    }();
+    if (l_cf_blend_alpha_gate > Real(0.0) &&
+        blend_band_density_on && lev > 0 && cf_width > 0 &&
+        solverChoice.init_type == InitType::HindCast) {
+        MultiFab tgt(S_old.boxArray(), S_old.DistributionMap(), S_old.nComp(), S_old.nGrowVect());
+        MultiFab::Copy(tgt, S_old, 0, 0, S_old.nComp(), S_old.nGrowVect());
+        PhysBCFunctNoOp void_bc;
+        FPr_c[lev-1].FillRelax(tgt, time, void_bc, domain_bcs_type);
+        auto* cf_mask = FPr_c[lev-1].GetMask();
+        const int relax_val = FPr_c[lev-1].GetRelaxMaskVal();
+        // Opt-in (erf.cf_blend_alpha > 0): the configuration verified on the
+        // Sep-9 convective case uses rho RHS relaxation and NO nest blend;
+        // this blend exists for the (still-open) strong-jet experiments
+        // where rho relaxation is disabled via erf.cf_relax_rho=false.
+        static const Real l_cf_blend_alpha = [] {
+            Real a = Real(0.0); ParmParse pp("erf"); pp.query("cf_blend_alpha", a); return a;
+        }();
+        const Real alpha = std::min(l_cf_blend_alpha * dt_lev, Real(0.5));
+        const bool l_has_moist = (solverChoice.moisture_type != MoistureType::None) &&
+                                 (S_old.nComp() > RhoQ1_comp);
+        if (alpha > Real(0.0)) {
+            nest_blend_band_density(S_old, tgt, *cf_mask, relax_val, alpha, l_has_moist);
+            S_old.FillBoundary(Geom(lev).periodicity());
+        }
     }
 
     //
@@ -329,10 +419,12 @@ ERF::Advance (int lev, Real time, Real dt_lev, int iteration, int /*ncycle*/)
     // and an RHS mass source) and ALL destabilize the acoustic dycore faster
     // than the slow band mass-accumulation they target. Default OFF; kept for
     // future specified-zone boundary work.
+    // (Skipped when erf.hindcast_blend_momentum is set: the momentum-consistent
+    // variant already ran before VelocityToMomentum above.)
     static const bool blend_band_density = [] {
         bool b = false; ParmParse pp("erf"); pp.query("hindcast_blend_band_density", b); return b;
     }();
-    if (blend_band_density &&
+    if (blend_band_density && !blend_momentum &&
         solverChoice.init_type == InitType::HindCast &&
         solverChoice.hindcast_lateral_forcing) {
         const bool l_has_moist = (solverChoice.moisture_type != MoistureType::None);
