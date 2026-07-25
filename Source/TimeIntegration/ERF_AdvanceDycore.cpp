@@ -354,5 +354,62 @@ void ERF::advance_dycore (int level,
 
     mri_integrator.advance(state_old, state_new, old_time, dt_advance);
 
+#ifdef ERF_USE_NETCDF
+    // ***************************************************************************************
+    // Marchuk-split lateral relaxation (erf.realbdy_relax_split)
+    //
+    // With the default path the relaxation lives in the slow RHS, which is assembled once per
+    // RK stage and then held fixed while EVERY acoustic substep integrates it.  COSMO instead
+    // excludes the Davies relaxation from the slow-mode forcing and applies it Marchuk-split
+    // once per big step, explicitly "for stability reasons"; TRAM (Romero et al. 2024, QJRMS
+    // doi:10.1002/qj.4639) likewise applies its Newtonian relaxation after each completed step.
+    //
+    // Here the same operator is evaluated on the completed state and applied as one explicit
+    // Euler update, so this is a pure ORDERING change -- the relaxation coefficient, the ramp
+    // and the target are all untouched.
+    // ***************************************************************************************
+    if (realbdy_relax_split() && solverChoice.use_real_bcs && (level == 0) && (real_width > 0))
+    {
+        Vector<MultiFab> relax_rhs(IntVars::NumTypes);
+        for (int i(0); i < IntVars::NumTypes; ++i) {
+            relax_rhs[i].define(state_new[i].boxArray(), state_new[i].DistributionMap(),
+                                state_new[i].nComp(), 0);
+            relax_rhs[i].setVal(0.0);
+        }
+
+        // The state we are relaxing is the t^{n+1} state, so interpolate the driving
+        // data to the end of the step (start_bdy_time/final_bdy_time are total time).
+        Real total_time = start_time + old_time + dt_advance;
+        realbdy_compute_interior_ghost_rhs(total_time, dt_advance,
+                                           start_bdy_time, final_bdy_time, bdy_time_interval,
+                                           solverChoice.bdy_nudge_factor, real_width, fine_geom,
+                                           relax_rhs, state_new,
+                                           (solverChoice.init_type == InitType::HindCast)
+                                               ? &forecast_state_interp[level][Vars::cons]
+                                               : nullptr,
+                                           bdy_data_xlo, bdy_data_xhi,
+                                           bdy_data_ylo, bdy_data_yhi,
+                                           m_r2d);
+
+        for (int i(0); i < IntVars::NumTypes; ++i) {
+            MultiFab::Saxpy(state_new[i], dt_advance, relax_rhs[i],
+                            0, 0, state_new[i].nComp(), IntVect(0));
+        }
+
+        // The prognostic carrier between timesteps is the VELOCITY (the next
+        // ERF::Advance rebuilds the momenta with VelocityToMomentum), so the
+        // momentum increment above has to be pushed back into xvel/yvel or it
+        // is silently discarded.  Face density at the outermost face still uses
+        // the pre-update ghost value; that face is Dirichlet-set by the real BC
+        // path immediately afterwards, so it never reaches the next step.
+        MomentumToVelocity(xvel_new, yvel_new, zvel_new,
+                           state_new[IntVars::cons],
+                           state_new[IntVars::xmom],
+                           state_new[IntVars::ymom],
+                           state_new[IntVars::zmom],
+                           domain, domain_bcs_type);
+    }
+#endif
+
     if (verbose) Print() << "Done with advance_dycore at level " << level << std::endl;
 }

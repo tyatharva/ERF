@@ -4,11 +4,31 @@
 #include "AMReX.H"
 #include "AMReX_MultiFab.H"
 #include "AMReX_BCRec.H"
+#include "AMReX_ParmParse.H"
 #include "ERF_DataStruct.H"
 #include "ERF_IndexDefines.H"
 #include "ERF_SurfaceLayer.H"
 #include "ERF_FillPatcher.H"
 #include "ERF_ReadBndryPlanes.H"
+
+/*
+ * erf.realbdy_relax_split (default 0)
+ *
+ * 0: the lateral (Davies) relaxation is added to the slow RHS, which every
+ *    acoustic substep then integrates -- ERF's current behaviour.
+ * 1: the relaxation is Marchuk-split off: skipped in the slow RHS and applied
+ *    once per timestep as a sequential state update after the substep loop.
+ *
+ * Queried from two translation units, so the value is cached here to guarantee
+ * both see the same setting.
+ */
+inline int realbdy_relax_split ()
+{
+    static const int s_split = [] {
+        int v = 0; amrex::ParmParse pp("erf"); pp.query("realbdy_relax_split", v); return v;
+    }();
+    return s_split;
+}
 
 /*
  * Create a new BoxArray in which every grid touches the bottom boundary

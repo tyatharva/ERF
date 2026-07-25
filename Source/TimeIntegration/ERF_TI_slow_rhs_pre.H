@@ -325,7 +325,16 @@
 
 #ifdef ERF_USE_NETCDF
         // Populate RHS for relaxation zones if using real bcs
-        if (solverChoice.use_real_bcs && (level == 0)) {
+        //
+        // erf.realbdy_relax_split: when set, the lateral relaxation is NOT added
+        // to the slow RHS here.  Instead it is applied once per timestep as a
+        // sequential (Marchuk-split) state update after the acoustic substeps,
+        // in advance_dycore.  ERF is the outlier among split-explicit LAMs in
+        // integrating the relaxation with every acoustic substep: COSMO excludes
+        // it from the slow-mode forcing and Marchuk-splits it explicitly "for
+        // stability reasons", and TRAM (Romero et al. 2024, QJRMS) applies its
+        // Newtonian relaxation after each completed time step.
+        if (solverChoice.use_real_bcs && (level == 0) && !realbdy_relax_split()) {
             const Real bdy_factor = solverChoice.bdy_nudge_factor;
             if (real_width>0) {
                 //

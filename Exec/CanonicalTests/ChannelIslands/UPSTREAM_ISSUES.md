@@ -796,3 +796,64 @@ domain area and worsens mass drift 7x, partially recoverable with (b).
   never written (the LinComb is commented out), so no w target exists on the ERF
   grid at all. This is the trap the abandoned lateral WfromOmega experiment
   (PR #2872) walked into.
+
+### Ruled out: the relaxation's placement in the time splitting
+
+ERF is the outlier among split-explicit LAMs in *where* it applies the Davies
+relaxation. ERF adds it to `S_rhs` in `slow_rhs_pre`; `S_rhs` is then held fixed
+while every acoustic substep integrates it. COSMO instead excludes the
+relaxation from the slow-mode forcing and applies it Marchuk-split once per big
+step, explicitly "for stability reasons" (Leps, Brauch & Ahrens 2019, JAMES 11,
+2694-2707); TRAM (Romero et al. 2024, QJRMS, doi:10.1002/qj.4639) likewise
+applies its Newtonian relaxation after each completed time step.
+
+Tested with `erf.realbdy_relax_split` (default 0): the identical operator, same
+ramp, same coefficient, same target, moved out of `S_rhs` and applied once per
+timestep as a sequential state update after the substep loop. Net per-step
+amplitude is unchanged -- the RHS path uses `F1 = 1/(nudge*slow_dt)` with the
+*stage* dt and RK3 restarts each stage from `S_old`, so both paths deliver
+`Factor/nudge * (A - B)` per step.
+
+Sep-9 dry control, 1200 steps, blend off, wall flux correction on. Ocean-wall
+|w| > 1 fraction (the two flat-water walls, 12 m terrain), and mass drift:
+
+| real_width | ordering | peak (d) | peak value | interior bg | mass drift |
+|---|---|---|---|---|---|
+| 10 | in `S_rhs` | 6 | 49.85% | 10.88% | +0.453 %/day |
+| 10 | Marchuk split | 6 | 50.17% | 10.86% | +0.382 %/day |
+| 15 | in `S_rhs` | 10 | 36.07% | 11.72% | +1.469 %/day |
+| 15 | Marchuk split | 10 | 36.28% | 11.68% | +1.476 %/day |
+
+Runs are deterministic here (repeats agree to 0.02 points / 3 decimals), so the
+differences are real and they are nil: the peak does not move, its amplitude
+rises 0.6% relative, and the 1/width scaling is untouched (49.85/36.07 = 1.38
+either way). The mass-drift gain at width 10 (-16%) does not reproduce at width
+15 (+0.5%). **The ordering is a genuine structural difference from COSMO/TRAM
+and is worth fixing on its own terms, but it is not the source of the band
+artifact.**
+
+### Control: the artifact is entirely relaxation-sourced, and it is not confined to the band
+
+Same deck with `erf.bdy_nudge_factor = 1e7` (relaxation effectively off; the
+specified-zone Dirichlet wall and the wall flux correction still active):
+
+| d | relaxation on | relaxation off |
+|---|---|---|
+| 0 | 0.20% | **55.48%** |
+| 1-4 | 0.00 / 4.99 / 19.13 / 33.62% | 7.60 / 7.68 / 3.84 / 5.34% |
+| 5-9 | 44.10 / **49.85** / 46.41 / 21.44 / 8.71% | 0.24 / 0.69 / 0.02 / 0.06 / 0.06% |
+| interior bg (d>=25) | **10.88%** | **2.86%** |
+| mass drift | +0.453 %/day | +5.346 %/day |
+
+Two things follow. (1) The mid-band peak is 100% attributable to the relaxation
+-- with the ramp gone it does not merely shrink, it vanishes into the noise
+floor. (2) The relaxation also raises the *whole-domain interior* background by
+3.8x, from 2.86% to 10.88%, 75 km from the nearest wall. At 1200 steps
+(31 model minutes) advection cannot carry the band signal that far (19 km at
+10 m/s), but acoustic (220 s) and gravity-wave (~2500 s) propagation can
+[inferred]. The `grad(F).(A-B)` source is therefore contaminating the free
+interior, not just the sponge.
+
+The cost of switching it off is the reason Davies relaxation exists: the bare
+Dirichlet wall goes to 55% at d=0 and mass drift worsens 12x. This is the
+over-specification tradeoff, measured -- not an argument for keeping the ramp.
