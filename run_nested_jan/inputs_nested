@@ -1,0 +1,431 @@
+# ============================================================================
+#  ERF INPUTS -- Channel Islands hindcast  [PRODUCTION, locked 2026-07-24]
+#  Domain: 384 x 192 km @ 3 km (128x64x32), NE pin (34.2, -117.2),
+#  32 stretched levels (dz0 = 25 m, ratio 1.16) to 17,893.69 m.
+#  SP compressible; Morrison + MYNN-EDMF + RRTMGP + MM5 + ERA5 real BCs.
+#  Init: HindCast from ERA5 (3-hourly). ERF is its own OSSE truth.
+#  Measured: full 24-h storm day in ~17.3 min wall on one RTX 4080.
+#
+#  AUDITED against Source/ (this fork). Corrections are marked [CORRECTED].
+# ============================================================================
+
+erf.prob_name = "HindCast"
+
+# ---------------------------------------------------------------------------
+#  INITIALIZATION  (HindCast pathway, ERA5)
+#  [CORRECTED] erf.hindcast_IC_filename removed -- that parameter does not
+#  exist in this fork (the HindCast.rst doc is stale). The IC is built by
+#  WeatherDataInterpolation, which scans hindcast_boundary_data_dir for .bin
+#  files and interpolates at start_datetime. The first .bin frame must match
+#  start_datetime.
+# ---------------------------------------------------------------------------
+erf.init_type = "HindCast"
+erf.hindcast_boundary_data_dir    = "ERA5Data_3D"
+erf.hindcast_data_interval_in_hrs = 3.0
+erf.hindcast_lateral_forcing      = true
+
+# [ADDED] Surface forcing from ERA5 (erftools Output/Surface). The domain is
+# mostly ocean; without this, water-surface temperatures have no data source.
+# RE-ENABLED after the theta/qv coupling + ERA5 init landed: the old
+# blow-up (~5-6 model-min) was the dry isentropic IC meeting maximal ocean
+# moistening; with real stratification the surface pathway is stable
+# (measured: full-physics 24 h complete, 38,550 steps, mass -0.26%).
+erf.hindcast_surface_bcs      = true
+erf.hindcast_surface_data_dir = "ERA5Data_Surface"
+
+# Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
+# whole 192 km N-S extent (2x120 > 192); 30 km keeps ~65% of the domain
+# sponge-free while still relaxing smoothly to ERA5.
+# [MEASURED 3-km FINDING] The hindcast boundary pathway has NO inflow
+# characteristic treatment: sponge-forced inflow through foextrap "Outflow"
+# faces pumps mass in continuously (global mass 2.35x initial after 9 model
+# hours; band density +0.1-0.3 kg/m3 per hour, weakly sensitive to every
+# knob tested) until the EOS/radiation breaks. Strength 0.05 + 6th-order
+# numerical diffusion (below) is the best-measured config: stable to ~9.1 h
+# vs ~4.6 h at strength 0.3 without diffusion. A >=24 h run needs a proper
+# specified/characteristic inflow BC -- see UPSTREAM_ISSUES.md item 8.
+# [REAL BCs] The WRF-style specified+relaxation machinery is now driven
+# from the hindcast frames (erf.use_real_bcs below): boundary values are SET
+# in the outermost cells and nudged over real_width -- the proper inflow
+# treatment. The legacy lateral sponge is disabled (strength 0); the zhi
+# w-sponge keeps its own strength and remains active.
+erf.hindcast_lateral_sponge_strength = 0.0
+erf.hindcast_lateral_sponge_length   = 30000      # m (still used for asserts)
+erf.use_real_bcs = true
+erf.real_width   = 10                             # cells (30 km at 3 km)
+                                                  # [MEASURED] Adequate. A
+# boundary-shell analysis of a clean 3-day run shows w-variance 2-4x the
+# interior value in the outer ~10 cells, decaying smoothly and monotonically
+# inward with NO standing peak at the relaxation-zone edge, and the theta
+# gradient across that edge is the same magnitude as interior gradients. The
+# 8x jump from 0.25-deg ERA5 to 3 km is absorbed without reflection; no nest
+# and no wider band are needed. (Analysis caveat: the outer ~10 cells are
+# forcing-dominated -- exclude them from science diagnostics.)
+# [SEGMENT CONFIG 2026-07-24] Blend the ERA5 density into the relaxation band.
+# The real-BC fill sets momentum/theta/moisture in the band but leaves density
+# unconstrained, so in a calm regime with weak through-flow the domain mass
+# inflates without bound: a 2023-01-01 segment ran "clean" at +33% mass/day
+# with surface pressure reaching 150 kPa by hour 63. The Jan-9 storm day hid
+# this entirely (-0.26%/day) because vigorous through-flow ventilated the
+# domain. With the blend on, the same calm segment holds -0.6%/24 h and
+# p_max steady at ~99.9 kPa. Required for every segment.
+erf.hindcast_blend_band_density = true
+
+# Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
+erf.hindcast_zhi_sponge_damping  = true
+erf.hindcast_zhi_sponge_strength = 0.3
+erf.hindcast_zhi_sponge_length   = 5000.0         # m (top 5 km)
+
+# ---------------------------------------------------------------------------
+#  GOVERNING EQUATIONS  (compressible)
+# ---------------------------------------------------------------------------
+erf.anelastic = 0
+
+# ---------------------------------------------------------------------------
+#  PROBLEM SIZE & GEOMETRY
+#  Domain: 384 x 192 km @ exactly 3 km, anchored at NE corner (34.2, -117.2).
+#  [3-km OPERATING POINT] 128x64x32 = 262K cells; same extent/vertical grid
+#  as the measured 2-km config (revert n_cell to 192 96 32 + terrain file
+#  channel_islands_terrain.txt for 2 km).
+#  (Pin moved south 0.3 deg: drops Mt. San Antonio / high San Gabriels. The
+#  northern Channel Islands sit ~17 km inside the N edge -- inside the 30 km
+#  sponge; at most ~17 km further southward motion before Santa Cruz clips.)
+#  Coordinates are in the erftools LCC frame for ERA5 area
+#  36.0,-123.25,31.25,-115.25 :
+#    +proj=lcc +lat_1=32.041667 +lat_2=35.208333 +lat_0=33.625000
+#    +lon_0=-119.250000 +datum=WGS84 +units=m
+#  The box sits ~163-173 km inside the ERA5 data box on all sides (ERF
+#  requires only 4*dx; erftools' own guidance is 150 km). Do NOT replace with
+#  domain_extents.txt values -- the domain here is exact by construction.
+# ---------------------------------------------------------------------------
+geometry.prob_lo     = -219131.04 -144000.0     0.0
+geometry.prob_hi     =  188868.96  144000.0 17893.69
+amr.n_cell           = 136    96     32
+geometry.is_periodic = 0 0 0
+
+# Lateral faces: Outflow (features exit; ERA5 sponge does the coupling).
+# (BC strings are case-insensitive in ERF; these all verified accepted.)
+xlo.type = "Outflow"
+xhi.type = "Outflow"
+ylo.type = "Outflow"
+yhi.type = "Outflow"
+
+# Bottom: surface-layer (MOST) -- required by MYNN-EDMF. Top: slip wall + sponge.
+zlo.type = "surface_layer"
+zhi.type = "SlipWall"
+
+# MOST / surface-layer configuration.
+# [CORRECTED] flux_type bulk_coeff -> moeng. With bulk_coeff this fork
+# *requires* erf.most.surf_temp and erf.most.surf_moist (pp.get -> hard abort
+# if absent), and fixed Cd/Ch/Cq with a fixed surface temperature is wrong for
+# a diurnal hindcast anyway. moeng is the standard MOST similarity closure and
+# takes its surface state from the land model / hindcast surface data.
+erf.most.z0             = 0.1     # LAND points only (chaparral/scrub). Ocean
+                                  # roughness is computed dynamically from u*
+                                  # via Charnock (verified: the surface layer
+                                  # iterates land and sea separately; z0_const
+                                  # never applies to sea points).
+erf.most.zref           = 25.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
+erf.most.average_policy = 1
+erf.surface_layer.flux_type = moeng
+erf.most.surf_temp      = 288.0   # fallback only; MM5/SST provide the live surface state
+# [CORRECTED] removed erf.most.Cd/Ch/Cq -- only read (and required) for bulk_coeff.
+
+# ---------------------------------------------------------------------------
+#  TERRAIN
+#  [ADDED] A terrain file is REQUIRED for real terrain: without
+#  erf.terrain_file_name, ERF silently falls back to the problem's custom
+#  terrain -- which is FLAT for the generic executable. No Channel Islands,
+#  no San Gabriels. Generate the file with dem_to_erf_terrain.py (this dir):
+#  plain format (nx, ny, x[], y[], z[] with index i*ny+j), meters in the same
+#  LCC plane as the erftools ERA5 data. (The _USGS reader path has an
+#  out-of-bounds indexing bug in this fork -- do not use it; see notes.)
+# ---------------------------------------------------------------------------
+erf.terrain_file_name = "channel_islands_terrain_3km_nested_smooth.txt"
+erf.terrain_type      = StaticFittedMesh
+# Generated vertical grid: 32 levels, dz0=25 m, ratio 1.16 -> top exactly
+# 17893.69 m (the generator does NOT rescale to prob_hi; prob_hi z is set to
+# the exact sum). dz: 25,29,34,...,2478 m; monotone, no inversion; min dz
+# stays the 25 m surface layer (vertical-CFL-equivalent to the old grid,
+# better after terrain compression: new max terrain ~1734 m vs 3040 m).
+erf.initial_dz            = 25.0
+erf.grid_stretching_ratio = 1.16
+erf.terrain_smoothing = 0         # BTF: required for multilevel (STF aborts)
+
+# ---------------------------------------------------------------------------
+#  TIME STEPPING  (CFL-adaptive: ERF auto-computes the slow dt each step from
+#  the advective/acoustic CFL. Slightly conservative CFL for downslope jets.
+#  init_shrink eases the first (violent) step; change_max caps dt growth.)
+# ---------------------------------------------------------------------------
+erf.substepping_type = "Implicit"
+erf.cfl              = 0.15        # slow-step CFL target (auto dt).
+# [LOWERED 0.3 -> 0.2, 2026-07-24] Set by the most violent day in the target
+# year, Hurricane Hilary (2023-08-20). At cfl 0.3 that case blows up ~9 model
+# minutes in: a grid-scale w dipole (+48.9 / -29.5 m/s) in the lowest three
+# cells of the ylo relaxation band drives RhoTheta to NaN (min temp -220 K),
+# w-CFL 2.87 in the 18.5-m surface-compressed cells. The dt estimate never
+# sees it because the CFL formula does not anticipate the vertical velocity
+# the IC adjustment generates. It is also MARGINAL rather than cleanly
+# reproducible: at cfl 0.3 with the blend off, two byte-identical invocations
+# gave 250 clean steps and a step-240 blowup respectively (GPU reduction
+# order is not bit-reproducible, and in SP that is enough to decide the
+# outcome). cfl 0.25 still dies at ~9 min; 0.20 clears the whole transient
+# with ZERO w-damping events and ZERO low-temperature warnings.
+# Cost is confined to active days: quiet days are capped by erf.max_dt (2.5 s)
+# and are unaffected by the cfl change; only convectively active days take the
+# extra steps. See RUNBOOK "STRESS TESTS" for the measured dt distributions.
+                                  # MEASURED (superseded, kept for history):
+                                  # MEASURED with real BCs + moist physics:
+                                  # resolved convective pulses (w to +-20 m/s
+                                  # in 18.5-m surface-compressed cells) NaN a
+                                  # cfl=0.5 run at ~44 model-min even with the
+                                  # vertical-advective dt fix; 0.3 completes
+                                  # the full 24 h (41,701 steps, 18.2 min
+                                  # wall). The old 0.5/0.7 recipe applied to
+                                  # the pre-moisture momentum benchmark only.
+erf.substepping_cfl  = 1.0        # acoustic substep CFL target
+erf.init_shrink      = 0.1        # first step at 10% to survive IC adjustment
+erf.change_max       = 1.1        # dt may grow at most 10% per step
+# [SEGMENT CONFIG 2026-07-24] Absolute dt ceiling. change_max is a RATE limit
+# only, so on a calm start (weak winds, no convective forcing) the CFL-adaptive
+# dt ramps unbounded: a 2023-01-01 segment reached dt = 15.4 s and NaN'd at
+# t ~ 3.1 h. Nothing in the CFL estimate sees the acoustic/microphysics
+# stiffness that actually breaks first. 2.5 s is just above the dt the storm
+# regimes self-select, so it is inert on active days and only binds on calm
+# ones. Do not raise it without re-running a calm-start segment.
+erf.max_dt           = 2.5
+erf.w_damping        = true
+erf.w_damping_const  = 0.3
+
+# ---------------------------------------------------------------------------
+#  RUN LENGTH  (24-hour hindcast: 2023-01-09 00Z -> 2023-01-10 00Z, aligned
+#  to the 3-hourly ERA5 frames produced by erftools.)
+# ---------------------------------------------------------------------------
+start_datetime = "2023-01-09 00:00:00"
+stop_datetime  = "2023-01-10 00:00:00"
+# [AUDIT 2026-07-24] max_step MUST be -1 (= unlimited) for production:
+# ERF stops at min(max_step, stop_datetime) with a CLEAN exit, and istep
+# continues across restarts, so any positive cap silently truncates a
+# year run (~14M steps at dt~2.24 s) while looking like a success. The
+# old "safety cap" of 100000 covered only ~2.6 simulated days.
+# stage_run.sh hard-fails if this is not -1.
+max_step = -1                     # datetime governs the stop
+
+# ---------------------------------------------------------------------------
+#  ADVECTION  (WENOZ5; horiz and vert MUST match for WENO)
+# ---------------------------------------------------------------------------
+erf.dycore_horiz_adv_type    = "WENOZ5"
+erf.dycore_vert_adv_type     = "WENOZ5"
+erf.dryscal_horiz_adv_type   = "WENOZ5"
+erf.dryscal_vert_adv_type    = "WENOZ5"
+# [SEGMENT CONFIG 2026-07-24] Moist scalars on Upwind_3rd, NOT WENOZ5.
+# Measured on a calm 2023-01-01 start: WENOZ5 on the moist scalars drives the
+# Morrison number-concentration components (RhoQ8) negative at sharp cloud
+# edges and they NaN within ~16 steps of a frame transition. Upwind_3rd is
+# monotone enough to survive; 37,798 steps clean afterwards.
+# DO NOT copy this to dryscal: Upwind_3rd on the dry scalars produces a
+# density NaN at step 1 in the domain corners (separate, unfixed fork bug --
+# see UPSTREAM_ISSUES.md).
+erf.moistscal_horiz_adv_type = "Upwind_3rd"
+erf.moistscal_vert_adv_type  = "Upwind_3rd"
+# [SEGMENT CONFIG 2026-07-24] Do not advect the MYNN TKE field. With it on,
+# RhoKE goes Inf in the xhi lateral relaxation band ~380 s after the first
+# boundary-frame transition (measured at cell (126,56,6)): the advected TKE
+# has no consistent boundary value to relax toward. MYNN still evolves TKE
+# locally through its own source/sink terms.
+erf.advect_tke = false
+
+# ---------------------------------------------------------------------------
+#  TURBULENCE / PBL
+# ---------------------------------------------------------------------------
+erf.les_type = "None"
+erf.pbl_type = "MYNNEDMF"
+
+# ---------------------------------------------------------------------------
+#  FORCINGS
+#  [CORRECTED] removed erf.has_lat_lon -- no such parameter in this fork.
+#  Lat/lon fields come from the HindCast .bin data automatically and feed
+#  variable_coriolis.
+# ---------------------------------------------------------------------------
+erf.use_gravity       = true
+erf.use_coriolis      = true
+erf.coriolis_3d       = true
+erf.variable_coriolis = true
+
+# ---------------------------------------------------------------------------
+#  MOISTURE
+#  [CORRECTED] "P3" is not a moisture model in this fork (MoistureType enum:
+#  SAM, Kessler, SatAdj, Morrison, WSM6, SuperDroplets, ... -- no P3; the
+#  ERF_ENABLE_P3 build flag gates EAMxx code, not erf.moisture_model).
+#  SAM (user selection; single-moment split qn/qp mixed-phase)
+#  (matches the qgraup/qsnow plot vars); SP-validated in this fork.
+#  ("WSM6" is the single-moment alternative, also SP-validated.)
+# ---------------------------------------------------------------------------
+# SAM is rejected by ERF with variable dz (terrain + stretching):
+#   "SAM is not correct with variable dz -- choose another moisture model"
+# Morrison remains the baseline; WSM6 measured as the cheap alternative.
+erf.moisture_model = "Morrison"
+
+# ---------------------------------------------------------------------------
+#  LAND SURFACE  --  MM5 IS INERT IN THIS CONFIGURATION.  [MEASURED 2026-07-24]
+#
+#  This is not a caveat, it is the operative fact. SurfaceLayer only couples to
+#  an LSM when the LSM exports >= 4 flux fields
+#  (AMREX_ALWAYS_ASSERT(n_valid_lsm_flux == 0 || n_valid_lsm_flux >= 4));
+#  MM5 exports 1, so the coupling pointers are null and NOTHING flows in
+#  either direction. Verified directly: the soil column is bit-identical at
+#  every depth (0.1/0.5/1.5/3 m) after 3 simulated days.
+#
+#  Therefore, over land:
+#    * the surface temperature is EXACTLY erf.mm5.soil_theta, a constant,
+#    * that constant is what MOST uses for the surface-layer fluxes,
+#    * that constant is what RRTMGP uses as the radiating skin temperature,
+#    * there is no diurnal cycle and no soil spin-up (nothing to spin up).
+#  Ocean surface state is unaffected -- it comes from ERA5 SST through
+#  hindcast_surface_bcs (which must stay true).
+#
+#  This makes soil_theta the single most important land knob in the deck, and
+#  it MUST be set per segment to that month's domain land-mean ERA5 SKIN
+#  temperature (skt) -- not the 300 K driver default, and not deep-soil stl4.
+#  2023 land-mean skt by month (K):
+#    Jan 283.2  Feb 283.2  Mar 284.4  Apr 289.2  May 291.5  Jun 293.9
+#    Jul 300.1  Aug 298.9  Sep 296.1  Oct 293.9  Nov 288.9  Dec 286.5
+#  The hard-coded 300 K default is right for July and ~17 K too warm in
+#  January. Segments are fresh-init and run in parallel, so each one simply
+#  carries its own value -- see RUNBOOK.md "PER-SEGMENT SOIL ANCHOR".
+#  (NOAHMP, the only radiatively-live LSM in this fork, was dropped
+#  permanently 2026-07-24.)
+# ---------------------------------------------------------------------------
+erf.land_surface_model = "MM5"
+erf.mm5.soil_theta     = 283.2
+
+# ---------------------------------------------------------------------------
+#  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.
+#  rad_freq_in_steps: radiation every N dycore steps -- see benchmark notes.)
+# ---------------------------------------------------------------------------
+erf.radiation_model        = "RRTMGP"
+# Radiative surface temperature [CORRECTED 2026-07-24]: with zlo=surface_layer
+# active, radiation takes the per-column skin temperature from the surface
+# layer -- verified in Radiation::mf_to_kokkos_buffers. Over OCEAN that is the
+# live ERA5 SST. Over LAND it is the constant erf.mm5.soil_theta, because MM5
+# is inert (see the LAND SURFACE section above): there is no diurnal skin-
+# temperature cycle over land in this configuration. rad_t_sfc below is only
+# the fallback for columns with neither source and never fires here.
+# Surface ALBEDO [ADDED 2026-07-24]: per-column, time-varying from the
+# ERA5 forecast-albedo field carried as field 6 of the surface frames
+# (erftools_fal_patch.py; MODIS climatological annual cycle + model
+# snow). Validated: in-domain land 0.08-0.16, ocean 0.06, 24-h run
+# clean. Fallback when frames lack the field: erf.rad_alb_land (default
+# 0.17) over land via the ERA5 land mask, 0.06 ocean. Remaining
+# radiative-surface simplifications: uniform emissivity 0.98, and the
+# same broadband albedo fills all four SW (dir/dif x vis/nir) slots.
+erf.rad_t_sfc              = 288.0
+# Ozone volume mixing ratio for gas optics: single tropospheric-mean value
+# (domain tops at 20 km, largely below the O3 layer; the O3-sensitive upper
+# levels sit inside the damping layer). Refine to a 48-entry profile if
+# stratospheric SW heating ever matters for the application.
+erf.o3vmr                  = 5.0e-8
+# Recalibrated at 2 km (after the low-temp printf fix exposed true step
+# cost): rad is 0.38 s/call vs ~0.035 s dycore steps, i.e. HALF of wall at
+# freq 10. 30 steps = ~80-135 s model time at dt 2.6-4.5, matching standard
+# practice (WRF radt ~= 1 min per km of dx -> 2 min at 2 km). Cuts rad to
+# ~25% of wall.
+erf.rad_freq_in_steps      = 30
+erf.rrtmgp_file_path       = "."
+erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
+erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
+erf.rrtmgp_cloud_optics_sw = rrtmgp-cloud-optics-coeffs-sw.nc
+erf.rrtmgp_cloud_optics_lw = rrtmgp-cloud-optics-coeffs-lw.nc
+
+# ---------------------------------------------------------------------------
+#  REFINEMENT  (single uniform level -- no AMR)
+# ---------------------------------------------------------------------------
+amr.max_level       = 0
+amr.max_grid_size   = 64
+amr.blocking_factor = 16
+
+# ---------------------------------------------------------------------------
+#  DIAGNOSTICS & VERBOSITY
+# ---------------------------------------------------------------------------
+erf.sum_interval = 100            # integral diagnostics every 100 steps
+                                  # (per-step was the dev-era health monitor;
+                                  # ~100k-step production runs don't need it)
+# [PRODUCTION TRIPWIRE 2026-07-24] NaN/Inf check ARMED, but sampled.
+# check_state_for_nans tests NaN *and* Inf (SP overflow shows up as Inf one
+# step before it becomes NaN) and aborts with the component and the first 20
+# offending cell indices. Every-step checking costs ~45 device reductions per
+# step -- measured ~x1.4 wall (37 ms/step vs 27) -- which is fine for
+# debugging and not for a year. At interval 100 (~3.7 min of model time at
+# dt 2.24 s) the cost is ~0.4% of wall and a blowup is still caught long
+# before it can fill months of plotfiles with NaNs.
+erf.check_for_nans     = 1
+erf.check_for_nans_int = 100
+erf.v = 1
+amr.v = 1
+amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
+
+# --- REQUIRED runtime settings on the 16 GB RTX 4080 -----------------------
+# Single GPU stream: the hindcast step path has a cross-stream execution race
+# (NaN in memory-dependent regions; bit-identical clean runs with 1 stream;
+# compute-sanitizer initcheck clean -- see RUNBOOK "Known issues").
+# MEASURED at 2 km (after the printf-flood fix): the race is RARE here
+# (one event in ~390 cold-start steps at 4 streams; immediate at 1 km with
+# 24 boxes) and the pin costs only ~1.2x (0.0348 vs 0.0287 s/step) -- NOT
+# the 3x measured at 1 km under the printf flood. Keep the pin: 20% is not
+# worth silent-corruption risk until the racing pair is found and fenced.
+amrex.max_gpu_streams = 1
+# Cap the AMReX arena so Kokkos (RRTMGP work arrays) has headroom, and chunk
+# the radiation columns; without these the first radiation call OOMs.
+amrex.the_arena_init_size = 4000000000
+# Swept at 2 km: 512/2048/5000 within noise; 18432 (single chunk) OOMs.
+erf.rad_ncol_chunk        = 5000
+
+# ---------------------------------------------------------------------------
+#  CHECKPOINTS  (time-based to match adaptive dt; every 6 h of sim time)
+#  (amr.check_per verified accepted -- ERF reads both erf.* and amr.*)
+# ---------------------------------------------------------------------------
+erf.check_file = chk
+amr.check_per  = 21600.0           # checkpoint every 21600 s (6 h)
+
+# ---------------------------------------------------------------------------
+#  PLOTFILES  (native AMReX; convert to NetCDF afterward)
+#  erf.plot_per_1 verified correct (ERF.cpp:2632). All plot vars verified
+#  against ERF_Plotfile.cpp / cons_names.
+# ---------------------------------------------------------------------------
+erf.plotfile_type = amrex
+erf.plot_file_1   = plt
+erf.plot_per_1    = 3600.0         # hourly (production: ~8,760 files/yr,
+                                   # ~23 MB each ~ 200 GB/yr; measured I/O
+                                   # cost 7.5 ms/file = negligible)
+erf.plot_vars_1   = density rhotheta x_velocity y_velocity z_velocity \
+                    pressure temp theta pres_hse z_phys qv qc qrain \
+                    qgraup qsnow vorticity_x vorticity_y vorticity_z rain_accum
+
+# ===========================================================================
+#  NESTED CONFIGURATION (2026-07-24). Parent 3 km 136x104 (408x312 km) with
+#  the ERA5 relaxation band >= 29 cells from the nest on N/S/E and 21 on the
+#  west (ocean); north band over the western Mojave, past the Transverse
+#  Ranges. Nest 1 km 129x138 holding San Miguel, Santa Rosa, Santa Cruz,
+#  Anacapa and San Nicolas, all >= 20 fine cells from the nest boundary.
+#  The nest gets its BCs from the parent solution (full state incl rho, w)
+#  plus the fork-wired coarse/fine relaxation zone (cf_width) -- without it
+#  the nest is a sealed cavity and rings to NaN (UPSTREAM_ISSUES; measured).
+#  terrain_smoothing=0 is REQUIRED for multilevel (upstream abort).
+# ===========================================================================
+amr.max_level        = 1
+amr.ref_ratio_vect   = 3 3 1
+amr.n_error_buf      = 0
+amr.max_grid_size    = 512
+amr.blocking_factor_x = 8 3
+amr.blocking_factor_y = 8 3
+amr.blocking_factor_z = 8 4
+amr.check_input      = 0            # blocking factor 3 is not a power of 2
+erf.refinement_indicators = nest1
+erf.nest1.max_level  = 1
+erf.nest1.in_box_lo_indices_crse = 29 26 0
+erf.nest1.in_box_hi_indices_crse = 71 72 31
+erf.coupling_type    = OneWay       # TwoWay averages fine terrain metrics
+                                    # onto the parent (z_phys_nd inconsistency)
+erf.cf_width         = 10            # coarse/fine relaxation-zone width
+erf.cf_set_width     = 0            # hard-forbidden > 0 by upstream
+erf.hindcast_blend_momentum = true  # momentum-consistent band blend (lev 0)

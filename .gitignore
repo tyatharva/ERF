@@ -84,3 +84,14 @@ Exec/CanonicalTests/ChannelIslands/channel_islands_terrain.txt
 /era5_grib/
 /era5_run/
 /run_hindcast/
+
+# ChannelIslands campaign: local run dirs and bulk downloaded/derived data
+/era5_year/
+/era5_run_stress_*/
+/run_*/
+/katrina/
+/chain_status.txt
+/year_download.log
+__pycache__/
+/precip_check/*.grib
+/precip_check/*.npz
