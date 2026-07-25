@@ -47,6 +47,29 @@ inline int realbdy_dump_relax_step ()
 }
 
 /*
+ * erf.nscbc_lateral (default 0): replace the Davies specified+relaxation zone
+ * with the admissible characteristic set at the lateral boundaries.  Turning it
+ * on also removes the relaxation ramp entirely -- any residual spatially-varying
+ * relaxation reintroduces the grad(F).(A-B) source the scheme exists to remove.
+ * erf.nscbc_keep_ramp is a DIAGNOSTIC override that keeps the ramp on, so the
+ * boundary-condition change and the ramp removal can be scored separately.
+ */
+inline int nscbc_lateral ()
+{
+    static const int s_v = [] {
+        int v = 0; amrex::ParmParse pp("erf"); pp.query("nscbc_lateral", v); return v;
+    }();
+    return s_v;
+}
+inline int nscbc_keep_ramp ()
+{
+    static const int s_v = [] {
+        int v = 0; amrex::ParmParse pp("erf"); pp.query("nscbc_keep_ramp", v); return v;
+    }();
+    return s_v;
+}
+
+/*
  * Create a new BoxArray in which every grid touches the bottom boundary
  */
 void ChopGrids2D (amrex::BoxArray& ba, const amrex::Box& domain, int target_size);

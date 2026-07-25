@@ -334,7 +334,8 @@
         // it from the slow-mode forcing and Marchuk-splits it explicitly "for
         // stability reasons", and TRAM (Romero et al. 2024, QJRMS) applies its
         // Newtonian relaxation after each completed time step.
-        if (solverChoice.use_real_bcs && (level == 0) && !realbdy_relax_split()) {
+        if (solverChoice.use_real_bcs && (level == 0) && !realbdy_relax_split() &&
+            !(nscbc_lateral() && !nscbc_keep_ramp())) {
             const Real bdy_factor = solverChoice.bdy_nudge_factor;
             if (real_width>0) {
                 //

@@ -1,5 +1,6 @@
 #include "ERF.H"
 #include "ERF_Utils.H"
+#include "ERF_EOS.H"
 
 using namespace amrex;
 
@@ -322,6 +323,302 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
             } // is_read
         } // comp
     } // var
+
+    // ***********************************************************************************
+    // NSCBC lateral boundary treatment (erf.nscbc_lateral)
+    //
+    // Replaces the "specify everything, everywhere" fill above with the admissible
+    // characteristic set, determined per face point per level per BC application.
+    //
+    // Counting, for ERF's boundary-normal system (n = 5 + N variables, N scalars):
+    //   lambda = u_n - c  (x1),  u_n  (x3+N),  u_n + c  (x1)
+    // Subsonic INFLOW  : 4 + N admissible conditions -- u_n, both tangential
+    //                    velocities, theta, and every scalar.  rho is left FREE:
+    //                    it rides the OUTGOING u_n - c wave and must be computed
+    //                    from the interior.
+    // Subsonic OUTFLOW : exactly ONE, independent of N.
+    //
+    // The incoming acoustic characteristic, per face.  Working in the OUTWARD-normal
+    // frame (u_n = u.nhat, nhat pointing out of the domain), the incoming acoustic
+    // wave is always lambda = u_n - c < 0, carrying J- = u_n - 2c/(gamma-1).
+    // Translated back to grid components that is:
+    //
+    //   face   nhat    u_n        outflow means   incoming acoustic   invariant specified
+    //   xlo    -x      -u         u < 0           lambda_x = u + c    J+ = u + 2c/(g-1)
+    //   xhi    +x      +u         u > 0           lambda_x = u - c    J- = u - 2c/(g-1)
+    //   ylo    -y      -v         v < 0           lambda_y = v + c    J+ = v + 2c/(g-1)
+    //   yhi    +y      +v         v > 0           lambda_y = v - c    J- = v - 2c/(g-1)
+    //
+    // i.e. the LO faces specify J+ and the HI faces specify J-.  Getting this backwards
+    // would impose an OUTGOING invariant -- wrong, but it would still run.  The code
+    // below works in the outward-normal frame so there is a single formula and the
+    // per-face sign lives only in nsign.
+    //
+    // At INFLOW the outgoing wave is the other one (lambda_x = u - c at xlo), which is
+    // what carries rho/p out of the domain -- hence rho free.
+    //
+    // APPROXIMATION 1 (isentropic invariants).  J+- = u_n +- 2c/(gamma-1) is the 1-D
+    // ISENTROPIC form.  In a stratified atmosphere entropy varies along the normal so
+    // these are not exactly conserved.  Over one acoustic substep (dtau ~ 0.4 s, sound
+    // travels ~134 m against dx = 3 km) the error is small, and theta is carried by the
+    // lambda_0 family which we take from the interior separately -- the isentropic
+    // assumption enters only in the acoustic pair.
+    //
+    // APPROXIMATION 2 (the sigma blend).  Blending a (4+N)-condition inflow state with
+    // a 1-condition outflow state is NOT a preserved count inside the blend window; it
+    // is a Robin-type condition there. Marchesiello et al. instead blend the relaxation
+    // TIMESCALE between inflow and outflow values, keeping the condition set fixed.
+    // The blend is used here because it is pointwise in u_n rather than in distance from
+    // the wall, so it cannot rebuild the monotone wall-normal ramp whose gradient is
+    // the artifact -- but it is an approximation, not a derivation.  eps is small
+    // (0.5 m/s) so sigma is 0 or 1 almost everywhere.  If it flaps, replace with a hard
+    // switch plus hysteresis on a persistent per-face flag.
+    // ***********************************************************************************
+    static const int l_nscbc_outflow = [] {
+        int v=0; ParmParse pp("erf"); pp.query("nscbc_outflow", v); return v; }();
+    static const Real l_nscbc_eps = [] {
+        Real e=Real(0.5); ParmParse pp("erf"); pp.query("nscbc_eps", e); return e; }();
+    // Bisection bitmask: 1=cons pass, 2=velocity pass, 4=specify KE/scalar at
+    // inflow, 8=specify w=0 at inflow.  Default 15 = the full formulation.
+    static const int l_nscbc_parts = [] {
+        int v=15; ParmParse pp("erf"); pp.query("nscbc_parts", v); return v; }();
+    static const Real l_nscbc_tke = [] {
+        Real t=Real(0.01); ParmParse pp("erf"); pp.query("nscbc_inflow_tke", t); return t; }();
+
+    if (nscbc_lateral() && !cons_only)
+    {
+        MultiFab& cons_mf = *mfs[Vars::cons];
+        MultiFab& xvel_mf = *mfs[Vars::xvel];
+        MultiFab& yvel_mf = *mfs[Vars::yvel];
+        MultiFab& zvel_mf = *mfs[Vars::zvel];
+
+        // `domain` and `set_width` above are scoped to the per-variable loop
+        const Box domain_n   = geom[lev].Domain();
+        const int set_width_n = 1;
+        const auto dlo = lbound(domain_n);
+        const auto dhi = ubound(domain_n);
+
+        // Scratch carrying the per-column boundary solution, stored at the wall-adjacent
+        // CELL so both the cons pass and the velocity passes read the same numbers:
+        //   0 = sigma (1 = inflow, 0 = outflow)
+        //   1 = rho at the boundary       (outflow, variant 1; else the extrapolated rho)
+        //   2 = rho*theta at the boundary (   "   )
+        //   3 = wall-normal velocity, OUTWARD-positive
+        const int ng_nsc = std::max(ngvect_cons.max(), ngvect_vels.max());
+        MultiFab nsc(cons_mf.boxArray(), cons_mf.DistributionMap(), 4, ng_nsc);
+        nsc.setVal(0.0);
+
+        const Real gm1  = Gamma - Real(1.0);
+        const int  ncmp = ncomp_cons;
+        const int  icmp = icomp_cons;
+        const int  ovar = l_nscbc_outflow;
+        const Real eps  = l_nscbc_eps;
+        const int  prt  = l_nscbc_parts;
+        const Real tke_in = l_nscbc_tke;
+
+        MultiFab r_hse(base_state[lev], make_alias, BaseState::r0_comp, 1);
+        MultiFab p_hse(base_state[lev], make_alias, BaseState::p0_comp, 1);
+
+        // fdir = 0:xlo 1:xhi 2:ylo 3:yhi
+        for (int fdir = 0; fdir < 4; ++fdir)
+        {
+            const int  ndir  = (fdir < 2) ? 0 : 1;                 // normal coordinate
+            const Real nsign = (fdir % 2 == 0) ? Real(-1.) : Real(1.); // nhat . e_ndir
+            // Wall-adjacent cell, first interior cell, and the wall / first-interior face
+            const int  wcell = (fdir==0) ? dlo.x : (fdir==1) ? dhi.x : (fdir==2) ? dlo.y : dhi.y;
+            const int  icell = wcell - static_cast<int>(nsign);    // one cell inward
+            const int  wface = (nsign < 0) ? wcell : wcell + 1;    // the wall face index
+            const int  iface = wface - static_cast<int>(nsign);    // first face inward
+
+            // ---- Stage 1: solve for the boundary state, from the UNMODIFIED interior ----
+            for (MFIter mfi(nsc,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                // Wall-adjacent slab, intersected with this tile (setSmall/setBig alone
+                // would GROW a tile that does not touch the wall)
+                Box wall_slab = domain_n;
+                if (ndir == 0) { wall_slab.setSmall(0,wcell); wall_slab.setBig(0,wcell); }
+                else           { wall_slab.setSmall(1,wcell); wall_slab.setBig(1,wcell); }
+                Box bx = mfi.tilebox() & wall_slab;
+                if (bx.isEmpty()) continue;
+
+                const Array4<Real>&       ns = nsc.array(mfi);
+                const Array4<const Real>& cs = cons_mf.const_array(mfi);
+                const Array4<const Real>& uu = xvel_mf.const_array(mfi);
+                const Array4<const Real>& vv = yvel_mf.const_array(mfi);
+                const Array4<const Real>& rh = r_hse.const_array(mfi);
+                const Array4<const Real>& ph = p_hse.const_array(mfi);
+
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    // Driver normal velocity at the wall face, made OUTWARD-positive.
+                    // This is the just-prescribed boundary value (the Eta rule): it is
+                    // smooth in time, so the regime does not chatter on model noise.
+                    Real un_w = (ndir == 0) ? nsign * uu(wface,j,k) : nsign * vv(i,wface,k);
+
+                    // sigma = 1 deep inflow (un_w <= -eps), 0 deep outflow (un_w >= +eps)
+                    Real sig = Real(0.5) - un_w / (Real(2.0)*eps);
+                    sig = amrex::min(amrex::max(sig, Real(0.0)), Real(1.0));
+                    ns(i,j,k,0) = sig;
+
+                    // Interior state, one cell / one face in
+                    const int ii = (ndir == 0) ? icell : i;
+                    const int jj = (ndir == 1) ? icell : j;
+                    Real rho_i = cs(ii,jj,k,Rho_comp);
+                    Real rt_i  = cs(ii,jj,k,RhoTheta_comp);
+                    Real un_i  = (ndir == 0) ? nsign * uu(iface,j,k) : nsign * vv(i,iface,k);
+
+                    // Default (variant 0): zeroth-order extrapolation from the interior,
+                    // which for an outflow face IS the upwind-biased stencil.
+                    Real rho_b = rho_i, rt_b = rt_i, un_b = un_i;
+
+                    if (ovar == 1) {
+                        Real p_i = getPgivenRTh(rt_i);
+                        Real c_i = std::sqrt(Gamma * p_i / rho_i);
+                        // Only meaningful subsonic; fall back to extrapolation otherwise.
+                        if (c_i > Real(0.0) && std::abs(un_i) < c_i) {
+                            // Outgoing invariant, carried out of the domain by lambda = u_n + c
+                            Real Jout = un_i + Real(2.0)*c_i/gm1;
+                            // The ONE incoming condition: J- from the far field.  p_inf and
+                            // rho_inf are the hydrostatic base state; u_n,inf is the driver.
+                            Real c_inf = std::sqrt(Gamma * ph(i,j,k) / rh(i,j,k));
+                            Real Jin   = un_w - Real(2.0)*c_inf/gm1;
+
+                            Real un_s = Real(0.5)*(Jout + Jin);
+                            Real c_s  = Real(0.25)*gm1*(Jout - Jin);
+                            if (c_s > Real(0.0)) {
+                                // Entropy comes from the interior (outgoing lambda_0 wave)
+                                Real Kent = p_i / std::pow(rho_i, Gamma);
+                                Real rho_s = std::pow(c_s*c_s/(Gamma*Kent), Real(1.0)/gm1);
+                                Real p_s   = Kent * std::pow(rho_s, Gamma);
+                                rho_b = rho_s;
+                                rt_b  = getRhoThetagivenP(p_s);
+                                un_b  = un_s;
+                            }
+                        }
+                    }
+                    ns(i,j,k,1) = rho_b;
+                    ns(i,j,k,2) = rt_b;
+                    ns(i,j,k,3) = un_b;
+                });
+            } // mfi
+            nsc.FillBoundary(geom[lev].periodicity());
+
+            // ---- Stage 2: apply to cons in the specified zone + exterior ghosts ----
+            for (MFIter mfi(cons_mf,TilingIfNotGPU()); (prt & 1) && mfi.isValid(); ++mfi)
+            {
+                Box gbx = mfi.growntilebox(ngvect_cons);
+                Box b_xlo, b_xhi, b_ylo, b_yhi;
+                realbdy_bc_bxs_xy(gbx, domain_n, set_width_n, b_xlo, b_xhi, b_ylo, b_yhi, ngvect_cons);
+                Box bx = (fdir==0) ? b_xlo : (fdir==1) ? b_xhi : (fdir==2) ? b_ylo : b_yhi;
+                if (bx.isEmpty()) continue;
+
+                const Array4<Real>&       cs = cons_mf.array(mfi);
+                const Array4<const Real>& ns = nsc.const_array(mfi);
+
+                // Rho FIRST, in its own kernel: the scalar conditions below need the
+                // updated boundary density, and reading it in the same kernel that
+                // writes it would be a race.
+                if (icmp == 0) {
+                    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        const int wi = (ndir == 0) ? wcell : amrex::min(amrex::max(i,dlo.x),dhi.x);
+                        const int wj = (ndir == 1) ? wcell : amrex::min(amrex::max(j,dlo.y),dhi.y);
+                        Real sig = ns(wi,wj,k,0);
+                        // rho is FREE at inflow -- the zero-gradient value already in place
+                        // IS the statement that it is computed from the interior.
+                        cs(i,j,k,Rho_comp) = sig*cs(i,j,k,Rho_comp)
+                                           + (Real(1.0)-sig)*ns(wi,wj,k,1);
+                    });
+                }
+
+                ParallelFor(bx, ncmp, [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) noexcept
+                {
+                    const int c = n + icmp;
+                    if (c == Rho_comp) return;
+                    // Index of the wall-adjacent cell for this column
+                    const int wi = (ndir == 0) ? wcell : amrex::min(amrex::max(i,dlo.x),dhi.x);
+                    const int wj = (ndir == 1) ? wcell : amrex::min(amrex::max(j,dlo.y),dhi.y);
+                    const int ii = (ndir == 0) ? icell : wi;
+                    const int jj = (ndir == 1) ? icell : wj;
+
+                    Real sig = ns(wi,wj,k,0);
+
+                    // INFLOW value.  rho must stay FREE -- the fill above already left it
+                    // zero-gradient, which is the correct (zeroth-order) statement that it
+                    // is computed from the interior.  KE and the passive scalar are
+                    // admissible inflow conditions that the fill above left floating;
+                    // specify them (laminar, tracer-free inflow).  Everything else --
+                    // theta, q_v, and the zeroed hydrometeors -- is already specified.
+                    Real v_in = cs(i,j,k,c);
+                    if (prt & 4) {
+                        // KE and the passive scalar are admissible inflow conditions that
+                        // the driver fill leaves floating.  Specify them: a tracer-free
+                        // inflow, and free-stream TKE at a small positive floor (a hard
+                        // zero is pathological for MYNN's length-scale closure).
+                        if      (c == RhoKE_comp)     v_in = cs(i,j,k,Rho_comp) * tke_in;
+                        else if (c == RhoScalar_comp) v_in = Real(0.0);
+                    }
+
+                    // OUTFLOW value: computed from the interior.  rho and rho*theta take
+                    // the characteristic solution when variant 1 is active.
+                    Real v_out;
+                    if      (c == Rho_comp)      { v_out = ns(wi,wj,k,1); }
+                    else if (c == RhoTheta_comp) { v_out = ns(wi,wj,k,2); }
+                    else                         { v_out = cs(ii,jj,k,c); }
+
+                    cs(i,j,k,c) = sig*v_in + (Real(1.0)-sig)*v_out;
+                });
+            } // mfi
+
+            // ---- Stage 3: apply to the velocities ----
+            for (int vd = 0; vd < 3; ++vd)
+            {
+                if (!(prt & 2)) continue;
+                MultiFab& vmf = (vd==0) ? xvel_mf : (vd==1) ? yvel_mf : zvel_mf;
+                Box domv = domain_n; domv.convert(vmf.boxArray().ixType());
+
+                for (MFIter mfi(vmf,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    Box gbx = mfi.growntilebox(ngvect_vels);
+                    Box b_xlo, b_xhi, b_ylo, b_yhi;
+                    realbdy_bc_bxs_xy(gbx, domv, set_width_n, b_xlo, b_xhi, b_ylo, b_yhi, ngvect_vels);
+                    Box bx = (fdir==0) ? b_xlo : (fdir==1) ? b_xhi : (fdir==2) ? b_ylo : b_yhi;
+                    if (bx.isEmpty()) continue;
+
+                    const Array4<Real>&       vl = vmf.array(mfi);
+                    const Array4<const Real>& ns = nsc.const_array(mfi);
+                    const bool is_normal = (vd == ndir);
+
+                    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        const int wi = (ndir == 0) ? wcell : amrex::min(amrex::max(i,dlo.x),dhi.x);
+                        const int wj = (ndir == 1) ? wcell : amrex::min(amrex::max(j,dlo.y),dhi.y);
+                        Real sig = ns(wi,wj,k,0);
+
+                        // INFLOW: u_n and the tangential horizontal velocity are already the
+                        // driver values.  w is a boundary-TANGENTIAL velocity here and is an
+                        // admissible inflow condition, but the driver carries no usable w
+                        // (the frame slot is ERA5 omega in Pa/s), so specify w = 0.  The
+                        // ERA5-consistent value is ~6 mm/s (measured), far below anything
+                        // this run resolves.
+                        Real v_in = ((vd == 2) && (prt & 8)) ? Real(0.0) : vl(i,j,k);
+
+                        // OUTFLOW: computed from the interior.  The normal component takes
+                        // the characteristic solution; tangential and w extrapolate.
+                        Real v_out;
+                        if (is_normal) {
+                            v_out = nsign * ns(wi,wj,k,3);
+                        } else {
+                            const int ii = (ndir == 0) ? icell : i;
+                            const int jj = (ndir == 1) ? icell : j;
+                            v_out = vl(ii,jj,k);
+                        }
+                        vl(i,j,k) = sig*v_in + (Real(1.0)-sig)*v_out;
+                    });
+                } // mfi
+            } // vd
+        } // fdir
+    }
 
     // Barotropic wall mass-flux correction (erf.hindcast_wall_flux_correction).
     //

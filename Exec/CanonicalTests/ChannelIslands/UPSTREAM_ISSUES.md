@@ -943,3 +943,94 @@ the same number: it reconstructs the rotational Helmholtz component, which *is*
 the 14%.
 
 **The projection approach is not viable. Nothing was built.**
+
+### ERF's real-BC default already gets the one thing that matters right
+
+The characteristic analysis says exactly one variable must be left FREE at a
+subsonic lateral inflow: rho (equivalently p), because it rides the OUTGOING
+u_n - c wave and must be computed from the interior. Everything else -- u_n,
+both tangential velocities, theta, and every scalar -- is admissible.
+
+`fill_from_realbdy` already does this. `cons_read[Rho_comp] = 0`, so rho is
+zero-gradient (computed from the interior), and the driver's theta and q are
+multiplied by that *local* rho (`dest_arr(...,comp) *= dest_arr(...,Rho_comp)`).
+So theta is specified and rho is free -- precisely the admissible split.
+
+That reframes two proposals. Attempt 2 here (`erf.hindcast_mass_consistent_bdy`)
+and upstream PR #3483 both set rho at the boundary from the driving deck. Both
+therefore *break a behaviour ERF already gets right*, and the characteristic
+analysis says so independently of the empirical failure we measured (near-wall
+w_rms 0.71 -> 4.33 m/s, excess growing monotonically with height). The
+recommendation upstream is not "add rho at the boundary" -- it is "do not".
+
+The accurate accounting of what ERF specifies today, for a Morrison deck
+(N = 13 scalars, 18 variables, admissible 17 in / 1 out):
+
+| variable | treatment | specified? |
+|---|---|---|
+| rho | zero-gradient | **free (correct)** |
+| theta | driver | yes |
+| u, v | driver | yes x2 |
+| w | zero-gradient | free |
+| q_v | driver | yes |
+| q_c .. q_11 | **zeroed** | yes x10, to a wrong value |
+| KE, scalar | zero-gradient | free x2 |
+
+14 specified, 4 free. So ERF is **under**-specified by 3 at inflow (w, KE,
+scalar float when they must be given) and **over**-specified by 13 at outflow.
+Not the "over-specified everywhere" picture; the inflow side is nearly right.
+
+### Step 3 result: NSCBC eliminates the artifact, and breaks the mass budget
+
+Built behind `erf.nscbc_lateral` (default 0, so every non-real-BC path is
+byte-identical). Regime from the sign of the just-prescribed driver normal
+velocity, blended over a +-0.5 m/s window; inflow specifies 4+N with rho free;
+outflow computes from the interior with either plain extrapolation
+(`erf.nscbc_outflow=0`) or one incoming-acoustic Riemann condition
+(`=1`); the ramp is removed. Sep-9 dry control, 1200 steps, blend off, wall
+flux correction on.
+
+| config | d=0 | band peak (d>=3) | interior bg | mass drift |
+|---|---|---|---|---|
+| control (Davies) | 0.20% | **49.85%** (d=6) | 10.88% | +0.453 %/day |
+| relax-off floor | 55.48% | 0.69% | 2.86% | +5.346 %/day |
+| NSCBC, extrap outflow | 49.13% | **0.00%** (d=3-11) | **2.46%** | +174.6 %/day |
+| NSCBC, Riemann outflow | 61.42% | 0.97% | **1.50%** | +96.0 %/day |
+| NSCBC + ramp kept, w=10 | 8.43% | 50.51% (d=6) | 15.22% | +637 %/day |
+| NSCBC + ramp kept, w=15 | 4.83% | 34.83% (d=10) | 7.66% | +559 %/day |
+
+Two results and one failure.
+
+1. **The band artifact is eliminated, not reduced.** With the ramp gone the
+   profile is 0.00% from d=3 to d=11. And the keep-ramp rows show the 1/width
+   scaling returning the moment the ramp is restored (50.51% at width 10,
+   34.83% at width 15, ratio 1.45 against 1.5 predicted). The mechanism is
+   confirmed by construction and by ablation.
+2. **The interior background beats the relax-off floor**: 1.50% against 2.86%,
+   7x better than the Davies control's 10.88%.
+3. **The mass budget is destroyed** -- +96 to +175 %/day, 200-400x the control.
+
+The mass failure is isolated, not speculative. Bisecting the pass with
+`erf.nscbc_parts` (bit 2 = the velocity pass):
+
+| parts | wall velocities | mass drift |
+|---|---|---|
+| 13 (no velocity pass) | driver, as today | **-18.3 %/day** |
+| 7 / 15 (velocity pass on) | characteristic | **+94.7 %/day** |
+
+and retuning the wall flux correction does almost nothing (tau 3600 -> 100, a
+36x faster correction, moves drift only 96.0 -> 86.4 %/day).
+
+**Cause: ERA5's boundary winds are approximately mass-balanced around the
+domain, and the characteristic outflow condition replaces half of them with
+model-derived values, destroying that balance.** This is the classical
+limited-area solvability problem, and it is also why d=0 stays loud -- the same
+defect seen locally rather than globally. The characteristic count tells you how
+many conditions are admissible; it says nothing about the discrete global mass
+budget, and in a limited-area domain that has to be imposed separately.
+
+The remedy is a global outflow rescaling of exactly the kind ERF already
+implements for the anelastic path: `enforceInOutSolvability`
+(`ERF_PoissonSolve.cpp:465`), which scales outflow to match inflow. Applied to
+the NSCBC wall fluxes with the target net flux set from the ERA5 column-mass
+tendency, it is the missing third piece. Not yet built.
