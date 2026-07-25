@@ -709,6 +709,177 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         } // mfi
     } // ivar
 
+    // Cancel the relaxation ramp's spurious divergence
+    //==========================================================
+    // The relaxation adds S = F*F1*(A-B) to the MOMENTUM rhs, whose divergence
+    // is F1*[ F div(A-B) + grad(F).(A-B) ]. The second term has no physical
+    // counterpart: it is a divergence source proportional to the ramp gradient
+    // times the local momentum error, and since rho is unconstrained the only
+    // place it can go is Delta_z(rho Omega) -- i.e. it becomes w. Measured: it
+    // peaks mid-band (d ~ 0.6*width) and its amplitude scales as 1/width.
+    //
+    // Cancel it with a companion MOMENTUM increment C obeying
+    //     div C = -F1 * grad(F).(A-B)
+    // so the rho equation is never given a source and remains a pure flux
+    // divergence (this is what separates it from a volumetric rho relaxation).
+    // grad(F) is wall-normal, so C is a 1-D wall-normal integral; with
+    // F(d) = ((w-d)/w)^2 the discrete increment is dx-free:
+    //     C(d+1) = C(d) + 2*F1*(w-d)/w^2 * err(d)
+    // starting from C = 0 at the wall (the wall flux is left alone). The
+    // integral has a nonzero net, which would otherwise leak momentum into the
+    // interior, so a linear taper drives C back to zero at the inner edge. The
+    // residual is then a UNIFORM divergence over the band whose net per column
+    // is exactly what the barotropic wall flux correction absorbs -- the two
+    // are complementary, not alternatives.
+    //
+    // Corners (within `width` of two walls) are left untreated: there F is
+    // max(xi^2,eta^2) and the 1-D split does not apply.
+    // erf.hindcast_ramp_div_correction: 0 = off,
+    //   1 = TAPER   -- C=0 at both ends, residual smeared over the band.
+    //                  MEASURED FAILURE: the net is weighted by (w-d)/w^2 times
+    //                  an error that GROWS inward, so it peaks mid-band exactly
+    //                  where the artifact does; the taper then adds back a
+    //                  uniform divergence of comparable size. Peaks stayed
+    //                  47.0/32.0/15.8 % at width 10/15/20 -- still ~1/width.
+    //   2 = WALL    -- C=0 at the inner edge instead, so the residual leaves
+    //                  through the wall face as a per-level mass flux. The
+    //                  cancellation is then exact inside the band and nothing
+    //                  leaks into the interior.
+    static const int l_ramp_corr = [] {
+        int m=0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_ramp_div_correction", m); return m; }();
+
+    MultiFab cwx, cwy;
+    if (l_ramp_corr == 2) {
+        cwx.define(S_rhs[IntVars::xmom].boxArray(), S_rhs[IntVars::xmom].DistributionMap(), 1, 0);
+        cwy.define(S_rhs[IntVars::ymom].boxArray(), S_rhs[IntVars::ymom].DistributionMap(), 1, 0);
+        cwx.setVal(0.0); cwy.setVal(0.0);
+    }
+
+    if (l_ramp_corr > 0 && width > 1)
+    {
+        const auto rlo = lbound(geom.Domain());
+        const auto rhi = ubound(geom.Domain());
+        const int  wd  = width;
+        const Real cF1 = F1;
+
+        Array4<const Real> tgt_ulo = U_xlo.const_array();
+        Array4<const Real> tgt_uhi = U_xhi.const_array();
+        Array4<const Real> tgt_vlo = V_ylo.const_array();
+        Array4<const Real> tgt_vhi = V_yhi.const_array();
+
+        // ---- x walls ----
+        for (MFIter mfi(S_rhs[IntVars::xmom]); mfi.isValid(); ++mfi)
+        {
+            const Box& vbx = mfi.validbox();
+            const Array4<Real>&       rhs = S_rhs[IntVars::xmom].array(mfi);
+            const Array4<const Real>& mom = S_cur_data[IntVars::xmom].const_array(mfi);
+
+            for (int side = 0; side < 2; ++side)
+            {
+                const bool lo = (side == 0);
+                const int  iw = lo ? rlo.x : rhi.x + 1;          // wall face index
+                if (lo  && vbx.smallEnd(0) != rlo.x)     { continue; }
+                if (!lo && vbx.bigEnd(0)   != rhi.x + 1) { continue; }
+                if (vbx.length(0) < wd + 1)              { continue; }
+
+                Box slab = makeSlab(vbx, 0, iw);
+                Array4<const Real> tgt = lo ? tgt_ulo : tgt_uhi;
+                const int istep = lo ? 1 : -1;
+                const int mode  = l_ramp_corr;
+                Array4<Real> cw = (mode == 2) ? cwx.array(mfi) : Array4<Real>{};
+
+                ParallelFor(slab, [=] AMREX_GPU_DEVICE (int, int j, int k) noexcept
+                {
+                    // Skip corners: the 1-D split is only valid where this wall
+                    // is unambiguously the nearest one.
+                    if (amrex::min(j - rlo.y, rhi.y - j) < wd) { return; }
+
+                    Real net = Real(0.0);
+                    for (int d = 0; d < wd; ++d) {
+                        const int fa = iw + istep*d;
+                        const int fb = iw + istep*(d+1);
+                        const Real err = Real(0.5) * ( (tgt(fa,j,k) - mom(fa,j,k))
+                                                     + (tgt(fb,j,k) - mom(fb,j,k)) );
+                        net += Real(2.0) * cF1 * Real(wd-d) / Real(wd*wd) * err;
+                    }
+
+                    // mode 1: C(0)=0, taper to zero at the inner edge.
+                    // mode 2: C(0)=-net so C(wd)=0 exactly; the residual exits
+                    //         through the wall face instead of the band.
+                    Real C = (mode == 2) ? -net : Real(0.0);
+                    if (mode == 2) { cw(iw,j,k) = C; }
+                    for (int d = 0; d <= wd; ++d) {
+                        if (d > 0 || mode == 1) {
+                            rhs(iw + istep*d, j, k) +=
+                                (mode == 2) ? C : (C - net * Real(d) / Real(wd));
+                        }
+                        if (d < wd) {
+                            const int fa = iw + istep*d;
+                            const int fb = iw + istep*(d+1);
+                            const Real err = Real(0.5) * ( (tgt(fa,j,k) - mom(fa,j,k))
+                                                         + (tgt(fb,j,k) - mom(fb,j,k)) );
+                            C += Real(2.0) * cF1 * Real(wd-d) / Real(wd*wd) * err;
+                        }
+                    }
+                });
+            }
+        }
+
+        // ---- y walls ----
+        for (MFIter mfi(S_rhs[IntVars::ymom]); mfi.isValid(); ++mfi)
+        {
+            const Box& vbx = mfi.validbox();
+            const Array4<Real>&       rhs = S_rhs[IntVars::ymom].array(mfi);
+            const Array4<const Real>& mom = S_cur_data[IntVars::ymom].const_array(mfi);
+
+            for (int side = 0; side < 2; ++side)
+            {
+                const bool lo = (side == 0);
+                const int  jw = lo ? rlo.y : rhi.y + 1;
+                if (lo  && vbx.smallEnd(1) != rlo.y)     { continue; }
+                if (!lo && vbx.bigEnd(1)   != rhi.y + 1) { continue; }
+                if (vbx.length(1) < wd + 1)              { continue; }
+
+                Box slab = makeSlab(vbx, 1, jw);
+                Array4<const Real> tgt = lo ? tgt_vlo : tgt_vhi;
+                const int jstep = lo ? 1 : -1;
+                const int mode  = l_ramp_corr;
+                Array4<Real> cw = (mode == 2) ? cwy.array(mfi) : Array4<Real>{};
+
+                ParallelFor(slab, [=] AMREX_GPU_DEVICE (int i, int, int k) noexcept
+                {
+                    if (amrex::min(i - rlo.x, rhi.x - i) < wd) { return; }
+
+                    Real net = Real(0.0);
+                    for (int d = 0; d < wd; ++d) {
+                        const int fa = jw + jstep*d;
+                        const int fb = jw + jstep*(d+1);
+                        const Real err = Real(0.5) * ( (tgt(i,fa,k) - mom(i,fa,k))
+                                                     + (tgt(i,fb,k) - mom(i,fb,k)) );
+                        net += Real(2.0) * cF1 * Real(wd-d) / Real(wd*wd) * err;
+                    }
+
+                    Real C = (mode == 2) ? -net : Real(0.0);
+                    if (mode == 2) { cw(i,jw,k) = C; }
+                    for (int d = 0; d <= wd; ++d) {
+                        if (d > 0 || mode == 1) {
+                            rhs(i, jw + jstep*d, k) +=
+                                (mode == 2) ? C : (C - net * Real(d) / Real(wd));
+                        }
+                        if (d < wd) {
+                            const int fa = jw + jstep*d;
+                            const int fb = jw + jstep*(d+1);
+                            const Real err = Real(0.5) * ( (tgt(i,fa,k) - mom(i,fa,k))
+                                                         + (tgt(i,fb,k) - mom(i,fb,k)) );
+                            C += Real(2.0) * cF1 * Real(wd-d) / Real(wd*wd) * err;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     // Set normal velocity RHS at the boundary
     //==========================================================
     // The barotropic wall flux correction is folded into u_val/v_val here as
@@ -772,6 +943,12 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
         const auto wlo = lbound(geom.Domain());
         const auto whi = ubound(geom.Domain());
         const bool l_wc_l = l_wc;
+        // Ramp-cancellation residual routed out through the wall (mode 2).
+        // This block ASSIGNS rhs at the wall faces, so the residual has to be
+        // added here rather than left for the correction pass above.
+        const bool l_rc2 = (l_ramp_corr == 2);
+        Array4<const Real> cwx_a = l_rc2 ? cwx.const_array(mfi) : Array4<const Real>{};
+        Array4<const Real> cwy_a = l_rc2 ? cwy.const_array(mfi) : Array4<const Real>{};
 
         const auto& bdatxlo_n   = bdy_data_xlo[n_time   ][ivarU].const_array();
         const auto& bdatxlo_np1 = bdy_data_xlo[n_time_p1][ivarU].const_array();
@@ -797,7 +974,8 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 u_val    = oma * bdatxlo_n(i,j,k) + alpha * bdatxlo_np1(i,j,k);
             }
             if (l_wc_l) { u_val += dvarr(wlo.x, amrex::min(amrex::max(j,wlo.y),whi.y), k); }
-                rhs_xmom(i,j,k) = rho_val * u_tend + u_val * rho_tend;
+            rhs_xmom(i,j,k) = rho_val * u_tend + u_val * rho_tend;
+            if (l_rc2) { rhs_xmom(i,j,k) += cwx_a(i,j,k); }
             },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
@@ -819,6 +997,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             }
             if (l_wc_l) { u_val -= dvarr(whi.x, amrex::min(amrex::max(j,wlo.y),whi.y), k); }
             rhs_xmom(i,j,k) = rho_val * u_tend + u_val * rho_tend;
+            if (l_rc2) { rhs_xmom(i,j,k) += cwx_a(i,j,k); }
         });
 
         ParallelFor(tby_lo, tby_hi,
@@ -836,6 +1015,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             }
             if (l_wc_l) { v_val += dvarr(amrex::min(amrex::max(i,wlo.x),whi.x), wlo.y, k); }
             rhs_ymom(i,j,k) = rho_val * v_tend + v_val * rho_tend;
+            if (l_rc2) { rhs_ymom(i,j,k) += cwy_a(i,j,k); }
         },
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
@@ -852,6 +1032,7 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
             }
             if (l_wc_l) { v_val -= dvarr(amrex::min(amrex::max(i,wlo.x),whi.x), whi.y, k); }
             rhs_ymom(i,j,k) = rho_val * v_tend + v_val * rho_tend;
+            if (l_rc2) { rhs_ymom(i,j,k) += cwy_a(i,j,k); }
         });
     } // mfi
 }

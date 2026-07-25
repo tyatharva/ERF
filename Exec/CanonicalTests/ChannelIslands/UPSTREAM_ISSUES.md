@@ -684,3 +684,115 @@ double-precision control build (DP stable => SP conditioning of the c/f
 interpolation/relaxation; DP unstable => algorithmic defect in the nest
 path); (3) upstream escalation with this ladder -- upstream CI has no SP
 GPU multilevel real-case coverage that would have caught any of #15-#17.
+
+---
+
+## 18. Lateral relaxation manufactures spurious vertical motion: the ramp-gradient term
+
+**Severity:** invalidates precipitation and vertical-motion statistics in and near
+the relaxation zone for every `use_real_bcs` run. Affects wrfbdy/metgrid equally;
+found on `init_type=HindCast`.
+
+### Symptom
+In the level-0 relaxation band, 9-50 % of cells carry |w| > 1 m/s against an
+interior background near 11 %, in every regime tested. It is not orographic and
+not inherited from the driving data (both shown below).
+
+### Derivation (operator level)
+`Omega` is hard-zeroed at `k=klo` (SlowRhsPre, SlowRhsPost, Substep_T,
+PoissonSolve) and the lid is a SlipWall, so the vertical mass flux telescopes
+out of a column sum of the discrete continuity equation in
+`AdvectionSrcForRho`:
+
+    d/dt sum_k (detJ/m^2) rho = - sum_k [ Dx(ax rho_u/mf_u)/dx + Dy(ay rho_v/mf_v)/dy ]
+
+The column mass tendency is determined ENTIRELY by the horizontal fluxes -- this
+is ERF's implicit analogue of WRF's mu equation. (ERF does not reproduce WRF's
+mu-coupled lateral BC: `WRFBdyVars::MU` is used only to de-couple at read time in
+`convert_wrfbdy_data` and is never consulted again; `PC` is never used at all.)
+
+Prescribing rho_u and rho_v in the band therefore already prescribes the column
+mass tendency, while `Rho_comp` is relaxed toward nothing at all -- `comp_map` in
+`realbdy_compute_interior_ghost_rhs` covers U,V,T,QV only. The level-by-level
+residual has only `Dz(rho Omega)` left to absorb it, so **Omega, and hence w, is
+the residual variable.**
+
+The concrete source is the ramp. The relaxation adds `S = F*F1*(A-B)` to the
+MOMENTUM rhs, and
+
+    div(F*A + (1-F)*B) = F div A + (1-F) div B + grad(F).(A-B)
+
+The last term has no physical counterpart. It peaks where |grad F| * |momentum
+error| is largest -- mid-band, since the error grows as the forcing weakens.
+
+### Evidence
+1. **The driving data is clean.** A discrete continuity residual of the
+   interpolated ERA5 target, measured with ERF's own operator, gives an implied
+   |w| of 6.4 mm/s in the band and 5.2 mm/s in the interior -- 150x below the
+   1 m/s criterion, and the same inside the band as outside. The target also
+   equals the initialized state exactly (max|drho| = 0).
+2. **The wall is clean; the mid-band is not.** Decomposing by wall, over flat
+   water (12 m terrain) the wall itself is 0.00 % at d=1-2 while d=5-7 reaches
+   44-50 %. The only loud cells at d=0 are on the two land walls (250 m terrain).
+3. **The scaling law holds.** Peak location tracks `real_width` and peak
+   amplitude tracks 1/width, to ~10 % across three widths:
+
+   | real_width | peak location | peak \|w\|>1 | predicted | mass drift |
+   |---|---|---|---|---|
+   | 10 | d = 6  | 49.9 % | --     | +0.53 %/day |
+   | 15 | d = 10 | 36.1 % | 33.3 % | +0.92 %/day |
+   | 20 | d = 15 | 21.6 % | 25.0 % | +3.82 %/day |
+
+4. **Weakening the nudge makes it worse.** `bdy_nudge_factor` 10 -> 50 (larger
+   momentum error) raises it to 38.9 % right at the wall.
+
+### Three fixes attempted, all reported honestly
+- **(a) Complete, mass-consistent relaxation target** (relax `Rho_comp` toward
+  rho*, momentum target rho* u* instead of rho_model u*). Mass drift bounded,
+  but near-wall w_rms went 0.71 -> 4.33 m/s with the excess growing monotonically
+  with height (0.04 m/s at k=0 to 8.2 m/s at k=28). A relaxation source in the
+  MASS equation forces the acoustic solver. Knob `erf.hindcast_mass_consistent_bdy`,
+  default off. Prescribing rho* u* WITHOUT the rho constraint NaNs at step 1 --
+  the momentum target must remain velocity-stabilising (rho_model u*).
+- **(b) Barotropic wall mass-flux correction** delivered through the boundary
+  FLUX, never a volumetric source: `dvel = dx*(M_tgt/M - 1)/tau` on the wall
+  face. Dynamically invisible (shell profile identical to control to two
+  decimals at every d) and halves mass drift, 0.53 -> 0.28 %/day, with no blend.
+  But it cannot touch the band w, because the defect is not at the wall.
+  Knob `erf.hindcast_wall_flux_correction` (+`_tau`), default off. Worth having
+  for mass; tau=900 s destabilises, tau=3600 s is stable.
+- **(c) Cancelling grad(F).(A-B) with a companion MOMENTUM increment** (no mass
+  source), 1-D wall-normal since grad F is wall-normal:
+  `C(d+1) = C(d) + 2*F1*(w-d)/w^2 * err(d)`. **Both disposals of the integration
+  residual fail, for one reason:** the net is weighted by (w-d)/w^2 times an
+  error that GROWS inward, so it peaks mid-band exactly where the artifact does
+  and is comparable to it.
+  - taper C to 0 at both ends -> peaks 47.0/32.0/15.8 % at width 10/15/20, still
+    tracking 1/width; near-wall got worse.
+  - route the residual out through the wall -> globally destabilising, interior
+    background 11 % -> 32-56 %.
+  Knob `erf.hindcast_ramp_div_correction` (0 off / 1 taper / 2 wall), default 0.
+
+### Conclusion
+No LOCAL cancellation exists: the wall-normal integral of grad(F).(A-B) has a
+nonzero net that is as large as the artifact, and it cannot be disposed of
+either inside the band or through the boundary. The only untried route is an
+exact 2-D Helmholtz projection of the correction restricted to the band, which
+would leave only the global compatibility constant. Absent that, the practical
+mitigation is a WIDER, gentler ramp -- which works (49.9 -> 21.6 %) but costs
+domain area and worsens mass drift 7x, partially recoverable with (b).
+
+### Two independent defects found along the way
+- **Hi-wall product-rule RHS reads a permanently-zero ghost.** In the normal-face
+  block (PR #3209), `ihi = domainx.bigEnd(0) = nx`, so `rhs_cons(ihi,j,k)` is a
+  ghost of `F_slow[cons]`: never written (every RHS writer uses `mfi.tilebox()`)
+  and `setVal(0)` once at construction. The `u*d(rho)/dt` term is therefore live
+  on the lo walls and silently dropped on the hi walls. Fixed by reading the
+  adjacent valid cell.
+- **The HindCast frame `w` slot is ERA5 omega in Pa/s, not m/s.** Measured from
+  the frame binary: range -1.8..+2.5, mean|.| 0.094 -- consistent with Pa/s, not
+  with a 25-km geometric vertical velocity. Any consumer of that slot needs the
+  omega -> w conversion first. Also `forecast_state_interp[lev][Vars::zvel]` is
+  never written (the LinComb is commented out), so no w target exists on the ERF
+  grid at all. This is the trap the abandoned lateral WfromOmega experiment
+  (PR #2872) walked into.
