@@ -379,9 +379,10 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     static const Real l_nscbc_eps = [] {
         Real e=Real(0.5); ParmParse pp("erf"); pp.query("nscbc_eps", e); return e; }();
     // Bisection bitmask: 1=cons pass, 2=velocity pass, 4=specify KE/scalar at
-    // inflow, 8=specify w=0 at inflow.  Default 15 = the full formulation.
+    // inflow, 8=specify w=0 at inflow, 16=characteristic inflow density.
+    // Default 31 = the full formulation.
     static const int l_nscbc_parts = [] {
-        int v=15; ParmParse pp("erf"); pp.query("nscbc_parts", v); return v; }();
+        int v=31; ParmParse pp("erf"); pp.query("nscbc_parts", v); return v; }();
     static const Real l_nscbc_tke = [] {
         Real t=Real(0.01); ParmParse pp("erf"); pp.query("nscbc_inflow_tke", t); return t; }();
 
@@ -404,8 +405,9 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         //   1 = rho at the boundary       (outflow, variant 1; else the extrapolated rho)
         //   2 = rho*theta at the boundary (   "   )
         //   3 = wall-normal velocity, OUTWARD-positive
+        //   4 = inflow density ratio rho_characteristic / rho_zero-gradient
         const int ng_nsc = std::max(ngvect_cons.max(), ngvect_vels.max());
-        MultiFab nsc(cons_mf.boxArray(), cons_mf.DistributionMap(), 4, ng_nsc);
+        MultiFab nsc(cons_mf.boxArray(), cons_mf.DistributionMap(), 5, ng_nsc);
         nsc.setVal(0.0);
 
         const Real gm1  = Gamma - Real(1.0);
@@ -499,6 +501,34 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                     ns(i,j,k,1) = rho_b;
                     ns(i,j,k,2) = rt_b;
                     ns(i,j,k,3) = un_b;
+
+                    // INFLOW density, from the OUTGOING acoustic characteristic.
+                    // In the outward-normal frame u_n + c is outgoing at a subsonic
+                    // lateral boundary in BOTH regimes, so J+ = u_n + 2c/(gamma-1)
+                    // carries the interior state out and fixes the boundary sound
+                    // speed once u_n is specified:  c_b = (gamma-1)/2 * (J+ - u_n,drv).
+                    // With theta also specified, rho follows from
+                    //   c^2 = gamma * theta * p_0 * (R_d/p_0)^gamma * (rho theta)^(gamma-1)
+                    // taken as a RATIO against the interior, which needs no constants:
+                    //   rho_b/rho_i = (th_i/th_b) * [ (c_b/c_i)^2 (th_i/th_b) ]^(1/(gamma-1))
+                    // Zero-gradient rho -- what ERF does today -- is the crudest possible
+                    // stand-in for this, and it puts a density discontinuity on the wall
+                    // face, which is exactly where the global flux sum is evaluated.
+                    Real ratio = Real(1.0);
+                    Real p_ii  = getPgivenRTh(rt_i);
+                    Real c_ii  = std::sqrt(Gamma * p_ii / rho_i);
+                    Real th_i  = rt_i / rho_i;
+                    Real rho_w = cs(i,j,k,Rho_comp);
+                    Real th_b  = (rho_w > Real(0.0)) ? cs(i,j,k,RhoTheta_comp)/rho_w : th_i;
+                    Real Jp    = un_i + Real(2.0)*c_ii/gm1;
+                    Real c_bb  = Real(0.5)*gm1*(Jp - un_w);
+                    if (c_bb > Real(0.0) && c_ii > Real(0.0) && th_b > Real(0.0)) {
+                        Real r  = th_i / th_b;
+                        Real cr = (c_bb/c_ii)*(c_bb/c_ii);
+                        ratio = r * std::pow(cr*r, Real(1.0)/gm1);
+                    }
+                    if (!(prt & 16)) ratio = Real(1.0);
+                    ns(i,j,k,4) = amrex::min(amrex::max(ratio, Real(0.5)), Real(2.0));
                 });
             } // mfi
             nsc.FillBoundary(geom[lev].periodicity());
@@ -526,7 +556,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                         Real sig = ns(wi,wj,k,0);
                         // rho is FREE at inflow -- the zero-gradient value already in place
                         // IS the statement that it is computed from the interior.
-                        cs(i,j,k,Rho_comp) = sig*cs(i,j,k,Rho_comp)
+                        cs(i,j,k,Rho_comp) = sig*cs(i,j,k,Rho_comp)*ns(wi,wj,k,4)
                                            + (Real(1.0)-sig)*ns(wi,wj,k,1);
                     });
                 }
@@ -549,7 +579,10 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                     // admissible inflow conditions that the fill above left floating;
                     // specify them (laminar, tracer-free inflow).  Everything else --
                     // theta, q_v, and the zeroed hydrometeors -- is already specified.
-                    Real v_in = cs(i,j,k,c);
+                    // rho-weighted quantities were built on the zero-gradient rho by the
+                    // driver fill; rescale them onto the characteristic rho so theta and
+                    // every q keep their SPECIFIED values.
+                    Real v_in = cs(i,j,k,c) * ns(wi,wj,k,4);
                     if (prt & 4) {
                         // KE and the passive scalar are admissible inflow conditions that
                         // the driver fill leaves floating.  Specify them: a tracer-free
@@ -768,6 +801,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         // Wall mass flux, split into inward and outward parts.  Face area for an x-wall
         // is ax*dy*dz; corner cells own two walls and contribute to both.
         MultiFab wf(cons_mf.boxArray(), cons_mf.DistributionMap(), 3, 0);
+        // (cons ghosts were filled by the driver/NSCBC passes above)
         wf.setVal(0.0);
         for (MFIter mfi(wf,TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
@@ -781,17 +815,25 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
 
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
+                // Face density, formed the SAME way the dycore forms it in
+                // VelocityToMomentum -- the average of the two adjacent cells, not the
+                // wall cell alone.  ax/ay already carry the vertical stretching
+                // (ax = 0.5*(z_nd(k+1)-z_nd(k))/dz_ref), so ax*dy*dz_ref is the true
+                // face area and no separate dz correction is needed.
                 Real fsum = Real(0.0), csum = Real(0.0);
-                Real rho  = cs(i,j,k,Rho_comp);
-                Real f, a;
-                if (i == glo.x) { a = axa(glo.x  ,j,k)*dyg*dzg; f = rho*(-uu(glo.x  ,j,k))*a;
-                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
-                if (i == ghi.x) { a = axa(ghi.x+1,j,k)*dyg*dzg; f = rho*( uu(ghi.x+1,j,k))*a;
-                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
-                if (j == glo.y) { a = aya(i,glo.y  ,k)*dxg*dzg; f = rho*(-vv(i,glo.y  ,k))*a;
-                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
-                if (j == ghi.y) { a = aya(i,ghi.y+1,k)*dxg*dzg; f = rho*( vv(i,ghi.y+1,k))*a;
-                                  fsum += f; if (f > Real(0.0)) csum += rho*a; }
+                Real rf, f, a;
+                if (i == glo.x) { rf = Real(0.5)*(cs(glo.x,j,k,Rho_comp)+cs(glo.x-1,j,k,Rho_comp));
+                                  a = axa(glo.x  ,j,k)*dyg*dzg; f = rf*(-uu(glo.x  ,j,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rf*a; }
+                if (i == ghi.x) { rf = Real(0.5)*(cs(ghi.x,j,k,Rho_comp)+cs(ghi.x+1,j,k,Rho_comp));
+                                  a = axa(ghi.x+1,j,k)*dyg*dzg; f = rf*( uu(ghi.x+1,j,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rf*a; }
+                if (j == glo.y) { rf = Real(0.5)*(cs(i,glo.y,k,Rho_comp)+cs(i,glo.y-1,k,Rho_comp));
+                                  a = aya(i,glo.y  ,k)*dxg*dzg; f = rf*(-vv(i,glo.y  ,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rf*a; }
+                if (j == ghi.y) { rf = Real(0.5)*(cs(i,ghi.y,k,Rho_comp)+cs(i,ghi.y+1,k,Rho_comp));
+                                  a = aya(i,ghi.y+1,k)*dxg*dzg; f = rf*( vv(i,ghi.y+1,k))*a;
+                                  fsum += f; if (f > Real(0.0)) csum += rf*a; }
                 w(i,j,k,0) = amrex::min(fsum, Real(0.0));   // inward  (negative)
                 w(i,j,k,1) = amrex::max(fsum, Real(0.0));   // outward (positive)
                 w(i,j,k,2) = csum;                          // rho*A on outflow faces

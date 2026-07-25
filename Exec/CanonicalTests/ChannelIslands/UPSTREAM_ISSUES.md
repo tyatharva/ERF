@@ -1091,3 +1091,69 @@ extrapolated: the derivation says it must be computed from the interior via the
 outgoing u_n - c characteristic, and zero-gradient is the crudest possible stand-in
 for that. That is the next thing to try, and it is stated here as a hypothesis, not
 a conclusion.
+
+### Characteristic inflow density: the coupling was real, and mass drift now lands
+
+Two fixes, deliberately separated with `erf.nscbc_parts` bit 16.
+
+**Flux metric (rho at the face, not the wall cell): no effect** -- -7.265 -> -7.297
+%/day. And the dz half of that concern was unfounded: `ax` already carries the
+vertical stretching (`ax = 0.5*(z_nd(k+1)-z_nd(k))/dz_ref`), so `ax*dy*dz_ref` is
+already the true face area. Only the rho location was ever wrong, and it was worth
+0.03 %/day.
+
+**Characteristic inflow density: real.** At a subsonic lateral boundary, in the
+outward-normal frame, `u_n + c` is OUTGOING in BOTH regimes (at inflow u_n < 0 but
+|u_n| < c). So `J+ = u_n + 2c/(gamma-1)` carries the interior state out and fixes
+the boundary sound speed once u_n is specified. With theta also specified, rho
+follows as a ratio against the interior with no constants needed:
+
+    c_b = (gamma-1)/2 * (J+_interior - u_n,driver)
+    rho_b/rho_i = (th_i/th_b) * [ (c_b/c_i)^2 (th_i/th_b) ]^(1/(gamma-1))
+
+and every rho-weighted quantity is rescaled onto it so theta and each q keep their
+specified values. Zero-gradient rho -- what ERF does today -- is the crudest
+possible stand-in, and it puts a density discontinuity on the wall face.
+
+Drift -7.30 -> -5.48 %/day at tau=600 from that change alone. Drift then scales
+with tau, which is the signature of a static bias offset rather than ongoing loss:
+the constraint settles where `(M - M_tgt)/tau` balances the flux-measurement bias,
+so the offset is proportional to tau and the measured "drift" is the approach to it.
+
+| tau (s) | drift, whole run | drift, second half |
+|---|---|---|
+| 300 | -3.153 %/day | +0.552 %/day |
+| 100 | -1.363 %/day | +0.132 %/day |
+| **60** | **-0.917 %/day** | **-0.079 %/day** |
+| Davies control | +0.453 %/day | -6.019 %/day |
+| relax-off floor | +5.346 %/day | -4.229 %/day |
+
+Note the Davies control's own mass trace is non-monotonic (+0.453 whole-run,
+-6.019 over the second half), so which window you score on matters. On the settled
+rate the NSCBC path at tau=60 is -0.079 %/day, two orders better than the control;
+on the whole-run number it is 2x the control's magnitude with the opposite sign,
+because it includes the constraint's startup transient.
+
+Full state at tau=60, against the two reference points:
+
+| metric | Davies control | relax-off floor | NSCBC + constraint |
+|---|---|---|---|
+| d=0 | 0.20% | 55.48% | 42.75% |
+| band d=3-10 | **49.85%** | 0.69% | **0.09-0.27%** |
+| interior bg (d>=25) | 10.88% | 2.86% | 3.61% |
+| drift (settled) | -6.019 %/day | -4.229 %/day | **-0.079 %/day** |
+
+The characteristic rho also moved the near-wall cells that the global constraint
+could not: d=0 49.13% -> 42.75%, d=1 7.57% -> 1.25%, d=2 6.40% -> 3.74%. So the
+coupling was real -- the same zeroth-order rho was hurting both the wall and the
+budget. d=0 at ~43% remains unexplained and is NOT claimed as fixed.
+
+The d=11-16 shoulder did **not** sharpen (1.32/2.78/4.43/4.17/4.79/4.33% against
+the previous 2.49/3.82/4.74/4.14/4.72/4.04%) -- it is unchanged, diffuse, and still
+carries no monotone ramp signature.
+
+**Unexplained and not chased, per instruction:** the Riemann outflow variant
+(`erf.nscbc_outflow=1`) reversed under the global constraint. Without the
+constraint it halved the drift versus plain extrapolation (+96.0 vs +174.6 %/day);
+with it, it is far worse (+65.8 vs -7.3 %/day). The extrapolation variant is used
+throughout.
