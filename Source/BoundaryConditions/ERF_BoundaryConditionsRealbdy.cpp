@@ -68,6 +68,13 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         pp.query("hindcast_bdy_rho", b);
         pp.query("hindcast_mass_consistent_bdy", mc);
         return b || mc; }();
+
+    // MPAS-A precedent: set w = 0 in the specified zone instead of taking a
+    // zero-gradient copy from the interior. Reported to alleviate spurious
+    // streamers and near-boundary instability under strong inflow.
+    static const bool l_w_zero = [] {
+        bool b=false; ParmParse pp("erf");
+        pp.query("hindcast_bdy_w_zero", b); return b; }();
     const bool l_have_ext = (!bdy_data_xlo.empty()) &&
         (static_cast<int>(bdy_data_xlo[0].size()) > HindcastBdyVars::RHO);
     if (l_bdy_rho && l_have_ext) { cons_read[Rho_comp] = 1; }
@@ -277,20 +284,25 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                     // Destination array
                     const Array4<Real>& dest_arr = mf.array(mfi);
 
+                    // Moisture beyond qv is zeroed in the specified zone; with
+                    // erf.hindcast_bdy_w_zero, w is too (MPAS-A precedent).
+                    const bool zero_here = (comp_idx > RhoQ1_comp) ||
+                                           (l_w_zero && (var_idx == Vars::zvel));
+
                     // x-faces (includes y ghost cells)
                     ParallelFor(bx_xlo, bx_xhi,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
                         int jj = std::max(j , dom_lo.y);
                             jj = std::min(jj, dom_hi.y);
-                        dest_arr(i,j,k,comp_idx) = (comp_idx > RhoQ1_comp) ? Real(0.) :
+                        dest_arr(i,j,k,comp_idx) = zero_here ? Real(0.) :
                                                                             dest_arr(i_xlo,jj,k,comp_idx);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
                         int jj = std::max(j , dom_lo.y);
                             jj = std::min(jj, dom_hi.y);
-                        dest_arr(i,j,k,comp_idx) = (comp_idx > RhoQ1_comp) ? Real(0.) :
+                        dest_arr(i,j,k,comp_idx) = zero_here ? Real(0.) :
                                                                              dest_arr(i_xhi,jj,k,comp_idx);
                     });
 
@@ -298,12 +310,12 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                     ParallelFor(bx_ylo, bx_yhi,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        dest_arr(i,j,k,comp_idx) = (comp_idx > RhoQ1_comp) ? Real(0.) :
+                        dest_arr(i,j,k,comp_idx) = zero_here ? Real(0.) :
                                                                              dest_arr(i,j_ylo,k,comp_idx);
                     },
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
-                        dest_arr(i,j,k,comp_idx) = (comp_idx > RhoQ1_comp) ? Real(0.) :
+                        dest_arr(i,j,k,comp_idx) = zero_here ? Real(0.) :
                                                                              dest_arr(i,j_yhi,k,comp_idx);
                     });
                 } // mfi
