@@ -1436,3 +1436,55 @@ So Jan-9 samples the EDGE of the event, not its core: the maximum is north of th
 domain, and in-domain observations run 0-64 mm. That makes it an excellent
 falsification case and a poor skill case. The earlier "20 land boxes" were
 sampling the LA/Santa Ana fringe, which is why MRMS maxed at 50.8 mm there.
+
+### Two surface flux closures run simultaneously, and NEITHER uses the ERA5 SST
+
+`ApplySurfaceTreatment_BulkCoeff_CC` is gated on
+`init_type == InitType::HindCast && solverChoice.hindcast_surface_bcs`
+(ERF_MakeSources.cpp:438) with **no check on `zlo.type`**. So any HindCast deck that
+also selects a surface-layer lower boundary gets TWO surface flux closures at once:
+
+* MOST / moeng, as the `zlo.type = "surface_layer"` boundary condition, with
+  stability-dependent coefficients; and
+* the bulk source term, added to `cell_rhs` at k = 0 with fixed Ch = Ce = 0.0015.
+
+They are structurally additive -- one is a boundary flux, the other an interior
+source on the same cell -- so the surface flux is applied twice. Removing
+`erf.most.Cd/Ch/Cq` from the deck (done earlier in this campaign to avoid the
+bulk_coeff hard abort) disabled MOST's *bulk_coeff flux option*; it did nothing to
+this source term, which has been running the whole time.
+
+**And neither closure uses the ERA5 SST.**
+
+* The bulk source consults `surface_state` only for the land/sea mask (comp 0) and
+  drove toward hardcoded 301 K / 0.024 kg/kg. The SST is sitting unread in comp 1.
+* MOST's `t_surf` is initialised to `default_land_surf_temp`
+  (ERF_SurfaceLayer.H:445) = `erf.most.surf_temp`, and `set_t_surf` is called ONLY
+  for `InitType::Input_Sounding` (ERF.cpp:1615). Over ocean the LSM never updates
+  it, so `t_surf` stays at the deck's **constant 288 K everywhere**, and
+  `fill_qsurf_with_qsat` builds q_surf from that constant.
+
+The deck comment `erf.most.surf_temp = 288.0  # fallback only; MM5/SST provide the
+live surface state` is therefore wrong -- nothing overrides it over water.
+
+MOST is NOT inert: it computes q_sat over sea and applies stability-dependent
+transfer. Its 288 K (q_sat ~ 0.0106 kg/kg) is a physically plausible January SoCal
+value, unlike the bulk path's 301 K / 0.024. So the right move is to disable the
+bulk source and keep MOST -- but MOST still needs `t_surf` wired to the ERA5 SST to
+be spatially and temporally correct, which is a separate change from removing the
+double count.
+
+### This bug was found once before and misdiagnosed
+
+The earlier surface-BC instability was correctly traced to "fixed-coefficient ocean
+moistening" but was attributed to `qv = 0` in the inert initial condition rather than
+to the moistening TARGET being tropical. Fixing the IC removed the visible symptom
+and left the constant live for weeks, during which it was silently adding ~9 mm/day
+of moisture to already-saturated marine air.
+
+### Correction for the record
+
+The "~130 mm observed interior maximum" used as a reference throughout this campaign
+is Santa Ynez at 34.50 N. The domain's north edge is 34.20 N, so that station is
+~30 km OUTSIDE the domain and its value was never comparable. Every ratio derived
+from it -- including reported passes -- is void.

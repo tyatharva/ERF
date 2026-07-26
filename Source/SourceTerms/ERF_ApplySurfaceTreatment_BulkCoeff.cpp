@@ -87,8 +87,40 @@ ApplySurfaceTreatment_BulkCoeff_CC (const Box& bx,
             Real uvel = myhalf*(u_arr(i,j,k) + u_arr(i+1,j,k));
             Real vvel = myhalf*(v_arr(i,j,k) + v_arr(i,j+1,k));
             Real velmag = std::sqrt(uvel*uvel + vvel*vvel);
-            Real dT = max(zero, Real(301.0) - temp);
-            Real dq = max(zero, Real(0.024) - qv);
+            // Drive toward the ACTUAL sea surface, not hardcoded tropical constants.
+            //
+            // This previously used dT = max(0, 301 K - temp) and dq = max(0, 0.024 - qv),
+            // i.e. 28 C and a saturation mixing ratio for ~28 C, while consulting
+            // surface_state only for the land/sea mask -- the ERA5 SST sitting in
+            // component 1 was never used.  Measured on Jan-9 2023 (a SoCal winter
+            // storm): ocean k=0 had T = 294.7 K and qv = 0.01698 kg/kg against a
+            // q_sat of 0.01621, i.e. the near-surface air was ALREADY supersaturated
+            // with respect to its own temperature, yet the term was still injecting
+            // 9.2 mm/day of moisture.  The companion 301 K heat term added 6.3 K of
+            // spurious heating, which raised q_sat and let the column hold that
+            // moisture until it rained out.
+            //
+            // The max(0,...) clamps are also gone.  They made the flux one-way -- the
+            // sea could only moisten and warm the air, never dry or cool it.  Against
+            // a hardcoded tropical target that was a safety net; against a real SST it
+            // is a rectifier that biases moisture upward, and condensation onto a
+            // cooler sea surface plus downward sensible heat flux are both physical
+            // and both matter in a winter storm.
+            Real sst = surface_state_arr(i,j,0,1);
+            Real dT  = zero, dq = zero;
+            // Guard BOTH sides.  A lower bound alone is not enough: a large fill
+            // value passes it and then esat = 611.2*exp(17.67*sstC/(sstC+243.5))
+            // saturates the exponential at ~4.7e7, giving qsat ~ 1e10 and an
+            // instant NaN.  Measured: with a one-sided guard both the NSCBC and
+            // the Davies run went NaN in every conserved component at step 1.
+            if (sst > Real(200.0) && sst < Real(340.0)) {
+                Real psfc  = getPgivenRTh(rhotheta, qv);
+                Real sstC  = sst - Real(273.15);
+                Real esat  = Real(611.2) * std::exp(Real(17.67)*sstC / (sstC + Real(243.5)));
+                Real qsat  = Real(0.622) * esat / max(psfc - esat, Real(1.0));
+                dT = sst  - temp;
+                dq = qsat - qv;
+            }
             cell_rhs(i, j, k, RhoTheta_comp) += (theta/(Real(1005.0)*temp))*rho*Ch*velmag*dT/dz;
             cell_rhs(i, j, k, RhoQ1_comp) += rho*Ce*velmag*dq/dz;
         }
