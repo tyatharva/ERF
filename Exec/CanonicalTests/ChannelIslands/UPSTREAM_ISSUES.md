@@ -2004,3 +2004,39 @@ on yhi is at i = 111->112 (271.8 m per 3-km cell); the failure is at i = 72, for
 cells away, where the step is 108 m and does not rank in the top six. The xlo and ylo
 walls are flat ocean throughout (12.5 m), so only xhi and yhi carry terrain at all,
 but within yhi the failure site is not distinguished by terrain.
+
+### 19e. The boundary planes were the source of Davies' near-surface warm drift
+
+Discriminator, Davies, 7 h, same binary, `erf.hindcast_blend_bdy_theta` off vs on.
+Off = interior initialized with the blended profile while the band is relaxed toward
+the raw frame (clamped and vertically uniform below the lowest frame level). On =
+the blend is applied to the frame itself in `FillForecastStateMultiFabs`, so the
+interior and the relaxation target are one field.
+
+| t (h) | off: rain | off: th(k=0) | off: RH(k=4) | on: rain | on: th(k=0) | on: RH(k=4) |
+|---|---|---|---|---|---|---|
+| 0 | 0.0000 | 286.50 | 68.4 | 0.0000 | 286.50 | 68.2 |
+| 1 | 0.1615 | 287.68 | 70.0 | 0.2523 | 286.79 | 70.3 |
+| 4 | 0.1650 | 287.83 | 78.5 | 0.3096 | 286.70 | 79.6 |
+| 7 | 0.1777 | **287.97** | 81.5 | 0.3396 | **286.75** | 83.3 |
+
+**Confirmed:** the +1.47 K near-surface warm drift over 7 h is caused entirely by the
+relaxation target disagreeing with the interior initialization. With the planes
+blended the drift is +0.25 K. Measured mismatch at t = 0 was +1.90 K at the first
+cell centre in the band, decaying to zero above ~250 m.
+
+**Not confirmed:** that this explains the precipitation collapse. Rain doubles
+(0.178 -> 0.340 mm at 7 h) and RH gains 1.8 points, which leaves the run ~15x too dry
+against MRMS instead of ~50x. NSCBC on the same IC had 9.28 mm at 7 h, 27x more.
+
+So the 19a mechanism is real and operative but an order of magnitude too small to
+account for a 124x collapse. Something else dominates. The remaining candidate with
+a measured magnitude is the erftools level displacement: air taken from ~300 m higher
+than labelled is drier as well as warmer in theta, and it enters through both the
+boundary forcing and the interior initialization.
+
+Caveat on the A/B: the two arms' ICs are not bit-identical. The frame-side blend uses
+`(z_nd(i,j,0)+z_nd(i,j,1))/2`, the node convention that routine already samples the
+frame with, while the initializer used cell-centred `z_phys_cc` -- item 19c's
+inconsistency again. They coincide on flat ocean (85% of the domain) and differ by
+~0.1 K in the worst terrain cell, which cannot produce a 2x rain change.

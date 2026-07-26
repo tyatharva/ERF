@@ -30,6 +30,128 @@ enum class MultiFabType { CC, NC };
  */
 static amrex::Real s_frame_zlow = amrex::Real(-1.0);
 
+/**
+ * ERA5 surface anchor, loaded once and shared by the two consumers: the
+ * hydrostatic initialization and (when erf.hindcast_blend_bdy_theta is set) the
+ * near-surface theta blend applied to the frame itself.
+ */
+static amrex::Gpu::DeviceVector<amrex::Real> s_sp_d, s_zo_d, s_t2_d;
+static int  s_anchor_nx = 0, s_anchor_ny = 0;
+static bool s_anchor_ok = false;
+static bool s_anchor_tried = false;
+
+/**
+ * Read the ERA5 surface anchor -- surface pressure, the height that pressure is
+ * valid at, and the 2-m air temperature -- on the level-0 cell-centre grid.
+ * Written by precip_check/make_sfc_anchor.py; see that file for the format.
+ *
+ * Returns false (and says why) if the file is absent, has the wrong header, or
+ * is short. The caller treats that as fatal rather than falling back, because
+ * the fallback is a DIFFERENT initialization and a silent revert would be
+ * indistinguishable in the output from the new path having run.
+ */
+static bool
+read_sfc_anchor (const std::string& fname, const int nx_dom, const int ny_dom,
+                 Gpu::DeviceVector<Real>& sp_d,
+                 Gpu::DeviceVector<Real>& zo_d,
+                 Gpu::DeviceVector<Real>& t2_d)
+{
+    constexpr std::int32_t magic = 0x45524653;      // 'ERFS'
+    const Long npts = Long(nx_dom) * Long(ny_dom);
+    Vector<Real> h(3*npts, Real(0.0));
+    int ok = 0;
+
+    if (ParallelDescriptor::IOProcessor())
+    {
+        std::ifstream ifs(fname, std::ios::binary);
+        if (!ifs.good()) {
+            Print() << "HindCast IC anchor: cannot open '" << fname << "'" << std::endl;
+        } else {
+            std::int32_t hdr[3] = {0,0,0};
+            ifs.read(reinterpret_cast<char*>(hdr), std::streamsize(3*sizeof(std::int32_t)));
+            if (hdr[0] != magic || hdr[1] != nx_dom || hdr[2] != ny_dom) {
+                Print() << "HindCast IC anchor: header mismatch in '" << fname
+                        << "' -- got magic/nx/ny = " << hdr[0] << "/" << hdr[1] << "/" << hdr[2]
+                        << ", expected " << magic << "/" << nx_dom << "/" << ny_dom << std::endl;
+            } else {
+                std::vector<double> buf(std::size_t(3*npts));
+                const std::streamsize nbytes = std::streamsize(3*npts*sizeof(double));
+                ifs.read(reinterpret_cast<char*>(buf.data()), nbytes);
+                if (ifs.gcount() != nbytes) {
+                    Print() << "HindCast IC anchor: short read from '" << fname << "' ("
+                            << ifs.gcount() << " of " << nbytes << " bytes)" << std::endl;
+                } else {
+                    for (Long n = 0; n < 3*npts; ++n) { h[n] = Real(buf[std::size_t(n)]); }
+                    ok = 1;
+                }
+            }
+        }
+    }
+    ParallelDescriptor::Bcast(&ok, 1, ParallelDescriptor::IOProcessorNumber());
+    if (!ok) { return false; }
+    ParallelDescriptor::Bcast(h.data(), int(3*npts), ParallelDescriptor::IOProcessorNumber());
+
+    sp_d.resize(std::size_t(npts)); zo_d.resize(std::size_t(npts)); t2_d.resize(std::size_t(npts));
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin(),        h.begin()+  npts, sp_d.begin());
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+  npts, h.begin()+2*npts, zo_d.begin());
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+2*npts, h.begin()+3*npts, t2_d.begin());
+    Gpu::streamSynchronize();
+
+    Print() << "HindCast IC anchor: read ERA5 sp / orography / t2m from '" << fname
+            << "' (" << nx_dom << " x " << ny_dom << ")" << std::endl;
+    return true;
+}
+
+/**
+ * Load the anchor once into the file-scope statics. Returns false if no anchor
+ * file was configured; aborts if one was configured but cannot be read, because
+ * silently continuing would run a different initialization than the one asked for.
+ */
+static bool
+ensure_sfc_anchor (const int nx_dom, const int ny_dom)
+{
+    if (s_anchor_tried) {
+        return s_anchor_ok && (s_anchor_nx == nx_dom) && (s_anchor_ny == ny_dom);
+    }
+    s_anchor_tried = true;
+
+    std::string fname;
+    { amrex::ParmParse pp("erf"); pp.query("hindcast_sfc_anchor_file", fname); }
+    if (fname.empty()) { return false; }
+
+    s_anchor_ok = read_sfc_anchor(fname, nx_dom, ny_dom, s_sp_d, s_zo_d, s_t2_d);
+    if (!s_anchor_ok) {
+        Abort("erf.hindcast_sfc_anchor_file was set but could not be read. Refusing to fall "
+              "back to the p_0-at-sea-level anchor silently -- the two paths produce "
+              "different initial states and the difference would not be visible downstream.");
+    }
+    s_anchor_nx = nx_dom; s_anchor_ny = ny_dom;
+    return true;
+}
+
+/**
+ * erf.hindcast_blend_bdy_theta: apply the 2-m theta blend to the FRAME, so every
+ * consumer of the frame sees the same near-surface profile.
+ *
+ * Without it the blend lives only in init_thermo_from_hindcast, so the interior is
+ * initialized with the blended profile while the lateral relaxation drives the band
+ * toward the raw frame -- which below the lowest frame level is the CLAMPED,
+ * vertically uniform value. Measured at t = 0 on the Jan-9 case, that mismatch is
+ * +1.90 K at the first cell centre in the band (d = 0..3), +1.55 K at the second,
+ * decaying to +0.16 K by the fifth (z ~ 250 m) and to zero above the lowest frame
+ * level. Applying it here makes the interior and the relaxation target the same
+ * field by construction.
+ */
+static bool
+blend_bdy_theta ()
+{
+    static const bool b = [] {
+        int v = 0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_blend_bdy_theta", v); return v != 0; }();
+    return b;
+}
+
+
 void PlotMultiFab(const MultiFab& mf,
                   const Geometry& geom_mf,
                   const std::string plotfilename,
@@ -358,6 +480,47 @@ ERF::FillForecastStateMultiFabs(const int lev,
         });
     }
 
+    // Blend the frame's near-surface theta toward the ERA5 2-m air temperature, so
+    // that the interior initialization and the lateral relaxation target are the
+    // same field. See blend_bdy_theta() for why the un-blended frame is wrong here:
+    // below the lowest frame level with data it is a clamped, vertically uniform
+    // value, and it is what the Davies band relaxes toward.
+    if (blend_bdy_theta() &&
+        ensure_sfc_anchor(geom[lev].Domain().length(0), geom[lev].Domain().length(1)))
+    {
+        const Real  rdOcp  = solverChoice.rdOcp;
+        const Real  z_low  = s_frame_zlow;
+        const Real* sp_p   = s_sp_d.data();
+        const Real* t2_p   = s_t2_d.data();
+        const int   nxd    = geom[lev].Domain().length(0);
+        const int   dlo_z  = geom[lev].Domain().smallEnd(2);
+        const auto  dom    = geom[lev].Domain();
+
+        for (MFIter mfi(erf_mf_cons); mfi.isValid(); ++mfi) {
+            const Box& gbx = mfi.growntilebox();
+            const auto z_arr = (a_z_phys_nd) ? a_z_phys_nd->const_array(mfi) : Array4<const Real>{};
+            const Array4<Real>& c_arr = erf_mf_cons.array(mfi);
+            ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                // The anchor is defined on valid domain columns only; clamp so the
+                // ghost ring uses its nearest interior column rather than reading
+                // out of bounds.
+                const int ic = amrex::min(amrex::max(i, dom.smallEnd(0)), dom.bigEnd(0));
+                const int jc = amrex::min(amrex::max(j, dom.smallEnd(1)), dom.bigEnd(1));
+                const Long n2 = Long(jc)*Long(nxd) + Long(ic);
+
+                const Real th_sfc = getThgivenTandP(t2_p[n2], sp_p[n2], rdOcp);
+                // Same height convention this routine already samples the frame with
+                const Real z_c    = (z_arr(i,j,k)     + z_arr(i,j,k+1))     / two;
+                const Real z_base = (z_arr(i,j,dlo_z) + z_arr(i,j,dlo_z+1)) / two;
+
+                Real w = (z_low > z_base) ? (z_c - z_base)/(z_low - z_base) : Real(1.0);
+                w = amrex::min(amrex::max(w, Real(0.0)), Real(1.0));
+                c_arr(i,j,k,RhoTheta_comp) = th_sfc + (c_arr(i,j,k,RhoTheta_comp) - th_sfc)*w;
+            });
+        }
+    }
+
     /*Vector<std::string> varnames = {
     "rho", "uvel", "vvel", "wvel", "theta", "qv", "qc", "qr"
     }; // Customize variable names
@@ -601,68 +764,6 @@ ERF::fill_bdy_data_from_hindcast ()
 #endif
 
 /**
- * Read the ERA5 surface anchor -- surface pressure, the height that pressure is
- * valid at, and the 2-m air temperature -- on the level-0 cell-centre grid.
- * Written by precip_check/make_sfc_anchor.py; see that file for the format.
- *
- * Returns false (and says why) if the file is absent, has the wrong header, or
- * is short. The caller treats that as fatal rather than falling back, because
- * the fallback is a DIFFERENT initialization and a silent revert would be
- * indistinguishable in the output from the new path having run.
- */
-static bool
-read_sfc_anchor (const std::string& fname, const int nx_dom, const int ny_dom,
-                 Gpu::DeviceVector<Real>& sp_d,
-                 Gpu::DeviceVector<Real>& zo_d,
-                 Gpu::DeviceVector<Real>& t2_d)
-{
-    constexpr std::int32_t magic = 0x45524653;      // 'ERFS'
-    const Long npts = Long(nx_dom) * Long(ny_dom);
-    Vector<Real> h(3*npts, Real(0.0));
-    int ok = 0;
-
-    if (ParallelDescriptor::IOProcessor())
-    {
-        std::ifstream ifs(fname, std::ios::binary);
-        if (!ifs.good()) {
-            Print() << "HindCast IC anchor: cannot open '" << fname << "'" << std::endl;
-        } else {
-            std::int32_t hdr[3] = {0,0,0};
-            ifs.read(reinterpret_cast<char*>(hdr), std::streamsize(3*sizeof(std::int32_t)));
-            if (hdr[0] != magic || hdr[1] != nx_dom || hdr[2] != ny_dom) {
-                Print() << "HindCast IC anchor: header mismatch in '" << fname
-                        << "' -- got magic/nx/ny = " << hdr[0] << "/" << hdr[1] << "/" << hdr[2]
-                        << ", expected " << magic << "/" << nx_dom << "/" << ny_dom << std::endl;
-            } else {
-                std::vector<double> buf(std::size_t(3*npts));
-                const std::streamsize nbytes = std::streamsize(3*npts*sizeof(double));
-                ifs.read(reinterpret_cast<char*>(buf.data()), nbytes);
-                if (ifs.gcount() != nbytes) {
-                    Print() << "HindCast IC anchor: short read from '" << fname << "' ("
-                            << ifs.gcount() << " of " << nbytes << " bytes)" << std::endl;
-                } else {
-                    for (Long n = 0; n < 3*npts; ++n) { h[n] = Real(buf[std::size_t(n)]); }
-                    ok = 1;
-                }
-            }
-        }
-    }
-    ParallelDescriptor::Bcast(&ok, 1, ParallelDescriptor::IOProcessorNumber());
-    if (!ok) { return false; }
-    ParallelDescriptor::Bcast(h.data(), int(3*npts), ParallelDescriptor::IOProcessorNumber());
-
-    sp_d.resize(std::size_t(npts)); zo_d.resize(std::size_t(npts)); t2_d.resize(std::size_t(npts));
-    Gpu::copyAsync(Gpu::hostToDevice, h.begin(),        h.begin()+  npts, sp_d.begin());
-    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+  npts, h.begin()+2*npts, zo_d.begin());
-    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+2*npts, h.begin()+3*npts, t2_d.begin());
-    Gpu::streamSynchronize();
-
-    Print() << "HindCast IC anchor: read ERA5 sp / orography / t2m from '" << fname
-            << "' (" << nx_dom << " x " << ny_dom << ")" << std::endl;
-    return true;
-}
-
-/**
  * Rebuild the HSE base state and the thermodynamic state from the
  * time-interpolated ERA5 frame at initialization time.
  *
@@ -735,23 +836,12 @@ ERF::init_thermo_from_hindcast (const int lev)
         MultiFab::Copy(qv_hse, fcons, RhoQ1_comp, 0, 1, ngv);
     }
 
-    static const std::string l_anchor_file = [] {
-        std::string s; amrex::ParmParse pp("erf");
-        pp.query("hindcast_sfc_anchor_file", s); return s; }();
-
     const Box& l_domain = geom[lev].Domain();
     const int nx_dom = l_domain.length(0);
     const int ny_dom = l_domain.length(1);
 
-    Gpu::DeviceVector<Real> sp_d, zo_d, t2_d;
-    const bool have_anchor = (!l_anchor_file.empty()) &&
-                             read_sfc_anchor(l_anchor_file, nx_dom, ny_dom, sp_d, zo_d, t2_d);
+    const bool have_anchor = ensure_sfc_anchor(nx_dom, ny_dom);
 
-    if (!l_anchor_file.empty() && !have_anchor) {
-        Abort("erf.hindcast_sfc_anchor_file was set but could not be read. Refusing to fall "
-              "back to the p_0-at-sea-level anchor silently -- the two paths produce "
-              "different initial states and the difference would not be visible downstream.");
-    }
     if (have_anchor && s_frame_zlow <= zero) {
         Abort("HindCast IC: the height of the lowest frame level is unset -- "
               "FillForecastStateMultiFabs must run before init_thermo_from_hindcast.");
@@ -767,9 +857,12 @@ ERF::init_thermo_from_hindcast (const int lev)
         const Real l_gravity = solverChoice.gravity;
         const Real rdOcp     = solverChoice.rdOcp;
         const Real z_low     = s_frame_zlow;       // lowest frame level carrying data (m)
-        const Real* sp_p     = sp_d.data();
-        const Real* zo_p     = zo_d.data();
-        const Real* t2_p     = t2_d.data();
+        const Real* sp_p     = s_sp_d.data();
+        const Real* zo_p     = s_zo_d.data();
+        const Real* t2_p     = s_t2_d.data();
+        // When the blend is applied to the frame itself, f_arr already carries the
+        // blended profile and applying it again here would compound it.
+        const int   pre_blended = blend_bdy_theta() ? 1 : 0;
         const int   nxd      = nx_dom;
         const int   dlo_z    = l_domain.smallEnd(2);
         const int   dhi_z    = l_domain.bigEnd(2);
@@ -845,6 +938,7 @@ ERF::init_thermo_from_hindcast (const int lev)
                     // constexpr `zero`/`one` would be odr-used and are not device symbols.
                     Real w = (z_low > z_base) ? (z_c - z_base)/(z_low - z_base) : Real(1.0);
                     w = amrex::min(amrex::max(w, Real(0.0)), Real(1.0));
+                    if (pre_blended) { w = Real(1.0); }
                     const Real th_k = th_sfc + (f_arr(i,j,k,RhoTheta_comp) - th_sfc)*w;
 
                     // p(k) = p(k-1) - dz*g*(rho(k) + rho(k-1))/2 with rho = rho(p,theta):
