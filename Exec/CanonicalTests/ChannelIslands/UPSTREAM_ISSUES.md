@@ -2377,3 +2377,27 @@ Consequences for the open decisions:
 * The next question is not which physics option to tune but WHERE the driver's
   information is being lost -- boundary relaxation, the 10-cell band, vertical
   interpolation onto 32 stretched levels, or the microphysics.
+
+### 24a. advect_tke: unpinned by the IC fix, but worth nothing to skill
+
+`erf.advect_tke=true` was set false during stability work on the broken IC. On the
+corrected IC with Upwind_5th it runs the full 24 h clean. Scored against the
+otherwise identical `wz` arm:
+
+| metric | tke=T | tke=F |
+|---|---|---|
+| spectral ratio 8-19 km | 0.658 | 0.661 |
+| bias | 0.723x | 0.727x |
+| p90 / max | 16.59 / 39.28 | 16.62 / 39.53 |
+| CV | 1.25 | 1.28 |
+| FSS 1 mm @ 3 km | +0.571 | +0.566 |
+| FSS 5 mm @ 3 km | +0.399 | +0.395 |
+| FSS 5 mm @ 60 km | +0.580 | +0.576 |
+
+Every metric moves under 1%. No skill basis to prefer either; advecting a
+prognostic TKE field is the physically consistent choice, so `true` is defensible,
+but it is a configuration decision and not a result.
+
+Same pattern as the moist-scalar fallback (item 24): a knob pinned on a broken IC,
+freed once the IC was correct, and worth ~nothing to skill. Both were real defects
+in provenance; neither was what limits the model.
