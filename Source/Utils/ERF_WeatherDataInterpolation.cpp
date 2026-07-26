@@ -259,6 +259,59 @@ ERF::FillForecastStateMultiFabs(const int lev,
             }
         }
     }
+    // ------------------------------------------------------------------
+    // Correct the erftools level displacement.
+    //
+    // Item 5 measures erftools placing the frame's pressure-level data ~300 m
+    // BELOW where it belongs, by a constant offset -- constant rather than
+    // growing, which rules out hypsometric integration from a wrong surface
+    // pressure and points at a wrong z<->p relation used when putting
+    // pressure-level data onto the z grid. Two independent measurements of the
+    // magnitude agree:
+    //
+    //   from pressure: the frame is 35 hPa low at a level where
+    //                  dp/dz = -rho*g = -11.3 Pa/m  ->  3500/11.3 = 310 m
+    //   from theta:    the frame is +1.53 K warm in theta against a ~5 K/km
+    //                  gradient                     ->  1530/5    = 306 m
+    //
+    // So a value labelled z actually belongs at z + offset, and the correction
+    // is to relabel the levels upward. This is applied to zvec ONLY -- the field
+    // values are untouched -- so every consumer of the frame is corrected at
+    // once: the interior initialization, the boundary planes, the relaxation
+    // target, and the height the near-surface blend spans.
+    //
+    // Consequences worth stating, because they are the reasons to prefer this
+    // over patching each symptom:
+    //   * removes the ~1.5 K theta residual at every level, not just near the
+    //     ground (item 5 called it "worth ~1.5 K" and expected it to survive the
+    //     ERF-side fix -- it need not).
+    //   * removes the ~35 hPa pressure error, which is why the frame could not
+    //     be used to anchor surface pressure in item 19.
+    //   * makes the 2-m blend span the true depth. Item 19a measured it 2.96x
+    //     too steep precisely because it ran to the LABELLED 155 m rather than
+    //     the true ~455 m; with the offset applied that is automatic.
+    //
+    // Default 0 (off) so every other case is untouched. The value is an input
+    // rather than a constant because it is a property of the erftools build that
+    // produced the frames, not of ERF.
+    // ------------------------------------------------------------------
+    {
+        static const Real l_zoff = [] {
+            Real v = Real(0.0); amrex::ParmParse pp("erf");
+            pp.query("hindcast_frame_z_offset", v); return v; }();
+        if (l_zoff != Real(0.0)) {
+            for (auto& z : zvec_h) { z += l_zoff; }
+            static bool announced = false;
+            if (!announced) {
+                announced = true;
+                Print() << "HindCast frames: applied erf.hindcast_frame_z_offset = " << l_zoff
+                        << " m to the frame level heights (erftools displacement). Lowest level "
+                        << "with data now z = " << zvec_h[0] << " m, top z = " << zvec_h.back()
+                        << " m." << std::endl;
+            }
+        }
+    }
+
     s_frame_zlow = zvec_h[0];
 
     Real zmax = *std::max_element(zvec_h.begin(), zvec_h.end());

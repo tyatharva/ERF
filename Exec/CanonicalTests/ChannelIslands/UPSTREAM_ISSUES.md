@@ -2040,3 +2040,53 @@ Caveat on the A/B: the two arms' ICs are not bit-identical. The frame-side blend
 frame with, while the initializer used cell-centred `z_phys_cc` -- item 19c's
 inconsistency again. They coincide on flat ocean (85% of the domain) and differ by
 ~0.1 K in the worst terrain cell, which cannot produce a 2x rain change.
+
+### 19f. The erftools level displacement was the dominant cause of the dry collapse
+
+`erf.hindcast_frame_z_offset` relabels the frame levels upward by the measured
+erftools displacement (item 5), correcting every consumer at once. Single-variable
+step from 19e's `bt_on` arm -- same IC construction, same plane blend, offset the only
+difference. Davies, 7 h, same binary.
+
+| t (h) | bt_off | bt_on (planes blended) | **bt_zoff (+305 m)** | bt_zoff RH(k=4) | bt_zoff qc>0 |
+|---|---|---|---|---|---|
+| 0 | 0.0000 | 0.0000 | 0.0000 | 76.0 | 0.00% |
+| 1 | 0.1615 | 0.2523 | **3.7267** | 77.5 | 7.15% |
+| 3 | 0.1619 | 0.2970 | **7.3774** | 85.9 | 16.88% |
+| 7 | 0.1777 | 0.3396 | **10.9182** | 89.5 | 9.53% |
+
+Domain-mean 24-h-style accumulation at 7 h rises **32x** over `bt_on` and 61x over
+`bt_off`. Land-only mean at 7 h: 0.1188 -> 0.1253 -> **8.5990 mm**. Mean low-level RH
+goes 81.5% -> 83.3% -> **89.5%**, and cloud coverage 0.71% -> 1.20% -> 9.53%.
+
+**Mechanism.** Placing pressure-level data ~305 m below where it belongs means both
+the interior initialization and the lateral forcing supply air from ~305 m higher
+than labelled. That air is drier as well as warmer in theta. The whole domain was
+being held ~8 RH points below saturation by a systematic vertical mislabelling, so
+condensation never triggered. Nothing was wrong with the moisture budget, the winds,
+or the vertical motion -- all three matched the broken-IC run throughout.
+
+**Item 5's assessment was a large understatement.** It recorded the displacement as
+"worth ~1.5 K" and advised expecting "~1.4 K of warm bias to remain" after the ERF
+fix. The 1.5 K is real but it is a symptom. The same displacement was suppressing
+precipitation by a factor of ~30 through the humidity field, which no theta-only
+accounting would surface.
+
+**Geometric confirmation at t = 0.** With the offset the near-surface blend spans the
+levels' true depth, and the spurious inversion 19a identified disappears:
+
+    ocean-mean theta, k = 0..4
+      blend, no offset:   286.50 286.99 287.56 288.22 288.99   d = +2.48 K
+      blend + 305 m:      286.50 286.66 286.84 287.05 287.30   d = +0.79 K
+
+2.48/0.79 = **3.14x**, against 2.96x predicted from the geometry alone.
+
+**Offset value.** 305 m, the midpoint of two independent estimates that agree to 1%:
+310 m from the frame's 35 hPa pressure error against dp/dz = -11.3 Pa/m, and 306 m
+from its +1.53 K theta error against a ~5 K/km gradient. It is an input, defaulting
+to 0, because it is a property of the erftools build that wrote the frames.
+
+**Not yet scored.** This is 7 h; MRMS is a 24-h accumulation, so no bias/correlation
+number is available yet. Land-mean 8.60 mm at 7 h against MRMS's 8.51 mm over 24 h
+means the run may now overshoot -- accumulation is decelerating (increments 3.73,
+2.12, 1.53, 1.42, 0.80, 0.71, 0.61 mm/h) but a 24-h run is needed to say.
