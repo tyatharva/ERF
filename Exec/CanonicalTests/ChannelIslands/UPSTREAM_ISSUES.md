@@ -1537,3 +1537,42 @@ being driven toward 301 K.
 
 Default is now MOST only. The `hindcast_surface_bcs` DATA path is untouched -- it is
 the flux closure being removed, not the SST/land-mask supply.
+
+### CORRECTION: the SST guard DOES have false accepts, on the grid that matters
+
+Instrumenting the fill to score filled cells against originals produced:
+
+    SST filled   cells: n=1204  min 13.62  mean 25.09  max 62.41 C
+    SST original cells: n=5832  min 13.42  mean 14.50  max 62.41 C
+
+against a true clean frame range of 13.1-15.7 C, mean 14.3 C.
+
+**A 62.41 C (335.5 K) value is passing the 200-340 K guard, and it is in the
+ORIGINAL (guard-passing) set, not the filled set.** The earlier claim of "zero false
+accepts" was measured on the 33x20 FRAME grid; the guard actually operates on the
+128x64 ERF grid, after `FillSurfaceStateMultiFabs` bilinearly interpolates the frame.
+On the coarse frame grid the smear jumped straight from ~287 K to >340 K with nothing
+in the plausible band. Interpolating onto the finer ERF mesh fills that gap
+continuously, so intermediate values now land at every temperature between clean SST
+and the 9999 fill -- including inside the guard.
+
+So the contamination is worse on the ERF grid than in the source data, and the fill
+is not the culprit: it faithfully propagated already-bad neighbours, which is why the
+filled mean (25.09 C) sits so far above the original mean. The fill IS mildly
+flattening as well (it is distance-ordered, so cells filled on later sweeps average
+means-of-means), but that is second-order next to the guard admitting 60 C water.
+
+Tightening the guard to a physical SST range (271-305 K) helps but cannot be
+sufficient: an interpolation weight of ~0.002 against a 9999 fill still lands inside
+any plausible band.
+
+**The correct fix is ERF-side and cheap** -- and unlike the erftools generator fix, it
+is in this tree. `FillSurfaceStateMultiFabs` calls `bilinear_interpolation_2d` on the
+raw SST array. It should instead do a MASKED interpolation: accumulate only source
+points that are water and in range, renormalising the weights, and flag cells whose
+stencil contained no valid source. Then no contaminated value is ever created, the
+guard becomes a backstop rather than the primary defence, and q_star/t_star would be
+fixed by the same change if they are ever wired.
+
+24-h runs were NOT launched on this binary -- with 60 C water reaching the surface
+closure over ~20% of the ocean they would not have been interpretable.

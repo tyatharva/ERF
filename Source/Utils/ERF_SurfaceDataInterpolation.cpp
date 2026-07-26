@@ -448,6 +448,40 @@ ERF::SurfaceDataInterpolation(const int lev,
             }
 
             // Push onto t_surf over water; count anything still unfilled.
+            // Also score the filled cells against the originals. The fill is
+            // distance-ordered (already-valid cells are skipped, so originals are
+            // never modified), but a cell filled on sweep k averages neighbours that
+            // were themselves filled on sweep k-1, so values flatten with distance
+            // from real data. These cells are COASTAL, where the true SST gradient is
+            // largest, so a collapse toward the field mean would erase land-sea
+            // contrast over ~20% of the ocean.
+            ReduceOps<ReduceOpSum,ReduceOpSum,ReduceOpMin,ReduceOpMax> rop2;
+            ReduceData<Real,Real,Real,Real> rdat2(rop2);   // filled: sum, n, min, max
+            using RT2 = typename decltype(rdat2)::Type;
+            ReduceOps<ReduceOpSum,ReduceOpSum,ReduceOpMin,ReduceOpMax> rop3;
+            ReduceData<Real,Real,Real,Real> rdat3(rop3);   // original: sum, n, min, max
+            using RT3 = typename decltype(rdat3)::Type;
+            for (MFIter mfi(*tsurf); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                const Array4<const Real>& a  = sf.const_array(mfi);
+                const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
+                rop2.eval(bx, rdat2, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT2 {
+                    bool wat = ss(i,j,0,0) < Real(0.5);
+                    bool raw = wat && ss(i,j,0,1) > Real(200.0) && ss(i,j,0,1) < Real(340.0);
+                    bool fil = wat && !raw && a(i,j,k,1) > Real(0.5);
+                    Real v = fil ? a(i,j,k,0) : Real(0.0);
+                    return {v, fil?Real(1.0):Real(0.0),
+                            fil?a(i,j,k,0):Real(1.0e30), fil?a(i,j,k,0):Real(-1.0e30)};
+                });
+                rop3.eval(bx, rdat3, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT3 {
+                    bool wat = ss(i,j,0,0) < Real(0.5);
+                    bool raw = wat && ss(i,j,0,1) > Real(200.0) && ss(i,j,0,1) < Real(340.0);
+                    Real v = raw ? ss(i,j,0,1) : Real(0.0);
+                    return {v, raw?Real(1.0):Real(0.0),
+                            raw?ss(i,j,0,1):Real(1.0e30), raw?ss(i,j,0,1):Real(-1.0e30)};
+                });
+            }
+
             ReduceOps<ReduceOpSum,ReduceOpSum> reduce_op;
             ReduceData<Real,Real> reduce_data(reduce_op);
             using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -476,10 +510,24 @@ ERF::SurfaceDataInterpolation(const int lev,
             static bool reported = false;
             if (!reported) {
                 reported = true;
+                RT2 h2 = rdat2.value(); RT3 h3 = rdat3.value();
+                Real fs=amrex::get<0>(h2), fn=amrex::get<1>(h2), fmin=amrex::get<2>(h2), fmax=amrex::get<3>(h2);
+                Real os=amrex::get<0>(h3), on=amrex::get<1>(h3), omin=amrex::get<2>(h3), omax=amrex::get<3>(h3);
+                ParallelDescriptor::ReduceRealSum(fs); ParallelDescriptor::ReduceRealSum(fn);
+                ParallelDescriptor::ReduceRealMin(fmin); ParallelDescriptor::ReduceRealMax(fmax);
+                ParallelDescriptor::ReduceRealSum(os); ParallelDescriptor::ReduceRealSum(on);
+                ParallelDescriptor::ReduceRealMin(omin); ParallelDescriptor::ReduceRealMax(omax);
                 Print() << "HindCast SST -> t_surf: " << (long)n_filled
                         << " ocean cells fell back to nearest-valid SST (frame fill/coastal smear); "
                         << (long)n_unfilled << " still unfilled (left on erf.most.surf_temp)"
                         << std::endl;
+                if (fn > Real(0.0) && on > Real(0.0)) {
+                    Print() << "  SST filled  cells: n=" << (long)fn << "  min " << fmin-Real(273.15)
+                            << "  mean " << fs/fn-Real(273.15) << "  max " << fmax-Real(273.15) << " C\n"
+                            << "  SST original cells: n=" << (long)on << "  min " << omin-Real(273.15)
+                            << "  mean " << os/on-Real(273.15) << "  max " << omax-Real(273.15) << " C"
+                            << std::endl;
+                }
             }
         }
     }
