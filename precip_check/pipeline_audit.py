@@ -222,62 +222,129 @@ for nm, era_sn, fr in SFMAP:
     else:
         emit(f'   {nm:9s} {"n/a":>11s} {B[msk].mean():12.4f}       -       -')
 
-# ---- 4. read-then-discard -------------------------------------------------------
+# ---- 4. read-then-discard (DERIVED) --------------------------------------------
 emit('')
-emit('4. READ-THEN-DISCARD   every field read from a frame, and whether it is used downstream')
+emit('4. READ-THEN-DISCARD   derived from the source: every field read from a frame,')
+emit('   traced to the component it lands in, then to whether anything reads that back.')
 emit('')
-emit('   field       read by                       downstream refs   verdict')
 
 
-def refs(pattern):
+def slurp(fn):
     try:
-        r = subprocess.run(['grep', '-rIl', '--include=*.cpp', '--include=*.H',
-                            '-e', pattern, SRC], capture_output=True, text=True, timeout=60)
-        return [os.path.basename(x) for x in r.stdout.split() if x]
+        return open(fn).read()
     except Exception:
-        return []
+        return ''
 
 
-READERS = [('rho', '3-D frame', 'Rho_comp'), ('theta', '3-D frame', 'RhoTheta_comp'),
-           ('qv', '3-D frame', 'RhoQ1_comp'), ('qc', '3-D frame', 'qc_h'),
-           ('qr', '3-D frame', 'qr_h'), ('u', '3-D frame', 'uvel_h'),
-           ('v', '3-D frame', 'vvel_h'), ('w', '3-D frame', 'wvel_h'),
-           ('sst', 'surface frame', 'sst_h'), ('q_star', 'surface frame', 'q_star_h'),
-           ('t_star', 'surface frame', 't_star_h'), ('u_star', 'surface frame', 'u_star_h'),
-           ('lsm', 'surface frame', 'ls_mask_h'), ('alb', 'surface frame', 'alb_h')]
-for nm, who, pat in READERS:
-    fl = refs(pat)
-    n = len(fl)
-    verdict = 'USED' if n > 1 else ('read only, never consumed' if n <= 1 else '?')
-    emit(f'   {nm:11s} {who:28s} {n:3d} file(s)      {verdict}')
-emit('   (a field referenced in only ONE file is read by the reader and used nowhere else)')
+WD = slurp(f'{SRC}/Utils/ERF_WeatherDataInterpolation.cpp')
+SD = slurp(f'{SRC}/Utils/ERF_SurfaceDataInterpolation.cpp')
+ALLSRC = {}
+for root, _, files in os.walk(SRC):
+    for f in files:
+        if f.endswith(('.cpp', '.H')):
+            ALLSRC[os.path.join(root, f)] = slurp(os.path.join(root, f))
 
-# ---- 5. vertical-reference audit ------------------------------------------------
+# fields read = the host vectors declared in each reader
+host = {}
+for tag, txt in (('3-D frame', WD), ('surface frame', SD)):
+    for m in re.finditer(r'Vector<Real>\s+([A-Za-z0-9_,\s]+);', txt):
+        for v in m.group(1).split(','):
+            v = v.strip()
+            if v.endswith('_h') and v not in ('xvec_h', 'yvec_h', 'zvec_h',
+                                              'latvec_h', 'lonvec_h', 'junk_h'):
+                host.setdefault(v, tag)
+
+emit('   field(host vec)  reader          interpolated  -> component      read back by')
+for v, tag in sorted(host.items()):
+    txt = WD if tag == '3-D frame' else SD
+    base = v[:-2]
+    dptr = f'{base}_d_ptr'
+    interp = 'yes' if dptr in txt else 'no '
+    # which array component does its tmp_ land in?
+    comp = '-'
+    mm = re.search(rf'\(i,j,k,\s*([A-Za-z0-9_]+)\s*\)\s*=\s*tmp_{base}\b', txt)
+    if not mm:
+        mm = re.search(rf'\(i,\s*j,\s*k,\s*([0-9]+)\s*\)\s*=\s*tmp_{base}\b', txt)
+    if mm:
+        comp = mm.group(1)
+    else:
+        mm2 = re.search(rf'tmp_{base}\b', txt)
+        comp = 'computed, not stored' if mm2 else 'NOT INTERPOLATED'
+    # who reads that component back, outside the two interpolation files?
+    readers = []
+    if comp not in ('-', 'NOT INTERPOLATED', 'computed, not stored'):
+        for fn, t in ALLSRC.items():
+            b = os.path.basename(fn)
+            if b in ('ERF_WeatherDataInterpolation.cpp', 'ERF_SurfaceDataInterpolation.cpp'):
+                continue
+            if re.search(rf'\b{re.escape(comp)}\b', t):
+                readers.append(b)
+    verdict = f'{len(readers)} file(s)' if readers else 'NOBODY  <-- discarded'
+    emit(f'   {v:16s} {tag:15s} {interp:12s} -> {comp:15s} {verdict}')
 emit('')
-emit('5. VERTICAL-REFERENCE AUDIT   every height/pressure convention conversion')
+emit('   "discarded" = interpolated onto the ERF mesh and then read by no other file.')
+
+# ---- 5. vertical-reference audit (DERIVED) -------------------------------------
 emit('')
-emit('   site                                                  convention              status')
-SITES = [
-    ('erf_enforce_hse: p_0 at z=0 every column', 'ERF_Init1D.cpp', 'p_0 - hz',
-     'sea-level, absolute', 'DEFECT (item 20)'),
-    ('frame sampled at node height, x/y cell-centred', 'ERF_WeatherDataInterpolation.cpp',
-     r'z_arr(i,j,k) + z_arr(i,j,k+1)', 'node vs cell-centre', 'DEFECT (item 19c)'),
-    ('erftools level heights', 'n/a (frame file)', None,
-     'geometric, displaced', 'DEFECT (items 5, 19f)'),
-    ('frame bottom level duplicated', 'n/a (frame file)', None,
-     'fabricated surface level', 'DEFECT (item 19)'),
-    ('ERA5 geopotential -> height', 'pipeline_audit.py', None,
-     'z/g0, geopotential m', 'ok (used here)'),
-    ('hindcast blend base height', 'ERF_WeatherDataInterpolation.cpp', 'z_base',
-     'cell-centre vs node', 'MIXED (init cc, frame node)'),
-]
-for name, fn, pat, conv, status in SITES:
-    present = ''
-    if pat:
-        r = subprocess.run(['grep', '-rIc', '-e', pat, f'{SRC}/../Source'],
-                           capture_output=True, text=True)
-        present = ''
-    emit(f'   {name:53s} {conv:22s} {status}')
+emit('5. VERTICAL-REFERENCE AUDIT   derived: every site using a height/pressure symbol,')
+emit('   tagged by convention. A function mixing conventions is flagged.')
+emit('')
+CONV = [('node',        r'z_phys_nd|z_nd\b|zcc_arr\(i,j,k\)\s*\+\s*z'),
+        ('cell-centre', r'z_phys_cc|zcc_arr|z_cc\b'),
+        ('sea-level',   r'\bp_0\b\s*-\s*hz|\bp_0\b\s*\+\s*hz'),
+        ('frame-level', r'zvec_d_ptr|zvec_h'),
+        ('geopotential', r'CONST_GRAV|/\s*9\.80665|G0\b')]
+rows = []
+for fn, t in sorted(ALLSRC.items()):
+    b = os.path.basename(fn)
+    found = {}
+    for nm, pat in CONV:
+        hits = [t[:m.start()].count('\n')+1 for m in re.finditer(pat, t)]
+        if hits:
+            found[nm] = hits
+    if not found:
+        continue
+    rows.append((b, found))
+emit('   file                                    conventions present            flag')
+for b, found in rows:
+    names = sorted(found)
+    n = len(names)
+    flag = 'MIXED' if n > 1 else ''
+    emit(f'   {b:39s} {",".join(names):30s} {flag}')
+emit('')
+emit('   MIXED means one file uses more than one vertical reference; every defect found')
+emit('   so far (items 19c, 19f/21a, 20) lives in a MIXED file.')
+
+# ---- 6. compensating pairs (DERIVED) -------------------------------------------
+emit('')
+emit('6. COMPENSATING-PAIR CHECK   derived from section 2: a combination whose error is')
+emit('   much SMALLER than its inputs\' means two errors are cancelling, and breaking')
+emit('   one of them alone will make things worse.')
+emit('')
+emit('   combination                     input errors            output error   verdict')
+zc = 846.0
+def prof(nm, stage):
+    if stage == 'A':
+        eh, ev = EH['ocean'], EPROF[('ocean', nm)]
+        o = np.argsort(eh); return float(np.interp(zc, eh[o], ev[o]))
+    return float(np.interp(zc, FZ, FPROF[('ocean', nm)]))
+relerr = {}
+for nm in ['theta', 'rho', 'T', 'p', 'qv']:
+    a, b = prof(nm, 'A'), prof(nm, 'B')
+    relerr[nm] = (b-a)/abs(a) if a else 0.0
+COMBOS = [('T   = p(rho,theta)/(R_d rho)', ['rho', 'theta'], 'T'),
+          ('p   = p0(R_d rho theta/p0)^g', ['rho', 'theta'], 'p'),
+          ('rho = p/(R_d T)',              ['p', 'T'],       'rho')]
+for name, ins, outv in COMBOS:
+    ie = max(abs(relerr[x]) for x in ins)
+    oe = abs(relerr[outv])
+    verdict = 'COMPENSATING PAIR' if (ie > 5*max(oe, 1e-6) and ie > 1e-3) else 'errors propagate'
+    emit(f'   {name:31s} {", ".join(f"{x} {100*relerr[x]:+.2f}%" for x in ins):23s} '
+         f'{100*oe:+8.3f}%   {verdict}')
+emit('')
+emit('   Read this with section 2: a pair flagged here cannot be half-fixed. Item 21b is')
+emit('   exactly that failure -- the frame\'s theta was paired with a CORRECT pressure,')
+emit('   which un-cancelled the pair and converted a pressure error into a 2 K warm bias.')
 
 emit('')
 emit('='*104)
