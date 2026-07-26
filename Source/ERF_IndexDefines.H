@@ -146,6 +146,8 @@ namespace RealBdyVars {
 namespace HindcastBdyVars {
     enum {
         RHO = RealBdyVars::NumTypes,   // 4  (cell-centered)
+        QC,                            // 5  cloud water  (cell-centered)
+        QR,                            // 6  rain water   (cell-centered)
         NumTypes
     };
 }

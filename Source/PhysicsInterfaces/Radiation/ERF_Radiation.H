@@ -392,6 +392,19 @@ private:
     // Rad frequency in number of steps
     int m_rad_freq_in_steps = 1;
 
+    // Rad frequency in SECONDS. Preferred over the step count: the radiative
+    // timescale does not care what dt the CFL condition happens to allow, so a
+    // step-based trigger silently changes the physics whenever dt changes, and
+    // costs whatever the step rate dictates. Measured on the ChannelIslands
+    // 3-km hindcast: rad_freq_in_steps = 30 at dt ~ 1.66 s fires every 50 s of
+    // model time and consumes 21.8% of total wall clock (505 calls in 15,149
+    // steps, each ~9x the median step). At 180 s the same run would make ~140
+    // calls instead of 505. Zero disables and falls back to the step count.
+    amrex::Real m_rad_freq_in_time = amrex::Real(0.0);
+
+    // Model time of the last radiation update, for the time-based trigger
+    amrex::Real m_last_rad_time = amrex::Real(-1.0e30);
+
     // Number of columns to process per RRTMGP chunk (controls peak memory)
     int m_ncol_chunk = 1024;
 

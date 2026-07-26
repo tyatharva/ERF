@@ -40,6 +40,7 @@ Radiation::Radiation (const int& lev,
 
     // Radiation timestep, as a number of atm steps
     pp.query("rad_freq_in_steps", m_rad_freq_in_steps);
+    pp.query("rad_freq_in_time",  m_rad_freq_in_time);
 
     // Get nvar if specified
     pp.query("rad_nvar", m_rad_nvar);
@@ -202,7 +203,15 @@ Radiation::set_grids (int& level,
 
     // Only allocate and proceed if we are going to update radiation
     m_update_rad = false;
-    if (m_rad_freq_in_steps > 0) { m_update_rad = ( (m_step == 0) || (m_step % m_rad_freq_in_steps == 0) ); }
+    if (m_rad_freq_in_time > amrex::Real(0.0)) {
+        // Time-based trigger takes precedence: fire on the first step, then
+        // whenever the requested interval of MODEL time has elapsed.
+        m_update_rad = (m_step == 0) ||
+                       ((m_time - m_last_rad_time) >= m_rad_freq_in_time);
+        if (m_update_rad) { m_last_rad_time = m_time; }
+    } else if (m_rad_freq_in_steps > 0) {
+        m_update_rad = ( (m_step == 0) || (m_step % m_rad_freq_in_steps == 0) );
+    }
 
     if (m_update_rad) {
         // Call to Init() has set the dimensions: ncol & nlay

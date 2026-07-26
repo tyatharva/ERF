@@ -87,6 +87,19 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         (static_cast<int>(bdy_data_xlo[0].size()) > HindcastBdyVars::RHO);
     if (l_bdy_rho && l_have_ext) { cons_read[Rho_comp] = 1; }
 
+    // Supply cloud and rain water at the lateral boundary instead of zeroing
+    // them. The frame carries both and they were already being interpolated;
+    // zeroing them forces the model to grow condensate from scratch over the
+    // 120-165 km measured for this domain. NOTE: ice species (qi/qs/qg) are NOT
+    // carried -- the frames hold no ciwc/cswc -- and Roberge et al. find ice
+    // dominant for winter cases, so expect partial recovery, not full.
+    static const bool l_bdy_hydro = [] {
+        bool b=false; ParmParse pp("erf");
+        pp.query("hindcast_bdy_hydrometeors", b); return b; }();
+    const bool l_have_hydro = l_bdy_hydro && (!bdy_data_xlo.empty()) &&
+        (static_cast<int>(bdy_data_xlo[0].size()) > HindcastBdyVars::QR);
+    if (l_have_hydro) { cons_read[RhoQ2_comp] = 1; cons_read[RhoQ3_comp] = 1; }
+
     Vector<Vector<int>> is_read;
     is_read.push_back( cons_read );
     is_read.push_back( {1} ); // xvel
@@ -95,7 +108,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
 
     // Real BC mapping (WRF/MetGrid)
     Vector<int> cons_map = {HindcastBdyVars::RHO, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
-                            RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
+                            RealBdyVars::QV, HindcastBdyVars::QC, HindcastBdyVars::QR,
                             RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
                             RhoQ7_comp, RhoQ8_comp, RhoQ9_comp,
                             RhoQ10_comp, RhoQ11_comp};
@@ -294,7 +307,11 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
 
                     // Moisture beyond qv is zeroed in the specified zone; with
                     // erf.hindcast_bdy_w_zero, w is too (MPAS-A precedent).
-                    const bool zero_here = (comp_idx > RhoQ1_comp) ||
+                    // Zero the moisture species we cannot supply. With
+                    // hindcast_bdy_hydrometeors that is everything beyond rain
+                    // (i.e. the ice species); without it, everything beyond qv.
+                    const int last_supplied = l_have_hydro ? RhoQ3_comp : RhoQ1_comp;
+                    const bool zero_here = (comp_idx > last_supplied) ||
                                            (l_w_zero && (var_idx == Vars::zvel));
 
                     // x-faces (includes y ghost cells)

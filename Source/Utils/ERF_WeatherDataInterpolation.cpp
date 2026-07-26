@@ -460,6 +460,15 @@ ERF::FillForecastStateMultiFabs(const int lev,
             if (ncomp_cons > RhoQ1_comp) {
                 fine_cons_arr(i,j,k,RhoQ1_comp) = tmp_qv;
             }
+            // qc and qr were being interpolated onto the ERF mesh and then
+            // dropped on the floor (audit item 21, section 4). Driving with
+            // hydrometeors zeroed at inflow costs 120-165 km of spin-up on this
+            // domain (Roberge et al. 2024, GMD 17, 1497-1510), and the observed
+            // Jan-9 event sits 144-192 km from the inflow edge -- inside it.
+            if (ncomp_cons > RhoQ3_comp) {
+                fine_cons_arr(i,j,k,RhoQ2_comp) = tmp_qc;
+                fine_cons_arr(i,j,k,RhoQ3_comp) = tmp_qr;
+            }
             fine_latlon_arr(i,j,k,0) = tmp_lat;
             fine_latlon_arr(i,j,k,1) = tmp_lon;
         });
@@ -857,6 +866,8 @@ ERF::fill_bdy_data_from_hindcast ()
             else if (nvar==MetGridBdyVars::T)  { src = &fcons; scomp = RhoTheta_comp; } // plain theta
             else if (nvar==MetGridBdyVars::QV) { src = &fcons; scomp = RhoQ1_comp;    } // plain qv
             else if (nvar==HindcastBdyVars::RHO) { src = &fcons; scomp = Rho_comp;    } // density
+            else if (nvar==HindcastBdyVars::QC)  { src = &fcons; scomp = RhoQ2_comp;  } // plain qc
+            else if (nvar==HindcastBdyVars::QR)  { src = &fcons; scomp = RhoQ3_comp;  } // plain qr
             strip_to_global_fab(*src, scomp, bdy_data_xlo[itime][nvar].box(), bdy_data_xlo[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_xhi[itime][nvar].box(), bdy_data_xhi[itime][nvar]);
             strip_to_global_fab(*src, scomp, bdy_data_ylo[itime][nvar].box(), bdy_data_ylo[itime][nvar]);
@@ -1159,6 +1170,12 @@ ERF::init_thermo_from_hindcast (const int lev)
                                           : r_arr(i,j,k) * th_arr(i,j,k);
             if (l_has_moist) {
                 cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ1_comp);
+                // Seed cloud and rain water too, so the interior does not have to
+                // grow condensate the frame already knows about.
+                if (cons_arr.nComp() > RhoQ3_comp && f_arr.nComp() > RhoQ3_comp) {
+                    cons_arr(i,j,k,RhoQ2_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ2_comp);
+                    cons_arr(i,j,k,RhoQ3_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ3_comp);
+                }
             }
         });
     }
