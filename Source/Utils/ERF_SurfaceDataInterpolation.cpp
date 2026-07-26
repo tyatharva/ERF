@@ -396,18 +396,90 @@ ERF::SurfaceDataInterpolation(const int lev,
     if (m_SurfaceLayer) {
         MultiFab* tsurf = m_SurfaceLayer->get_t_surf(lev);
         if (tsurf) {
-            for (MFIter mfi(*tsurf); mfi.isValid(); ++mfi) {
+            // The SST frames carry 9999 land fills that the generator interpolates
+            // against without masking, so a ring of coastal water cells comes through
+            // smeared (measured on Jan-9: 10.4% of water cells fail the guard, all
+            // >340 K; 0% land in the plausible band, i.e. no false accepts). Rather
+            // than leave those on the deck constant -- which happened to sit 0.5 K
+            // from the truth this month and would be several K out in summer, silently
+            // -- fill them from valid neighbours. The clean field spans 13.1-15.7 C
+            // with std 0.67 K, so neighbours are good estimates.
+            MultiFab sf(surface_state_interp[lev].boxArray(),
+                        surface_state_interp[lev].DistributionMap(), 2, 1);
+            sf.setVal(0.0);
+            for (MFIter mfi(sf); mfi.isValid(); ++mfi) {
                 const Box& bx = mfi.growntilebox();
-                const Array4<Real>&       ts = tsurf->array(mfi);
+                const Array4<Real>&       a  = sf.array(mfi);
                 const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
-                    Real ls_mask = ss(i,j,0,0);          // 1 = land, 0 = water
-                    Real sst     = ss(i,j,0,1);
-                    if (ls_mask < Real(0.5) && sst > Real(200.0) && sst < Real(340.0)) {
-                        ts(i,j,k) = sst;
-                    }
+                    Real lsm = ss(i,j,0,0), sst = ss(i,j,0,1);
+                    bool ok  = (lsm < Real(0.5)) && (sst > Real(200.0)) && (sst < Real(340.0));
+                    a(i,j,k,0) = ok ? sst : Real(0.0);
+                    a(i,j,k,1) = ok ? Real(1.0) : Real(0.0);
                 });
+            }
+            // Iterative nearest-valid spreading: each sweep grows the valid set by one
+            // cell, so 12 sweeps reach 12 cells inland from any valid water point.
+            for (int it = 0; it < 12; ++it) {
+                sf.FillBoundary(geom[lev].periodicity());
+                MultiFab nxt(sf.boxArray(), sf.DistributionMap(), 2, 1);
+                MultiFab::Copy(nxt, sf, 0, 0, 2, 1);
+                for (MFIter mfi(sf); mfi.isValid(); ++mfi) {
+                    const Box& bx = mfi.tilebox();
+                    const Array4<Real>&       b = nxt.array(mfi);
+                    const Array4<const Real>& a = sf.const_array(mfi);
+                    const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
+                    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        if (a(i,j,k,1) > Real(0.5)) { return; }          // already valid
+                        if (ss(i,j,0,0) >= Real(0.5)) { return; }        // land: leave to LSM
+                        Real sum = Real(0.0), cnt = Real(0.0);
+                        for (int dj = -1; dj <= 1; ++dj) {
+                        for (int di = -1; di <= 1; ++di) {
+                            if (a(i+di,j+dj,k,1) > Real(0.5)) {
+                                sum += a(i+di,j+dj,k,0); cnt += Real(1.0);
+                            }
+                        }}
+                        if (cnt > Real(0.0)) { b(i,j,k,0) = sum/cnt; b(i,j,k,1) = Real(1.0); }
+                    });
+                }
+                MultiFab::Copy(sf, nxt, 0, 0, 2, 1);
+            }
+
+            // Push onto t_surf over water; count anything still unfilled.
+            ReduceOps<ReduceOpSum,ReduceOpSum> reduce_op;
+            ReduceData<Real,Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (MFIter mfi(*tsurf); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                const Array4<Real>&       ts = tsurf->array(mfi);
+                const Array4<const Real>& a  = sf.const_array(mfi);
+                const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    if (ss(i,j,0,0) < Real(0.5) && a(i,j,k,1) > Real(0.5)) { ts(i,j,k) = a(i,j,k,0); }
+                });
+                reduce_op.eval(bx, reduce_data, [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    Real water = (ss(i,j,0,0) < Real(0.5)) ? Real(1.0) : Real(0.0);
+                    Real raw   = (water > Real(0.0) && ss(i,j,0,1) > Real(200.0)
+                                                    && ss(i,j,0,1) < Real(340.0)) ? Real(1.0) : Real(0.0);
+                    Real unfilled = (water > Real(0.0) && a(i,j,k,1) < Real(0.5)) ? Real(1.0) : Real(0.0);
+                    return {water - raw, unfilled};
+                });
+            }
+            ReduceTuple hv = reduce_data.value();
+            Real n_filled = amrex::get<0>(hv), n_unfilled = amrex::get<1>(hv);
+            ParallelDescriptor::ReduceRealSum(n_filled);
+            ParallelDescriptor::ReduceRealSum(n_unfilled);
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                Print() << "HindCast SST -> t_surf: " << (long)n_filled
+                        << " ocean cells fell back to nearest-valid SST (frame fill/coastal smear); "
+                        << (long)n_unfilled << " still unfilled (left on erf.most.surf_temp)"
+                        << std::endl;
             }
         }
     }

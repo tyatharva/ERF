@@ -96,3 +96,9 @@ __pycache__/
 /precip_check/*.grib
 /precip_check/*.npz
 /bdyfix/
+
+# staged observational QPE products (large, not source)
+/ncep_stage4.nc
+/mrms_pass2.grib2
+precip_check/*.grib
+precip_check/cds_sfc.log
