@@ -589,12 +589,30 @@ ERF::init_thermo_from_hindcast (const int lev)
         const Box& gbx = mfi.growntilebox(1);
         const Array4<Real      >& cons_arr = cons.array(mfi);
         const Array4<Real const>& r_arr    = r_hse.const_array(mfi);
-        const Array4<Real const>& th_arr   = th_hse.const_array(mfi);
         const Array4<Real const>& f_arr    = fcons.const_array(mfi);
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             cons_arr(i,j,k,Rho_comp)      = r_arr(i,j,k);
-            cons_arr(i,j,k,RhoTheta_comp) = r_arr(i,j,k) * th_arr(i,j,k);
+            // theta comes from the INTERPOLATED FRAME, not from the hydrostatic base
+            // state. This previously read th_arr (= th_hse, the theta erf_enforce_hse
+            // derives while integrating dp/dz from the interpolated rho), so the frame's
+            // theta was read, horizontally interpolated, vertically interpolated onto the
+            // ERF levels and then DISCARDED -- only rho and qv survived into the
+            // thermodynamic state, and the base state's hydrostatic error became the
+            // state's error.
+            //
+            // Measured on Jan-9 2023: model theta 293.07 K at 155 m against the frame's
+            // 289.30 K at the same height, +3.77 K, growing with height (equivalent to a
+            // 721 m displacement at 150 m rising to 824 m at 589 m) -- the signature of
+            // integration error accumulating upward. It also produced a superadiabatic
+            // lowest 150 m over the whole ocean (theta falling 3.35 K with height) where
+            // ERA5 has a stable marine layer, i.e. a domain-wide absolutely unstable
+            // surface layer at t = 0.
+            //
+            // Note the lateral forcing was NEVER affected: the boundary planes take theta
+            // from fcons (line ~523), so the boundaries relaxed toward the correct frame
+            // theta while the interior started ~4 K warmer.
+            cons_arr(i,j,k,RhoTheta_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoTheta_comp);
             if (l_has_moist) {
                 cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ1_comp);
             }

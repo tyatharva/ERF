@@ -64,11 +64,18 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     // omega in Pa/s, not a geometric vertical velocity, and the correct Omega
     // follows from the mass budget closing rather than from imposition (cf.
     // the abandoned lateral WfromOmega experiment, upstream PR #2872).
+    // DECOUPLED from hindcast_mass_consistent_bdy. That knob used to imply this one,
+    // which made attempt 2 a compound experiment: band rho relaxation AND rho specified
+    // at the wall face. The characteristic analysis says the wall setting is
+    // inadmissible -- rho rides the OUTGOING u_n - c wave and must be computed from the
+    // interior -- and attempt 2's failure was near-wall (excess at d<4 amplifying with
+    // height), i.e. consistent with the wall half being the culprit. Band-only rho
+    // relaxation with the wall left free is a different experiment and was never
+    // separable until now. Only erf.hindcast_bdy_rho sets the wall.
     static const bool l_bdy_rho = [] {
-        bool b=false, mc=false; ParmParse pp("erf");
+        bool b=false; ParmParse pp("erf");
         pp.query("hindcast_bdy_rho", b);
-        pp.query("hindcast_mass_consistent_bdy", mc);
-        return b || mc; }();
+        return b; }();
 
     // MPAS-A precedent: set w = 0 in the specified zone instead of taking a
     // zero-gradient copy from the interior. Reported to alleviate spurious

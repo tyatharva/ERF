@@ -1652,3 +1652,70 @@ operation on the relaxed variable set.**
 Note the fallbacks do NOT share this defect: an exponential ramp profile (Marbaix)
 and diffusive relaxation (TRAM/Tatsumi) both RETAIN normal-momentum relaxation and
 only change the ramp shape or the operator. They remain untested and cheap.
+
+### ROOT CAUSE of the interior wet bias: the IC theta was the base state's theta
+
+`ERF_WeatherDataInterpolation.cpp:597` read
+
+    cons_arr(i,j,k,RhoTheta_comp) = r_arr(i,j,k) * th_arr(i,j,k);   // th_arr = th_hse
+
+so theta for the initial state came from the hydrostatic base state that
+`erf_enforce_hse` derives while integrating dp/dz from the interpolated rho -- NOT
+from the interpolated ERA5 frame. The frame's theta was read, horizontally
+interpolated, vertically interpolated onto the ERF levels, and then discarded; only
+rho and qv survived. `f_arr` (the frame) was already in scope and used for qv on the
+very next line. Fixed to `f_arr(i,j,k,RhoTheta_comp)`.
+
+**Only one instance exists** -- the boundary planes take theta from `fcons`
+(line ~523), so the lateral forcing was never affected. The interior was initialised
+~4 K warmer than the theta the boundaries were relaxing it toward.
+
+Measured before/after at t=0 over ocean:
+
+| check | before | after | target |
+|---|---|---|---|
+| theta monotonic with height | **NO** (falls 3.35 K over lowest 150 m) | **YES** | stable |
+| T at 12 m | 24.61 C (**+10.14 K** vs SST) | 14.38 C (**-0.73 K** vs SST+0.64) | ~15.1 C |
+| worst \|theta - ERA5\| | **+5.30 K** | **1.41 K** | -- |
+| \|p - p_hse\| | 17 hPa | 4.86 hPa | 0 |
+| RhoTheta/Rho vs frame theta | +3.77 K | **-0.15 to -0.21 K** | ~0 |
+
+The `RhoTheta/Rho` column now equals the stored theta exactly and sits within 0.21 K
+of the frame value interpolated to the same height (residual is
+interpolation-scheme difference, not substitution). The domain-wide absolutely
+unstable surface layer is gone.
+
+**The 1.41 K residual is the erftools offset, as predicted**: ~300 m x ERA5's
+~5 K/km theta gradient = ~1.5 K.
+
+### erftools ~300 m vertical offset (unfixable here, source not in this tree)
+
+Signature, for whoever has the source:
+
+* **Constant to +-7 m over 1100 m**: offsets of +309.4 / +302.6 / +297.1 / +295.6 /
+  +301.6 / +304.9 m at frame levels 1-6, derived by taking the frame's (T, p) and
+  locating that pair in the ERA5 column.
+* **The z array itself is correct**: frame z = 155.1 / 369.2 / 588.2 / 812.2 against
+  ERA5 geopotential heights 161.6 / 375.5 / 594.3 / 818.1, i.e. ~6 m low and
+  shrinking -- consistent with a small surface-geopotential term, not the bug. It is
+  the DATA assigned to each z that comes from ~300 m higher, not the z values.
+* **~1.3-1.4 level spacings** (levels are 214-235 m apart), so NOT a clean index slip.
+* Constant rather than growing rules out hypsometric integration from a wrong surface
+  pressure; it points at a wrong z<->p relation (e.g. a standard atmosphere) used when
+  placing pressure-level data onto the z grid.
+* Frame theta is +1.51 to +1.56 K uniform vs ERA5 while frame T is -1.4 K, at the same
+  level, with p 35 hPa low -- self-consistent (theta = T(p0/p)^kappa checks out at
+  964.8 hPa), i.e. the right values for the wrong height, not corruption.
+
+**This residual survives the ERF fix and is worth ~1.5 K.** Any scoring after the ERF
+fix should expect ~1.4 K of warm bias to remain, not zero.
+
+### Band relaxation: closed
+
+Third and final band formulation tested. Band-only rho relaxation with the wall left
+free (never previously separable -- `hindcast_mass_consistent_bdy` was OR'd into
+`l_bdy_rho`, so attempt 2 was always a compound experiment; now decoupled) degrades
+the interior 4x: 17.11x bias at land d>=3 against Davies' 4.05x, RMSE 239.66 vs
+51.20, and 8.2/2.8 mm at d=20 against Davies' 0.5/0.7. Correlation rose (0.443 vs
+0.351) but that does not survive a 4x bias increase. Same domain-wide failure mode as
+tangential-only. **Davies is the base; the band is closed.**
