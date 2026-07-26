@@ -47,6 +47,13 @@ fi
 # previously only the 2-km file was staged while the deck referenced the
 # 3-km one).
 cp    $CI/channel_islands_terrain*.txt             $RUN/
+# ERA5 surface anchor for the IC hydrostatic integration (audit item 4 SEV-1).
+# Case-specific: regenerate with precip_check/make_sfc_anchor.py per date/domain.
+ANCHOR=$(sed -n 's/^erf.hindcast_sfc_anchor_file[ =]*"\([^"]*\)".*/\1/p' $CI/inputs_hindcast)
+[ -n "$ANCHOR" ] || fail "erf.hindcast_sfc_anchor_file not set in the deck"
+[ -f "/app/ERF/precip_check/$ANCHOR" ] \
+    || fail "anchor $ANCHOR missing -- run precip_check/make_sfc_anchor.py"
+cp    /app/ERF/precip_check/$ANCHOR                 $RUN/
 cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-sw-g224-2018-12-04.nc  $RUN/
 cp    /app/ERF/Submodules/RRTMGP/rrtmgp/data/rrtmgp-data-lw-g256-2018-12-04.nc  $RUN/
 cp    /app/ERF/Submodules/RRTMGP/extensions/cloud_optics/rrtmgp-cloud-optics-coeffs-sw.nc $RUN/
@@ -90,6 +97,38 @@ ms = deck_val("max_step")
 if ms != "-1":
     sys.exit(f"PREFLIGHT: max_step = {ms}; must be -1 for production "
              "(positive caps truncate the run with a clean exit)")
+
+# 1b. the five IC/boundary corrections must be present and enabled.
+#     These were validated in bdyfix/ but lived only on run-script command
+#     lines for weeks, so the shipped deck silently produced the original
+#     broken IC (UPSTREAM_ISSUES 19-24, audit item 4 SEV-1). Fail loudly
+#     rather than let a deck without them look normal.
+REQUIRED = {
+    "erf.hindcast_sfc_anchor_file":  None,     # any non-empty path
+    "erf.hindcast_frame_from_T":     "1",
+    "erf.hindcast_blend_bdy_theta":  "1",
+    "erf.hindcast_bdy_hydrometeors": "1",
+    "erf.rad_freq_in_time":          None,     # any positive value
+}
+for key, want in REQUIRED.items():
+    got = deck_val(key)
+    if got is None:
+        sys.exit(f"PREFLIGHT: {key} absent from the deck. Without it the run "
+                 "reproduces the pre-fix initial condition (+5 K warm bias, "
+                 "unstable marine layer). See UPSTREAM_ISSUES 19-24.")
+    if want is not None and got != want:
+        sys.exit(f"PREFLIGHT: {key} = {got}; expected {want}")
+    if want is None and (not got or got in ("0", "0.0", "\"\"")):
+        sys.exit(f"PREFLIGHT: {key} = {got}; must be set to a usable value")
+if deck_val("erf.rad_freq_in_steps") is not None:
+    sys.exit("PREFLIGHT: erf.rad_freq_in_steps is still in the deck; it is "
+             "superseded by erf.rad_freq_in_time and the two together make the "
+             "radiative timescale dt-dependent. Remove it.")
+anchor = deck_val("erf.hindcast_sfc_anchor_file")
+if not os.path.exists(os.path.join(run, anchor)):
+    sys.exit(f"PREFLIGHT: anchor file {anchor} not staged into {run}. "
+             "Generate it with precip_check/make_sfc_anchor.py for this "
+             "date and domain.")
 
 # 2. frame coverage vs deck datetimes
 t0 = datetime.strptime(deck_val("start_datetime"), "%Y-%m-%d %H:%M:%S")

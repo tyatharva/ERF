@@ -33,6 +33,24 @@ erf.hindcast_lateral_forcing      = true
 erf.hindcast_surface_bcs      = true
 erf.hindcast_surface_data_dir = "ERA5Data_Surface"
 
+#  ---------------------------------------------------------------------------
+#  IC AND BOUNDARY CORRECTIONS  [AUDIT 2026-07-26, item 4 SEV-1]
+#
+#  These five were developed and validated in bdyfix/ but lived only on the
+#  bdyfix run-script command lines, so the SHIPPED deck still produced the
+#  original broken initial condition: +5 K warm bias, an absolutely unstable
+#  marine layer, p_0 = 101325 Pa anchored at sea level in every column, frame
+#  theta/rho carrying an 18 hPa pressure error, and hydrometeors zeroed at
+#  inflow. Same failure mode as the double-counted surface flux: correct code,
+#  not wired into what actually runs.  See UPSTREAM_ISSUES 19-24.
+#
+#  The anchor binary is case-specific -- regenerate with
+#  precip_check/make_sfc_anchor.py for any other date/domain.
+erf.hindcast_sfc_anchor_file  = "sfc_anchor_jan09.bin"
+erf.hindcast_frame_from_T     = 1
+erf.hindcast_blend_bdy_theta  = 1
+erf.hindcast_bdy_hydrometeors = 1
+
 # Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
 # whole 192 km N-S extent (2x120 > 192); 30 km keeps ~65% of the domain
 # sponge-free while still relaxing smoothly to ERA5.
@@ -330,7 +348,11 @@ erf.o3vmr                  = 5.0e-8
 # freq 10. 30 steps = ~80-135 s model time at dt 2.6-4.5, matching standard
 # practice (WRF radt ~= 1 min per km of dx -> 2 min at 2 km). Cuts rad to
 # ~25% of wall.
-erf.rad_freq_in_steps      = 30
+# [AUDIT 2026-07-26, item 4] rad_freq_in_steps REMOVED. A step-based trigger
+# silently changes the radiative timescale whenever dt changes, and at
+# dt ~ 1.66 s the 30-step cadence fired every 50 s of model time and consumed
+# 21.8% of wall clock (505 calls in 15,149 steps, each ~9x the median step).
+erf.rad_freq_in_time       = 180.0
 erf.rrtmgp_file_path       = "."
 erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
 erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
@@ -359,10 +381,15 @@ erf.sum_interval = 100            # integral diagnostics every 100 steps
 # dt 2.24 s) the cost is ~0.4% of wall and a blowup is still caught long
 # before it can fill months of plotfiles with NaNs.
 erf.check_for_nans     = 1
-erf.check_for_nans_int = 100
+# [AUDIT 2026-07-26] was 100. Every failure this campaign was diagnosed
+# post-hoc from plotfiles because a NaN could propagate 100 steps before the
+# scan noticed. 10 costs more scans; catching the origin is worth it.
+erf.check_for_nans_int = 10
 erf.v = 1
 amr.v = 1
-amrex.fpe_trap_invalid = 0        # set 1 to catch NaNs while debugging
+# [AUDIT 2026-07-26] was 0. Trapping the FP operation that produces the NaN is
+# the difference between a stack trace at the source and a plotfile autopsy.
+amrex.fpe_trap_invalid = 1
 
 # --- REQUIRED runtime settings on the 16 GB RTX 4080 -----------------------
 # Single GPU stream: the hindcast step path has a cross-stream execution race

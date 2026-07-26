@@ -84,7 +84,13 @@ Emr = Eq/(1.0-Eq)                                  # ERA5 gives SPECIFIC humidit
 Erho_d = Ep/(RD*Et*(1.0+(RV/RD)*Emr))              # dry density, ERF's convention
 Ew = -Eomega/((Ep/(RD*Et))*G0)
 gs = pygrib.open(f'{ERA5DIR}/era5_surf_{STAMP}.grib'); SFA = {}
-for m in gs: SFA[m.shortName] = np.array(m.values, dtype=float)
+for m in gs:
+    # pygrib returns a MASKED array for fields with a land/sea mask (sst above
+    # all). np.array() on it substitutes the fill value -- 9999 or 1e20 -- and a
+    # later mean then reports a "temperature" of 799 K. Carry the mask as NaN.
+    val = m.values
+    SFA[m.shortName] = np.where(np.ma.getmaskarray(val), np.nan,
+                                np.ma.getdata(val)).astype(float)
 gs.close()
 elon180 = np.where(elon > 180, elon-360, elon)
 latv, lonv = elat[:, 0], elon180[0, :]
@@ -213,10 +219,33 @@ for nm, era_sn, fr in SFMAP:
     if fr not in S:
         emit(f'   {nm:9s} {"--":>11s} {"absent":>12s}      -       -    field not in this frame')
         continue
-    B = bilin(S[fr], sx, sy)
+    # The FRAME stores land points as a fill value too (measured 600+ K in the
+    # raw field). ERF masks these in ERF_SurfaceDataInterpolation; the audit has
+    # to mask them identically or it compares a real ERA5 mean against a
+    # fill-contaminated one. Physical-range mask, then renormalise.
+    raw = S[fr]
+    lim = {'sst': (271.0, 305.0), 'alb': (0.0, 1.0), 'lsm': (-0.01, 1.01),
+           'u_star': (0.0, 5.0)}.get(nm)
+    if lim is not None:
+        okf = (raw > lim[0]) & (raw < lim[1])
+        nu = bilin(np.where(okf, raw, 0.0), sx, sy)
+        de = bilin(okf.astype(float), sx, sy)
+        B = np.where(de > 0.5, nu/np.maximum(de, 1e-12), np.nan)
+    else:
+        B = bilin(raw, sx, sy)
     msk = oc if nm == 'sst' else np.ones_like(oc, dtype=bool)
     if era_sn in SFA:
-        A = era5_ll(SFA[era_sn]); a, b = A[msk].mean(), B[msk].mean()
+        # renormalised (masked) interpolation: accumulate only finite source
+        # points, exactly as ERF's SST interpolation does. A plain bilinear
+        # would drag land NaNs into every coastal water cell.
+        fin = np.isfinite(SFA[era_sn])
+        num = era5_ll(np.where(fin, SFA[era_sn], 0.0))
+        den = era5_ll(fin.astype(float))
+        A = np.where(den > 0.5, num/np.maximum(den, 1e-12), np.nan)
+        good = msk & np.isfinite(A) & np.isfinite(B)
+        if good.sum() == 0:
+            emit(f'   {nm:9s} {"no valid":>11s} {"overlap":>12s}'); continue
+        a, b = A[good].mean(), B[good].mean(); msk = good
         d = b-a; t = TOL.get(nm, 1e9)
         emit(f'   {nm:9s} {a:11.4f} {b:12.4f} {d:+9.4f}   {"!" if abs(d) > t else "."}')
     else:
