@@ -65,8 +65,8 @@ def last(run):
             return ra, np.asarray(gg[('boxlib', 'z_phys')])[:, :, 0]
 
 
-MOD, ter = last('bdyfix/ic_hyd')
-BAS, _ = last('bdyfix/sst_ctl')
+MOD, ter = last(os.environ.get('RUN','bdyfix/ic_hyd'))
+BAS, _ = last(os.environ.get('REF','bdyfix/sst_ctl'))
 ii, jj = np.meshgrid(np.arange(NX), np.arange(NY), indexing='ij')
 dring = np.minimum.reduce([ii, jj, NX-1-ii, NY-1-jj])
 BASE = (ter > 30) & (dring >= 3) & np.isfinite(mrms)

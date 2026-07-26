@@ -2282,3 +2282,55 @@ is a genuine inter-product disagreement or a mismatched accumulation window cann
 be determined without the file's provenance. **The earlier claim that "two
 observational products disagree by 3.6x" is withdrawn pending that check**, and
 with it the +0.554 inter-product correlation, which is equally window-dependent.
+
+## 24. Moist-scalar diffusion: mechanism confirmed, but it does not buy skill
+
+`moistscal_*_adv_type` is ALL-OR-NOTHING. `ERF_SlowRhsPost.cpp:405` sets
+`num_comp = n_qstate` at `ivar == RhoQ1_comp`, advecting the whole moisture block --
+six Morrison mass mixing ratios AND every number concentration -- in one call with
+one scheme. Splitting mass from number would need two calls plus two more AdvType
+inputs and their stencil-width validation.
+
+**WENOZ5 fails deterministically.** Both attempts NaN'd at step 100 in component 11
+(RhoQ8, a number concentration) at k = 26-27. Single-precision overflow in the
+smoothness indicators on number-concentration gradients, exactly as predicted. The
+corrected IC gentles the thermodynamic gradients but not these -- they are set by the
+microphysics.
+
+**Upwind_5th runs clean for 24 h and confirms the diagnosis:**
+
+| metric | Upwind_3rd (ic_hyd) | Upwind_5th (wz) | MRMS |
+|---|---|---|---|
+| spectral ratio 8-19 km | 0.496 | **0.661** | 1.000 |
+| ratio at 10 km | 0.405 | **0.598** | |
+| ratio at 8 km | 0.486 | **0.942** | |
+| p90 | 12.95 | **16.62** | 36.07 |
+| max | 34.09 | **39.53** | 69.05 |
+| bias | 0.566x | **0.727x** | 1.00 |
+| CV | 1.29 | 1.28 | 2.04 |
+
+**But every placement metric moves the wrong way:**
+
+| metric | Upwind_3rd | Upwind_5th |
+|---|---|---|
+| FSS 1 mm @ 3 km | 0.576 | **0.566** |
+| FSS 5 mm @ 3 km | 0.423 | **0.395** |
+| FSS 5 mm @ 60 km | 0.600 | **0.576** |
+| CSI @ 1 mm | 0.405 | **0.394** |
+| FAR @ 1 mm | 0.534 | **0.554** |
+| correlation | -0.106 | -0.124 |
+
+FSS at 3 km was the stated check on the diagnosis and it did NOT improve.
+
+**Reading.** Implicit diffusion was genuinely suppressing 8-19 km variance -- removing
+it restored the spectrum and raised peak intensity and bias exactly as predicted. But
+the restored variance lands in the wrong places, so hits and false alarms rise
+together (FAR 0.534 -> 0.554) and the categorical scores fall. CV is unchanged at
+1.28 against MRMS's 2.04: the field got more intense everywhere rather than more
+concentrated.
+
+Diffusion was a real defect and is now half-fixed. It was not what limits skill.
+The residual is placement at 3 km, which no advection scheme will supply.
+
+Note the 6-7 km overshoot (ratio 1.13 and 1.48) -- Upwind_5th may be adding
+grid-scale noise at the shortest resolved scales, worth watching before adopting it.
