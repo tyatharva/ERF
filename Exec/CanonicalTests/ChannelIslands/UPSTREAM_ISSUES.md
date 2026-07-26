@@ -2090,3 +2090,79 @@ to 0, because it is a property of the erftools build that wrote the frames.
 number is available yet. Land-mean 8.60 mm at 7 h against MRMS's 8.51 mm over 24 h
 means the run may now overshoot -- accumulation is decelerating (increments 3.73,
 2.12, 1.53, 1.42, 0.80, 0.71, 0.61 mm/h) but a 24-h run is needed to say.
+
+## 21. PIPELINE AUDIT: item 5's height-displacement diagnosis is wrong, and two
+## compensating errors have been masking each other
+
+`precip_check/pipeline_audit.py` compares every variable across ERA5 -> erftools
+frame -> ERF interpolation -> ERF state at t = 0. Its first run overturns three
+things at once.
+
+### 21a. erftools does NOT displace data in height. It gets the PRESSURE wrong.
+
+ERA5 -> frame delta, ocean columns, at matched geometric height:
+
+| z (m) | T | qv | u | v | theta | rho | implied p |
+|---|---|---|---|---|---|---|---|
+| 398 | **-0.03 K** | -5e-5 | +0.03 | -0.02 | **+1.60 K** | **-0.023** | **-1898 Pa** |
+| 846 | **-0.02 K** | -6e-5 | +0.04 | -0.03 | **+1.64 K** | **-0.022** | **-1815 Pa** |
+| 3130 | **-0.03 K** | -4e-5 | +0.13 | +0.03 | **+1.97 K** | **-0.020** | **-1598 Pa** |
+
+**T, qv, u and v are correct at the labelled height.** A height displacement would
+move all of them; T alone rules it out (a 300 m error is ~2 K in T). What is wrong is
+the pressure implied by the (rho, theta) pair the frame stores: ~18 hPa low,
+uniformly. Everything else follows arithmetically:
+
+    theta = T (p0/p)^kappa    p 1.914% low -> theta +287.5*0.2857*0.01914 = +1.57 K   (obs +1.57)
+    rho   = p/(R_d T (1+..))  p 1.914% low -> rho -1.914% = -0.0229                   (obs -0.0224)
+
+Item 5 read the +1.5 K theta and the 35 hPa pressure error as "~1.3-1.4 level
+spacings of downward displacement". Both symptoms are real; the cause is not
+displacement. The frame's T is the trustworthy field and its theta and rho are not.
+
+### 21b. The item-19 restructure inherits that error and is 1.7-2.2 K too warm
+
+The restructure takes theta from the frame and anchors pressure on ERA5 `sp`. Since
+the frame's theta is +1.6 K too high *because* it was built with a pressure 19 hPa
+too low, pairing it with a CORRECT pressure converts the pressure error directly into
+a temperature error. ERF state minus frame, no-offset run:
+
+| z (m) | dT | dp |
+|---|---|---|
+| 150 | **+1.58 K** | +2028 Pa |
+| 398 | **+1.66 K** | +1948 Pa |
+| 846 | **+1.72 K** | +1923 Pa |
+| 3130 | **+2.16 K** | +1900 Pa |
+
+Against ERA5 the state is +1.71 K at 846 m and +2.13 K at 3130 m. That is
+**the cause of the precipitation collapse**: ~2 K raises q_sat ~13% and drops RH ~8
+points, which is exactly the measured 87% -> 80% and exactly enough to stop
+condensation. Not the blend (19a, retracted), not the boundary planes (19e, worth 2x).
+
+The OLD path was accidentally self-consistent: it used the frame's rho (also -2%
+wrong) with a p_0-at-sea-level anchor (item 20, also wrong), and the two errors
+partially cancelled to give roughly the right T. Replacing one of them alone exposed
+the other.
+
+### 21c. `erf.hindcast_frame_z_offset` is a compensating error, not a fix
+
+Shifting the levels up 305 m makes the model sample air from 305 m LOWER, which is
+warmer and moister, offsetting 21b's warm-dry bias and generating rain. It does not
+correct anything. With the offset applied, the fields that WERE right become wrong:
+
+| z (m) | ERA5 T | frame T | with +305 m | ERA5 qv | frame qv | with +305 m |
+|---|---|---|---|---|---|---|
+| 3130 | 272.04 | 272.01 | **273.86** | 0.00268 | 0.00264 | **0.00341** |
+
++1.85 K and +29% moisture aloft, both spurious. The 32x precipitation gain in item
+19f is real as a measurement and wrong as an attribution: it came from wetting the
+column, not from fixing a displacement. **19f's conclusion is retracted; the knob
+should not be used.**
+
+### The actual fix
+
+Use the frame's **T**, which is correct, rather than its theta, which is not.
+Derive theta from frame T and the hydrostatically-integrated pressure that item 19
+already computes from ERA5 `sp`. That leaves every trustworthy field untouched and
+drops the erftools pressure error entirely, instead of cancelling it against
+another error.
