@@ -2401,3 +2401,66 @@ but it is a configuration decision and not a result.
 Same pattern as the moist-scalar fallback (item 24): a knob pinned on a broken IC,
 freed once the IC was correct, and worth ~nothing to skill. Both were real defects
 in provenance; neither was what limits the model.
+
+## 26. `rad_freq_in_time` is not honoured in single precision: absolute float32 clock where a difference was intended
+
+Measured 2026-07-26 on the 192x96 benchmark. The deck asks for radiation every
+180 s of model time. **The effective cadence is 256 s**, and every scored run in
+this campaign has had it.
+
+`ERF_Radiation.cpp:210`:
+
+```cpp
+m_update_rad = (m_step == 0) ||
+               ((m_time - m_last_rad_time) >= m_rad_freq_in_time);
+```
+
+`m_time` is ABSOLUTE epoch seconds -- `gmtime(time_t(time))` a few lines above
+resolves it to 2023-01-09, so it is ~1.673e9. In a single-precision build
+`amrex::Real` is float32, whose ULP at 1.673e9 is **128 s**. Model times are
+therefore stored quantised to multiples of 128 s, the difference of two of them
+is a multiple of 128, and the first value that satisfies `>= 180.0` is 256.
+
+Any request in (128, 256] gives 256 s. Any request below 128 s gives 128 s. The
+knob is not merely imprecise -- across a factor-of-two range of inputs it
+returns the same answer.
+
+Predicted vs measured, 600-step benchmark, dt ~ 1.63 s:
+
+| | predicted | measured |
+|---|---|---|
+| first radiation call after t=0 | crossing into the 256 s bucket | model t = 194.1 s |
+| second | crossing into 512 | 450.0 s |
+| third | crossing into 768 | 707.0 s |
+| gaps | 256 s | 255.9, 257.0 s |
+
+**This is the campaign's recurring defect class, not a new one.** Every instance
+has the same shape -- *an absolute single-precision value used where only a
+difference was ever meaningful*:
+
+* item 19/21: the frame's `(rho, theta)` pair carries an absolute pressure that
+  is ~18 hPa wrong; only the T recovered from the pair is meaningful, because
+  the two errors share the wrong p and cancel in the ratio.
+* item 20: `erf_enforce_hse` anchors an absolute p = 101325 Pa at z = 0 in every
+  column, when only the vertical *increment* is physically constrained.
+* item 21 (retracted 19f): profile-matching read a pressure error as an absolute
+  305 m height offset, and a model knob was added for it.
+* this item: an absolute epoch clock differenced to get an interval.
+
+The general lesson for an SP build: **carry differences as differences.** An
+absolute time, pressure, or height in float32 has ULP proportional to its
+magnitude, and every one of these bugs was invisible because the absolute value
+looked plausible.
+
+**Deliberately NOT fixed yet.** Every scored run used `180.0` and therefore ran
+at 256 s, so the runs are mutually consistent and #25 stays comparable. Fixing
+it changes the radiative forcing of every future run and requires rescoring the
+baseline. Fix after the #25 measurement lands.
+
+**Fix when addressed:** test against MODEL-RELATIVE time. ERF's own `cur_time`
+is small and precise (the step log prints `TIME = 951.4483779`); only the
+radiation interface adds the epoch offset. Either pass `cur_time` for the
+cadence test and keep the epoch value solely for the solar-geometry call, or
+accumulate `m_time_since_rad += dt` and compare that. Note the run-termination
+test at `ERF.cpp:626` (`start_time + cur_time < stop_time`) has the same shape
+and should be checked for the same quantisation.
