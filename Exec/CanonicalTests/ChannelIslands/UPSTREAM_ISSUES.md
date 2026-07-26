@@ -1849,3 +1849,50 @@ the density of the air at the top of it.
 observed height and integrate from there. A general fix upstream would be an
 optional 2-D surface-pressure field, defaulting to the current behaviour when
 absent.
+
+### 19a. The t2m blend was anchored to the frame level's LABELLED height, not its true one
+
+The fix in item 19 blends from the ERA5 2-m air temperature up to the lowest frame
+level carrying data, at z = 155.07 m. But that level's data is not from 155 m. Item 5
+records erftools displacing the levels **~300 m downward**, so the values labelled
+155 m are really from ~455 m. Blending across the labelled depth therefore compresses
+a 455 m temperature difference into 153 m:
+
+    imposed:  2.94 K over 153 m  = 19.2 K/km
+    true:     2.94 K over 453 m  =  6.5 K/km       ratio 2.96x too steep
+
+The PBL scheme mixes that spurious inversion out immediately. Measured, ocean mean,
+corrected-IC Davies run:
+
+| t (h) | th(k=0) | th(k=4) | d(theta) 0->4 |
+|---|---|---|---|
+| 0 | 286.50 | 288.94 | +2.44 K |
+| 1 | 287.68 | 288.92 | +1.24 K |
+| 2 | 287.71 | 288.94 | +1.23 K |
+| 4 | 287.83 | 289.06 | +1.23 K |
+
+theta at the first cell centre rises **+1.18 K within the first hour** and the
+stratification settles at half what was imposed. Predicted surface warming from
+mixing the over-steep profile rather than the true one is ~1.0 K; observed +1.18 K.
+
+**Consequence: precipitation switches off.** At 24 h the run is +0.65 K against ERA5
+t2m (Jan-10 00Z, ocean), which raises q_sat enough to drop mean low-level RH from
+87% to 80%. Cloud coverage collapses from 17.8% of the domain to 0.62%, and
+domain-mean 24-h precipitation falls from 22.4 mm to 0.18 mm -- of which 0.16 mm
+falls in hour 1 and the rest of the run produces 0.02 mm. Winds and vertical motion
+are unaffected (|v| 10.25 vs 9.80 m/s, w p99 3.90 vs 3.98 m/s over land), and column
+water vapour is HIGHER than the broken run (29.74 vs 29.18 mm). The model is not
+short of moisture or lift; it is ~1 K too warm to saturate.
+
+This is the same class of error item 19 was written to remove -- accommodating the
+erftools displacement instead of correcting it, in a new place. Two ways out:
+
+1. Blend to `z_low + offset` with the ~300 m displacement as an input. Local, cheap,
+   still built on a known-wrong level table.
+2. Correct `zvec` on read by the measured offset. Fixes the blend AND the ~1.4 K
+   theta residual AND the ~35 hPa pressure error at every level, not just near the
+   ground. The offset is documented as constant (item 5), which is what makes this
+   tractable.
+
+The displacement is not the cosmetic ~1.4 K item 5 described. It breaks the
+initialization.
