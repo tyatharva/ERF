@@ -142,6 +142,24 @@ ensure_sfc_anchor (const int nx_dom, const int ny_dom)
  * level. Applying it here makes the interior and the relaxation target the same
  * field by construction.
  */
+/**
+ * erf.hindcast_frame_from_T: rebuild the frame's theta and rho from its recovered
+ * temperature and a hydrostatic pressure anchored on ERA5 sp.
+ *
+ * The frame's T is correct (item 21 measures it to 0.03 K at every level); its
+ * theta and rho are not, both because the (rho, theta) pair it stores implies a
+ * pressure ~18 hPa too low. T is exactly recoverable from that pair -- the same
+ * wrong pressure cancels -- so the correct fields can be rebuilt with no new data.
+ */
+static bool
+frame_from_T ()
+{
+    static const bool b = [] {
+        int v = 0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_frame_from_T", v); return v != 0; }();
+    return b;
+}
+
 static bool
 blend_bdy_theta ()
 {
@@ -260,57 +278,21 @@ ERF::FillForecastStateMultiFabs(const int lev,
         }
     }
     // ------------------------------------------------------------------
-    // Correct the erftools level displacement.
+    // RETRACTED: erf.hindcast_frame_z_offset (item 19f) has been removed.
     //
-    // Item 5 measures erftools placing the frame's pressure-level data ~300 m
-    // BELOW where it belongs, by a constant offset -- constant rather than
-    // growing, which rules out hypsometric integration from a wrong surface
-    // pressure and points at a wrong z<->p relation used when putting
-    // pressure-level data onto the z grid. Two independent measurements of the
-    // magnitude agree:
+    // It relabelled the frame levels upward by ~305 m on the theory that erftools
+    // displaced the data in height. The audit (item 21) shows it does not: the
+    // frame's T, qv, u and v are correct at the labelled height, and only the
+    // pressure implied by (rho, theta) is wrong. Shifting the levels made the
+    // model sample air from 305 m lower -- warmer and moister -- which cancelled
+    // a warm-dry bias introduced elsewhere and produced a 32x precipitation gain.
+    // That gain was a real measurement of a compensating error, not a fix: with
+    // the shift applied, T at 3130 m went from 272.01 K (correct, 272.04 in ERA5)
+    // to 273.86 K, and qv from 0.00264 to 0.00341, i.e. +29%. It made correct
+    // fields wrong.
     //
-    //   from pressure: the frame is 35 hPa low at a level where
-    //                  dp/dz = -rho*g = -11.3 Pa/m  ->  3500/11.3 = 310 m
-    //   from theta:    the frame is +1.53 K warm in theta against a ~5 K/km
-    //                  gradient                     ->  1530/5    = 306 m
-    //
-    // So a value labelled z actually belongs at z + offset, and the correction
-    // is to relabel the levels upward. This is applied to zvec ONLY -- the field
-    // values are untouched -- so every consumer of the frame is corrected at
-    // once: the interior initialization, the boundary planes, the relaxation
-    // target, and the height the near-surface blend spans.
-    //
-    // Consequences worth stating, because they are the reasons to prefer this
-    // over patching each symptom:
-    //   * removes the ~1.5 K theta residual at every level, not just near the
-    //     ground (item 5 called it "worth ~1.5 K" and expected it to survive the
-    //     ERF-side fix -- it need not).
-    //   * removes the ~35 hPa pressure error, which is why the frame could not
-    //     be used to anchor surface pressure in item 19.
-    //   * makes the 2-m blend span the true depth. Item 19a measured it 2.96x
-    //     too steep precisely because it ran to the LABELLED 155 m rather than
-    //     the true ~455 m; with the offset applied that is automatic.
-    //
-    // Default 0 (off) so every other case is untouched. The value is an input
-    // rather than a constant because it is a property of the erftools build that
-    // produced the frames, not of ERF.
+    // The pressure error is handled where it belongs, in frame_from_T() below.
     // ------------------------------------------------------------------
-    {
-        static const Real l_zoff = [] {
-            Real v = Real(0.0); amrex::ParmParse pp("erf");
-            pp.query("hindcast_frame_z_offset", v); return v; }();
-        if (l_zoff != Real(0.0)) {
-            for (auto& z : zvec_h) { z += l_zoff; }
-            static bool announced = false;
-            if (!announced) {
-                announced = true;
-                Print() << "HindCast frames: applied erf.hindcast_frame_z_offset = " << l_zoff
-                        << " m to the frame level heights (erftools displacement). Lowest level "
-                        << "with data now z = " << zvec_h[0] << " m, top z = " << zvec_h.back()
-                        << " m." << std::endl;
-            }
-        }
-    }
 
     s_frame_zlow = zvec_h[0];
 
@@ -533,43 +515,115 @@ ERF::FillForecastStateMultiFabs(const int lev,
         });
     }
 
-    // Blend the frame's near-surface theta toward the ERA5 2-m air temperature, so
-    // that the interior initialization and the lateral relaxation target are the
-    // same field. See blend_bdy_theta() for why the un-blended frame is wrong here:
-    // below the lowest frame level with data it is a clamped, vertically uniform
-    // value, and it is what the Davies band relaxes toward.
-    if (blend_bdy_theta() &&
+    // ------------------------------------------------------------------
+    // Rebuild the frame's theta and rho from its TEMPERATURE.
+    //
+    // The audit (item 21) measures the frame's T, qv, u and v as correct at the
+    // labelled height -- T to within 0.03 K at every level -- while its theta is
+    // +1.6 K and its rho -1.9% wrong. Both of those follow from one cause: the
+    // (rho, theta) pair erftools stores implies a pressure ~18 hPa too low.
+    //
+    //     theta = T (p0/p)^kappa      p 1.914% low -> theta +1.57 K
+    //     rho   = p /(R_d T (1+..))   p 1.914% low -> rho   -1.914%
+    //
+    // T is therefore EXACTLY recoverable from the pair: the same wrong p that
+    // corrupted both cancels in T = p(rho,theta)/(R_d rho (1+..)), which is what
+    // getTgivenRandRTh computes. No new data is needed.
+    //
+    // So: recover T, integrate pressure hydrostatically from ERA5's surface
+    // pressure, and derive a consistent theta and rho. That DROPS the erftools
+    // pressure error instead of cancelling it against another one -- which is
+    // what the previous two attempts did. Item 19 paired the frame's (wrong)
+    // theta with a correct surface pressure and so converted the pressure error
+    // into +1.7 to +2.2 K of warming; item 19f then cancelled that warming by
+    // shifting the levels 305 m, which made T and qv wrong where they had been
+    // right. Both are retracted.
+    //
+    // Applied HERE, to the frame itself, so the initial condition, the boundary
+    // planes and the relaxation target all consume the same corrected field.
+    // Fixing only one of them is item 19e's defect over again.
+    //
+    // The near-surface anchor is folded in as a blend on T rather than on theta,
+    // because t2m is a temperature; blending theta against a pressure that is
+    // itself being solved for is what made the earlier version hard to reason
+    // about.
+    // ------------------------------------------------------------------
+    if (frame_from_T() &&
         ensure_sfc_anchor(geom[lev].Domain().length(0), geom[lev].Domain().length(1)))
     {
-        const Real  rdOcp  = solverChoice.rdOcp;
-        const Real  z_low  = s_frame_zlow;
-        const Real* sp_p   = s_sp_d.data();
-        const Real* t2_p   = s_t2_d.data();
-        const int   nxd    = geom[lev].Domain().length(0);
-        const int   dlo_z  = geom[lev].Domain().smallEnd(2);
-        const auto  dom    = geom[lev].Domain();
+        const Real  rdOcp   = solverChoice.rdOcp;
+        const Real  l_grav  = solverChoice.gravity;
+        const Real  z_low   = s_frame_zlow;
+        const Real* sp_p    = s_sp_d.data();
+        const Real* zo_p    = s_zo_d.data();
+        const Real* t2_p    = s_t2_d.data();
+        const auto  dom     = geom[lev].Domain();
+        const int   nxd     = dom.length(0);
+        const int   do_blend = blend_bdy_theta() ? 1 : 0;
 
         for (MFIter mfi(erf_mf_cons); mfi.isValid(); ++mfi) {
-            const Box& gbx = mfi.growntilebox();
+            const Box  gbx  = mfi.growntilebox();
+            const int  klo  = gbx.smallEnd(2);
+            const int  khi  = gbx.bigEnd(2);
+            const Box  b2d  = makeSlab(gbx, 2, klo);
             const auto z_arr = (a_z_phys_nd) ? a_z_phys_nd->const_array(mfi) : Array4<const Real>{};
             const Array4<Real>& c_arr = erf_mf_cons.array(mfi);
-            ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            const int ncomp_c = erf_mf_cons.nComp();
+
+            ParallelFor(b2d, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
             {
                 // The anchor is defined on valid domain columns only; clamp so the
-                // ghost ring uses its nearest interior column rather than reading
-                // out of bounds.
+                // ghost ring uses its nearest interior column.
                 const int ic = amrex::min(amrex::max(i, dom.smallEnd(0)), dom.bigEnd(0));
                 const int jc = amrex::min(amrex::max(j, dom.smallEnd(1)), dom.bigEnd(1));
                 const Long n2 = Long(jc)*Long(nxd) + Long(ic);
+                const Real p_orog = sp_p[n2];
+                const Real z_orog = zo_p[n2];
+                const Real t2m    = t2_p[n2];
 
-                const Real th_sfc = getThgivenTandP(t2_p[n2], sp_p[n2], rdOcp);
-                // Same height convention this routine already samples the frame with
-                const Real z_c    = (z_arr(i,j,k)     + z_arr(i,j,k+1))     / two;
-                const Real z_base = (z_arr(i,j,dlo_z) + z_arr(i,j,dlo_z+1)) / two;
+                const Real z_base = (z_arr(i,j,klo) + z_arr(i,j,klo+1)) / two;
 
-                Real w = (z_low > z_base) ? (z_c - z_base)/(z_low - z_base) : Real(1.0);
-                w = amrex::min(amrex::max(w, Real(0.0)), Real(1.0));
-                c_arr(i,j,k,RhoTheta_comp) = th_sfc + (c_arr(i,j,k,RhoTheta_comp) - th_sfc)*w;
+                Real p_prev = p_orog;
+                Real r_prev = getRhogivenTandPress(t2m, p_orog, Real(0.0));
+                Real z_prev = z_orog;
+
+                // Start at the domain floor, NOT at the box's ghost k. Below-ground
+                // ghost cells have z < 0, where bilinear_interpolation returns 0 by
+                // design; recovering T from rho = 0 divides by zero and the NaN then
+                // propagates up the whole column through the recursion.
+                for (int k = amrex::max(klo, dom.smallEnd(2)); k <= khi; ++k)
+                {
+                    const Real qv_k = (ncomp_c > RhoQ1_comp) ? c_arr(i,j,k,RhoQ1_comp) : Real(0.0);
+
+                    // T recovered from the frame's own (rho, theta): the erftools
+                    // pressure error cancels exactly in this combination.
+                    const Real r_in = c_arr(i,j,k,Rho_comp);
+                    if (!(r_in > Real(0.0))) { continue; }   // unfilled//below-ground cell
+                    Real T_k = getTgivenRandRTh(r_in, r_in*c_arr(i,j,k,RhoTheta_comp), qv_k);
+
+                    if (do_blend) {
+                        const Real z_c = (z_arr(i,j,k) + z_arr(i,j,k+1)) / two;
+                        Real w = (z_low > z_base) ? (z_c - z_base)/(z_low - z_base) : Real(1.0);
+                        w = amrex::min(amrex::max(w, Real(0.0)), Real(1.0));
+                        T_k = t2m + (T_k - t2m)*w;
+                    }
+
+                    // p(k) = p(k-1) - dz*g*(rho(k)+rho(k-1))/2 with rho = p/(R_d T_v).
+                    // T is fixed here, so rho is LINEAR in p and this inverts in closed
+                    // form -- no fixed point needed, unlike the theta-based version.
+                    const Real dz_loc = (z_arr(i,j,k) + z_arr(i,j,k+1))/two - z_prev;
+                    const Real cinv   = Real(1.0) /
+                        (R_d * T_k * (Real(1.0) + (R_v/R_d)*qv_k));
+                    const Real p_k = (p_prev - myhalf*dz_loc*l_grav*r_prev) /
+                                     (Real(1.0) + myhalf*dz_loc*l_grav*cinv);
+                    const Real r_k = p_k * cinv;
+
+                    c_arr(i,j,k,Rho_comp)      = r_k;
+                    c_arr(i,j,k,RhoTheta_comp) = getThgivenTandP(T_k, p_k, rdOcp);
+
+                    p_prev = p_k; r_prev = r_k;
+                    z_prev = (z_arr(i,j,k) + z_arr(i,j,k+1))/two;
+                }
             });
         }
     }
