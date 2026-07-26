@@ -451,8 +451,19 @@ ERF::SurfaceDataInterpolation(const int lev,
             // from the truth this month and would be several K out in summer, silently
             // -- fill them from valid neighbours. The clean field spans 13.1-15.7 C
             // with std 0.67 K, so neighbours are good estimates.
-            MultiFab sf(surface_state_interp[lev].boxArray(),
-                        surface_state_interp[lev].DistributionMap(), 2, 1);
+            // Scratch allocated ONCE and reused. Allocating these per call -- and
+            // worse, allocating `nxt` inside the 12-sweep loop -- meant 12 GPU
+            // MultiFab allocations every timestep, which segfaulted a 24-h run at
+            // ~27.5k steps (SIGSEGV, no NaN, no assert).
+            static std::unique_ptr<MultiFab> s_sf, s_nxt;
+            if (!s_sf || !s_sf->boxArray().CellEqual(surface_state_interp[lev].boxArray())) {
+                s_sf  = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
+                                                   surface_state_interp[lev].DistributionMap(), 2, 1);
+                s_nxt = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
+                                                   surface_state_interp[lev].DistributionMap(), 2, 1);
+            }
+            MultiFab& sf  = *s_sf;
+            MultiFab& nxt = *s_nxt;
             sf.setVal(0.0);
             for (MFIter mfi(sf); mfi.isValid(); ++mfi) {
                 const Box& bx = mfi.growntilebox();
@@ -470,7 +481,6 @@ ERF::SurfaceDataInterpolation(const int lev,
             // cell, so 12 sweeps reach 12 cells inland from any valid water point.
             for (int it = 0; it < 12; ++it) {
                 sf.FillBoundary(geom[lev].periodicity());
-                MultiFab nxt(sf.boxArray(), sf.DistributionMap(), 2, 1);
                 MultiFab::Copy(nxt, sf, 0, 0, 2, 1);
                 for (MFIter mfi(sf); mfi.isValid(); ++mfi) {
                     const Box& bx = mfi.tilebox();
