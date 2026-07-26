@@ -1576,3 +1576,38 @@ fixed by the same change if they are ever wired.
 
 24-h runs were NOT launched on this binary -- with 60 C water reaching the surface
 closure over ~20% of the ocean they would not have been interpretable.
+
+### Masked SST interpolation: fabricated values eliminated
+
+`FillSurfaceStateMultiFabs` now interpolates SST with a masked bilinear stencil --
+accumulating only source points that are BOTH water (ls_mask < 0.5) AND in physical
+range (271-305 K), renormalising the weights. Both criteria are needed: a land-masked
+point can still carry a fill, and a water point can still be smeared in the source.
+Stencils with no valid source are FLAGGED (-1) rather than given a fabricated value,
+and the nearest-valid fill handles them. The downstream guard is unified to 271-305 K
+and is now a backstop that should never fire.
+
+Source audit (logged once at startup, so generator defects are separable from ours):
+
+    HindCast SST source frame: 423 water points, 44 of them outside 271-305 K
+    (generator smear); 237 land points carrying fills
+
+Result:
+
+| | before (raw bilinear) | after (masked) |
+|---|---|---|
+| filled cells | n=1204, mean **25.09** C, max **62.41** C | n=478, mean **14.74** C, max **15.27** C |
+| original cells | n=5832, mean 14.50 C, max **62.41** C | n=6565, mean 14.41 C, max **15.38** C |
+| cells needing fill | 1211 (~20% of ocean) | 478 (~6.8%) |
+| cells left unfilled | 7 | **0** |
+| anything outside 271-305 K | yes | **none** |
+
+Whole-field max is now 15.38 C = 288.5 K, against a true clean frame range of
+13.1-15.7 C. No value anywhere in the field is outside the physical band, so the
+guard never fires.
+
+Note the fill count DROPPED below the source contamination rate (6.8% of ERF water
+cells vs 10.4% of frame water points): masked interpolation recovers any cell whose
+stencil retains at least one valid neighbour, so it both stops fabricating values and
+shrinks the genuine gaps. This is a two-stage design -- masked interpolation creates
+no bad values, nearest-valid fill covers real gaps, guard is a backstop.

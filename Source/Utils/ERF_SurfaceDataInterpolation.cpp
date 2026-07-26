@@ -102,6 +102,25 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
 
     infile.close();
 
+    // Audit the SOURCE array before it is interpolated, so we can separate what the
+    // generator wrote from what our own interpolation creates.
+    {
+        int n_water = 0, n_bad_water = 0, n_bad_land = 0;
+        for (size_t m = 0; m < sst_h.size(); ++m) {
+            const bool water = (m < ls_mask_h.size()) && (ls_mask_h[m] < Real(0.5));
+            const bool bad   = !(sst_h[m] > Real(271.0) && sst_h[m] < Real(305.0));
+            if (water) { ++n_water; if (bad) ++n_bad_water; }
+            else if (bad) { ++n_bad_land; }
+        }
+        static bool src_reported = false;
+        if (!src_reported) {
+            src_reported = true;
+            Print() << "HindCast SST source frame: " << n_water << " water points, "
+                    << n_bad_water << " of them outside 271-305 K (generator smear); "
+                    << n_bad_land << " land points carrying fills" << std::endl;
+        }
+    }
+
     amrex::Gpu::DeviceVector<Real> ls_mask_d(nx*ny*nz), sst_d(nx*ny*nz);
 
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, ls_mask_h.begin(), ls_mask_h.end(), ls_mask_d.begin());
@@ -149,11 +168,39 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
                                       x, y,
                                       ls_mask_d_ptr, tmp_ls_mask);
 
-            bilinear_interpolation_2d(xvec_d_ptr, yvec_d_ptr,
-                                      dxvec, dyvec,
-                                      nx, ny,
-                                      x, y,
-                                      sst_d_ptr, tmp_sst);
+            // MASKED bilinear for SST. The raw call blends across the coastline into
+            // 9999 land fills, and on the finer ERF mesh that produces a continuum of
+            // intermediate values -- including ones that look physical (measured:
+            // 62.4 C passing a 200-340 K guard). Accumulate only source points that
+            // are BOTH water AND in physical range, renormalising the weights, so no
+            // contaminated value is ever constructed. A land-masked point can still
+            // carry a fill, and a water point can still be smeared in the source, so
+            // both criteria are required.
+            //
+            // Cells whose stencil contains no valid source are flagged (-1) rather
+            // than given a fabricated value; the nearest-valid fill downstream is what
+            // handles those, which is what it is for.
+            {
+                const Real fi = (x - xvec_d_ptr[0]) / dxvec;
+                const Real fj = (y - yvec_d_ptr[0]) / dyvec;
+                int i0 = static_cast<int>(std::floor(fi));
+                int j0 = static_cast<int>(std::floor(fj));
+                const Real wx = fi - static_cast<Real>(i0);
+                const Real wy = fj - static_cast<Real>(j0);
+                Real num = Real(0.0), den = Real(0.0);
+                for (int dj = 0; dj < 2; ++dj) {
+                for (int di = 0; di < 2; ++di) {
+                    const int ii = amrex::min(amrex::max(i0+di, 0), nx-1);
+                    const int jj = amrex::min(amrex::max(j0+dj, 0), ny-1);
+                    const Real sv = sst_d_ptr    [jj*nx + ii];
+                    const Real lv = ls_mask_d_ptr[jj*nx + ii];
+                    if (lv < Real(0.5) && sv > Real(271.0) && sv < Real(305.0)) {
+                        const Real w = (di ? wx : Real(1.0)-wx) * (dj ? wy : Real(1.0)-wy);
+                        num += w*sv; den += w;
+                    }
+                }}
+                tmp_sst = (den > Real(1.0e-8)) ? num/den : Real(-1.0);
+            }
 
             surf_arr(i, j, k, 0) = std::min(tmp_ls_mask, amrex::Real(1.0));
             surf_arr(i, j, k, 1) = tmp_sst;
@@ -414,7 +461,7 @@ ERF::SurfaceDataInterpolation(const int lev,
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
                     Real lsm = ss(i,j,0,0), sst = ss(i,j,0,1);
-                    bool ok  = (lsm < Real(0.5)) && (sst > Real(200.0)) && (sst < Real(340.0));
+                    bool ok  = (lsm < Real(0.5)) && (sst > Real(271.0)) && (sst < Real(305.0));
                     a(i,j,k,0) = ok ? sst : Real(0.0);
                     a(i,j,k,1) = ok ? Real(1.0) : Real(0.0);
                 });
@@ -467,7 +514,7 @@ ERF::SurfaceDataInterpolation(const int lev,
                 const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
                 rop2.eval(bx, rdat2, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT2 {
                     bool wat = ss(i,j,0,0) < Real(0.5);
-                    bool raw = wat && ss(i,j,0,1) > Real(200.0) && ss(i,j,0,1) < Real(340.0);
+                    bool raw = wat && ss(i,j,0,1) > Real(271.0) && ss(i,j,0,1) < Real(305.0);
                     bool fil = wat && !raw && a(i,j,k,1) > Real(0.5);
                     Real v = fil ? a(i,j,k,0) : Real(0.0);
                     return {v, fil?Real(1.0):Real(0.0),
@@ -475,7 +522,7 @@ ERF::SurfaceDataInterpolation(const int lev,
                 });
                 rop3.eval(bx, rdat3, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT3 {
                     bool wat = ss(i,j,0,0) < Real(0.5);
-                    bool raw = wat && ss(i,j,0,1) > Real(200.0) && ss(i,j,0,1) < Real(340.0);
+                    bool raw = wat && ss(i,j,0,1) > Real(271.0) && ss(i,j,0,1) < Real(305.0);
                     Real v = raw ? ss(i,j,0,1) : Real(0.0);
                     return {v, raw?Real(1.0):Real(0.0),
                             raw?ss(i,j,0,1):Real(1.0e30), raw?ss(i,j,0,1):Real(-1.0e30)};
@@ -497,8 +544,8 @@ ERF::SurfaceDataInterpolation(const int lev,
                 reduce_op.eval(bx, reduce_data, [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
                 {
                     Real water = (ss(i,j,0,0) < Real(0.5)) ? Real(1.0) : Real(0.0);
-                    Real raw   = (water > Real(0.0) && ss(i,j,0,1) > Real(200.0)
-                                                    && ss(i,j,0,1) < Real(340.0)) ? Real(1.0) : Real(0.0);
+                    Real raw   = (water > Real(0.0) && ss(i,j,0,1) > Real(271.0)
+                                                    && ss(i,j,0,1) < Real(305.0)) ? Real(1.0) : Real(0.0);
                     Real unfilled = (water > Real(0.0) && a(i,j,k,1) < Real(0.5)) ? Real(1.0) : Real(0.0);
                     return {water - raw, unfilled};
                 });
