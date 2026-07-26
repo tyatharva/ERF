@@ -1611,3 +1611,44 @@ cells vs 10.4% of frame water points): masked interpolation recovers any cell wh
 stencil retains at least one valid neighbour, so it both stops fabricating values and
 shrinks the genuine gaps. This is a two-stage design -- masked interpolation creates
 no bad values, nearest-valid fill covers real gaps, guard is a backstop.
+
+### Tangential-only band relaxation: FAILS, and explains why no local fix exists
+
+Dropping the wall-normal momentum from the band relaxation (keeping tangential/w/
+theta/qv, normal momentum still specified at the wall face) does eliminate
+grad(F).(A-B) at straight faces by construction. It also destroys the run.
+
+Inflow-wall 24-h precipitation (mm), corner cells excluded:
+
+| d | TANGENTIAL xlo/ylo | Davies xlo/ylo | NSCBC xlo/ylo |
+|---|---|---|---|
+| 0 | **3137.7 / 864.4** | 153.6 / 33.6 | 1.5 / 0.1 |
+| 1 | **3859.1 / 1314.0** | 183.0 / 56.4 | 3.8 / 0.2 |
+| 2 | **3199.9 / 1175.2** | 143.0 / 49.7 | 5.1 / 0.5 |
+| 8 | 684.2 / 227.1 | 8.8 / 3.1 | 7.4 / 1.8 |
+| 20 | 135.0 / 18.2 | 0.5 / 0.7 | 10.8 / 10.4 |
+
+Skill vs MRMS, land d>=3 (obs 8.36 mm): bias **+546.88**, RMSE **974.82**,
+ratio **66.40x** (Davies 4.05x). Corners 1687 mm against Davies' 54.7. Mass drift
+-3.222 %/day whole / -2.237 settled, against Davies +2.315 / +0.697.
+
+The pass condition asked for the 140/172/138 mm inflow-wall signal to COLLAPSE. It
+went up 20x. Answering the second watch item -- "is the domain still adequately
+forced?" -- emphatically no.
+
+**Why: the artifact and the forcing are the same term.** Normal momentum relaxation
+is not merely the thing that generates grad(F).(A-B); over a 10-cell band it is what
+holds the inflow mass flux consistent. Specifying it at the single wall face leaves
+it unconstrained across the remaining nine cells, so with 10-12 m/s inflow the normal
+velocity drifts freely, converges, and rains out.
+
+This is the SAME result the Helmholtz kill condition gave from the other direction:
+||C_proj||/||C_raw|| = 0.376, i.e. 86% of the relaxation forcing is the curl-free
+(normal/divergent) part. Removing the divergent part removes the nudging -- measured
+there as a norm, measured here as a 66x wet bias. Two independent methods, same
+conclusion: **grad(F).(A-B) cannot be separated from the forcing by any local
+operation on the relaxed variable set.**
+
+Note the fallbacks do NOT share this defect: an exponential ramp profile (Marbaix)
+and diffusive relaxation (TRAM/Tatsumi) both RETAIN normal-momentum relaxation and
+only change the ramp shape or the operator. They remain untested and cheap.
