@@ -70,6 +70,21 @@ inline int nscbc_keep_ramp ()
 }
 
 /*
+ * erf.realbdy_tangential_only (default 0): drop the WALL-NORMAL momentum from the
+ * Davies band relaxation, keeping tangential/w/theta/qv. grad(F) is wall-normal, so
+ * only the normal momentum error generates the grad(F).(A-B) artifact; removing it
+ * kills the term identically at straight faces while leaving the relaxation that
+ * carries the forecast skill intact. Normal momentum stays SPECIFIED at the wall face.
+ */
+inline int realbdy_tangential_only ()
+{
+    static const int s_v = [] {
+        int v = 0; amrex::ParmParse pp("erf"); pp.query("realbdy_tangential_only", v); return v;
+    }();
+    return s_v;
+}
+
+/*
  * Create a new BoxArray in which every grid touches the bottom boundary
  */
 void ChopGrids2D (amrex::BoxArray& ba, const amrex::Box& domain, int target_size);

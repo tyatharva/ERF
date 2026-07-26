@@ -701,9 +701,35 @@ realbdy_compute_interior_ghost_rhs (const Real& time,
                 continue;
             }
 
+            // TANGENTIAL-ONLY band relaxation (erf.realbdy_tangential_only).
+            //
+            // The artifact is grad(F).(A-B), and grad(F) is WALL-NORMAL: F ramps only
+            // with distance from the face. So only the WALL-NORMAL momentum error
+            // projects onto it -- for the tangential components, w, theta and every
+            // scalar, grad(F) is orthogonal to the direction the error acts in and the
+            // term vanishes identically at a straight face.
+            //
+            // So drop the normal momentum from the band relaxation and keep everything
+            // else: u is skipped on the x walls, v on the y walls. The normal momentum
+            // is still SPECIFIED at the wall face itself (set_width = 1, driver
+            // Dirichlet in fill_from_realbdy), so the mass flux through the boundary is
+            // unchanged -- only the interior ramp on it is removed.
+            //
+            // CORNERS are the exception and are not fixed by this: there F varies in
+            // BOTH directions, so grad(F) is not aligned with either axis and the term
+            // survives. realbdy_interior_bxs_xy gives the corner cells to the x-face
+            // boxes, so a corner cell has u dropped (correct for the x wall it touches,
+            // conservative for the y wall where u is tangential) and v retained.
+            Box rlx_xlo = tbx_xlo, rlx_xhi = tbx_xhi;
+            Box rlx_ylo = tbx_ylo, rlx_yhi = tbx_yhi;
+            if (realbdy_tangential_only()) {
+                if (ivar == ivarU) { rlx_xlo = Box(); rlx_xhi = Box(); }  // u normal at x walls
+                if (ivar == ivarV) { rlx_ylo = Box(); rlx_yhi = Box(); }  // v normal at y walls
+            }
+
             realbdy_compute_relaxation(icomp, 1,
                                        width, dx, ProbLo, ProbHi, F1,
-                                       tbx_xlo , tbx_xhi , tbx_ylo , tbx_yhi ,
+                                       rlx_xlo , rlx_xhi , rlx_ylo , rlx_yhi ,
                                        arr_xlo , arr_xhi , arr_ylo , arr_yhi ,
                                        data_arr, rhs_arr);
         } // mfi
