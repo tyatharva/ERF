@@ -1311,3 +1311,60 @@ concentrations Morrison wants. That is a data-regeneration job, not a plumbing j
 ### Filed upstream
 
 The clipped-final-step `rain_accum` NaN is filed as erf-model/ERF#3491.
+
+### Observational verification: the interior wet bias is real
+
+**The Stage IV file does not appear to be the 24-h field.** Three independent
+signs: (a) its CF `time` variable says 2023-01-10 00:00 UTC but its `data_time`
+global attribute says 12:00; (b) against MRMS on 0.25 deg SoCal boxes it correlates
+at **r = 0.879** -- same storm, same spatial pattern -- but runs **2.87x larger in
+the median**; (c) its CONUS max is 651 mm (25.63 in) against MRMS's 240.6 mm. Good
+spatial correlation with a ~3x magnitude offset is the signature of a LONGER
+accumulation window over the same event, and the file carries PRISM `normal` /
+`departure_from_normal` / `percent_of_normal`, i.e. it is the AHPS observed-precip
+product which is served for 1/3/7/14/30-day windows. January 2023 was a sequence of
+atmospheric rivers, so a multi-day total would be ~3x the daily one.
+
+MRMS's metadata is self-consistent (validityDate 20230110, validityTime 0, 24 h
+ending 2023-01-10 00Z = exactly the run window), so **MRMS is used as the reference
+and Stage IV is set aside** -- not by preference but because its window cannot be
+confirmed and the evidence says it differs.
+
+Common grid = the ERA5 0.25 deg boxes (coarsest of the four, and the only grid on
+which ERA5 needs no interpolation). Aggregation is area-weighted/conservative, not
+bilinear. Land mask = ERF terrain > 30 m in >= 50% of the box (ocean is exactly
+12 m in the terrain file); radar QPE is not scored over water, and MRMS Pass 2 is
+gap-filled so its ocean values are not observations.
+
+Land boxes, n = 20:
+
+| field | mean | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| MRMS | 9.1 | 1.8 | 26.3 | 48.1 | 50.8 |
+| ERA5 | 12.9 | 7.5 | 35.2 | 46.0 | 47.5 |
+| ERF NSCBC | 108.5 | 72.3 | 265.9 | 291.1 | 295.9 |
+| ERF Davies | 56.0 | 50.4 | 90.2 | 99.5 | 100.5 |
+
+    vs MRMS:  ERA5 1.35x   NSCBC 8.06x   Davies 3.65x
+
+**ERA5 is not 4x low against observations -- it is 1.35x HIGH.** So the interior
+ratio against ERA5 is not an artefact of ERA5 under-resolution: the model has a
+genuine wet bias, and NSCBC's is larger than Davies'.
+
+Caveats, all material: only 20 land boxes survive the mask, and they sit on the
+mainland fringe at the north/east edges -- spatially biased toward both orography
+and the outflow boundary where NSCBC carries its orographic signal. MRMS p50 over
+them is only 1.8 mm, and coastal SoCal radar coverage is imperfect.
+
+**Terrain stratification of the ERA5 ratio (ERF grid, d >= 20):**
+
+| terrain | n | NSCBC | Davies | ERA5 | NSCBC/ERA5 |
+|---|---|---|---|---|---|
+| flat < 100 m | 2084 | 22.11 | 13.14 | 8.50 | **2.60x** |
+| 100-400 m | 28 | 72.34 | 49.24 | 20.59 | **3.51x** |
+
+The excess is **not terrain-only**: flat-water precipitation is 2.60x ERA5, which
+by the stated criterion is a genuine bias rather than a resolution artefact.
+Orography amplifies it to 3.51x but does not create it. (These are lower than the
+earlier 7.18x because that used the d >= 20 ERA5 subset of only 22 boxes, which is
+drier than the ERA5 cells actually overlying the flat interior.)
