@@ -1368,3 +1368,71 @@ by the stated criterion is a genuine bias rather than a resolution artefact.
 Orography amplifies it to 3.51x but does not create it. (These are lower than the
 earlier 7.18x because that used the d >= 20 ERA5 subset of only 22 boxes, which is
 drier than the ERA5 cells actually overlying the flat interior.)
+
+### Root cause of the wet bias: hardcoded tropical surface fluxes
+
+`ApplySurfaceTreatment_BulkCoeff_CC` (ERF_ApplySurfaceTreatment_BulkCoeff.cpp:88-93),
+active whenever `init_type = HindCast && hindcast_surface_bcs` (MakeSources.cpp:438):
+
+    Real Ch = 0.0015*(1-ls_mask);  Real Ce = 0.0015*(1-ls_mask);
+    Real dT = max(0, 301.0 - temp);        // 301 K = 28 C
+    Real dq = max(0, 0.024  - qv);         // 0.024 kg/kg
+    cell_rhs(RhoQ1_comp) += rho*Ce*velmag*dq/dz;
+
+`surface_state_arr` is consulted ONLY as a land/sea mask. The ERA5 SST is never
+used in the flux -- both driving values are hardcoded tropical constants.
+
+Measured at hour 6 over ocean cells (k=0): T = 294.7 K (21.6 C), qv = 0.01698
+kg/kg, |U| = 9.1 m/s, rho = 1.12. q_sat at that temperature is **0.01621 kg/kg**,
+so the near-surface air is ALREADY SUPERSATURATED with respect to its own
+temperature and physical evaporation should be zero or negative.
+
+| target | dq | E |
+|---|---|---|
+| hardcoded 0.024 | +0.00702 | **9.2 mm/day** |
+| q_sat at model T | -0.00077 | 0 (clamped) |
+
+So the term injects ~9 mm/day of moisture into already-saturated air. The
+companion heat term drives temperature toward 301 K against an actual 294.7 K,
+adding 6.3 K of spurious sensible heating, which raises q_sat and lets the column
+hold the spurious moisture until it rains out -- a closed positive feedback.
+
+Of the four candidate terms: **q_sat carries it, and it is a hardcoded constant
+rather than a closure**. C_q = 1.5e-3 against a typical ocean 1.2e-3 is only 25%
+high; |U| = 9.1 m/s is reasonable; and q_air is not too dry (the MYNN
+under-mixing hypothesis has the wrong sign -- the surface air is too MOIST).
+
+This is independent of all the boundary-condition work and affects every HindCast
+run with `hindcast_surface_bcs = true`.
+
+### Jan-9 is the wrong validation case for this domain
+
+Domain corners (lon, lat): SW (-121.326, 32.468), SE (-117.240, 32.469),
+NW (-121.368, 34.199), NE (-117.200, 34.200). **North edge is 34.20 N.**
+
+**The Santa Ynez Mountains (34.50 N) are OUTSIDE the domain**, 10 cells (~30 km)
+north of the north boundary. MRMS there is 165.9 mm -- the storm's maximum, and
+the source of the "~130 mm observed" reference used earlier, fell outside the
+domain entirely. That comparison was never valid here.
+
+Point verification against MRMS (24-h, mm):
+
+| point | MRMS | NSCBC | Davies |
+|---|---|---|---|
+| Santa Catalina Is | **0.0** | **115.7** | 123.2 |
+| San Clemente Is | **0.0** | **283.6** | 69.6 |
+| San Nicolas Is | **0.0** | 51.3 | 12.5 |
+| Santa Cruz Is | 63.9 | 102.5 | 252.3 |
+| LA / Santa Monica | 15.1 | 66.9 | 125.9 |
+| Long Beach | 0.3 | 31.9 | 56.8 |
+| Oxnard coast | 34.4 | 44.0 | 126.4 |
+
+**Direct falsification, no regridding or ratio required: the model produces
+116-284 mm of 24-h rain at three island sites where essentially nothing fell.**
+(Offshore MRMS coverage is imperfect, but Catalina is within LA-area radar range
+and is independently reported as near-zero.)
+
+So Jan-9 samples the EDGE of the event, not its core: the maximum is north of the
+domain, and in-domain observations run 0-64 mm. That makes it an excellent
+falsification case and a poor skill case. The earlier "20 land boxes" were
+sampling the LA/Santa Ana fringe, which is why MRMS maxed at 50.8 mm there.
