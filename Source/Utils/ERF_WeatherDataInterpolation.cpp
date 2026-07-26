@@ -8,7 +8,12 @@
 
 #include <filesystem>
 #include <stdexcept>
+#include <fstream>
+#include <cstdint>
+#include <vector>
+#include <limits>
 #include "ERF.H"
+#include "ERF_EOS.H"
 #include "ERF_ReadCustomBinaryIC.H"
 #include "ERF_Interpolation_Bilinear.H"
 
@@ -16,6 +21,14 @@ using namespace amrex;
 namespace fs = std::filesystem;
 
 enum class MultiFabType { CC, NC };
+
+/**
+ * Height (m) of the lowest frame level that carries independent data, set by
+ * FillForecastStateMultiFabs and consumed by init_thermo_from_hindcast, which
+ * blends from the ERA5 2-m anchor up to it. Negative until the first frame is
+ * read.
+ */
+static amrex::Real s_frame_zlow = amrex::Real(-1.0);
 
 void PlotMultiFab(const MultiFab& mf,
                   const Geometry& geom_mf,
@@ -74,6 +87,57 @@ ERF::FillForecastStateMultiFabs(const int lev,
                        xvec_h, yvec_h, zvec_h, rho_h,
                        uvel_h, vvel_h, wvel_h,
                        theta_h, qv_h, qc_h, qr_h);
+
+    // ------------------------------------------------------------------
+    // Drop the fabricated bottom level.
+    //
+    // erftools emits a surface level (z = 0) whose data is a BYTE-IDENTICAL
+    // copy of the level above it (z = 155.07 m for the Channel Islands case):
+    // measured maxdiff = 0.000e+00 in all eight fields -- rho, uvel, vvel,
+    // wvel, theta, qv, qc, qr. It is the same source level written twice under
+    // two different heights, and it carries no independent information; it is
+    // the same class of error as erftools' ~300 m constant downward
+    // displacement of the levels that DO carry data.
+    //
+    // Removing it is numerically a no-op for the interpolation itself:
+    // bilinear_interpolation clamps z below zvec[0], so cells under 155 m
+    // received the level-1 value either way. What it changes is that nothing
+    // downstream can mistake the duplicate for a surface observation. In
+    // particular init_thermo_from_hindcast needs the height of the lowest
+    // level that actually carries data, so it can anchor the layer beneath it
+    // on ERA5 t2m rather than extend a fabricated value to the ground.
+    //
+    // The test is exact equality over every field, so a frame without the bug
+    // (or with a genuinely distinct surface level) is left untouched.
+    // ------------------------------------------------------------------
+    if (zvec_h.size() >= 2 && zvec_h[0] < zvec_h[1])
+    {
+        const Long nxy = Long(xvec_h.size()) * Long(yvec_h.size());
+        Vector<Vector<Real>*> flds = {&rho_h, &uvel_h, &vvel_h, &wvel_h,
+                                      &theta_h, &qv_h, &qc_h, &qr_h};
+        bool dup = true;
+        for (auto* f : flds) {
+            if (Long(f->size()) < 2*nxy) { dup = false; break; }
+            for (Long n = 0; n < nxy; ++n) {
+                if ((*f)[n] != (*f)[nxy+n]) { dup = false; break; }
+            }
+            if (!dup) { break; }
+        }
+        if (dup) {
+            for (auto* f : flds) { f->erase(f->begin(), f->begin()+nxy); }
+            const Real z_dropped = zvec_h[0];
+            zvec_h.erase(zvec_h.begin());
+            static bool announced = false;
+            if (!announced) {
+                announced = true;
+                Print() << "HindCast frames: dropped the bottom level at z = " << z_dropped
+                        << " m -- byte-identical to the level at z = " << zvec_h[0]
+                        << " m in all 8 fields (erftools duplicate). Lowest level with "
+                        << "independent data is now z = " << zvec_h[0] << " m." << std::endl;
+            }
+        }
+    }
+    s_frame_zlow = zvec_h[0];
 
     Real zmax = *std::max_element(zvec_h.begin(), zvec_h.end());
 
@@ -537,6 +601,68 @@ ERF::fill_bdy_data_from_hindcast ()
 #endif
 
 /**
+ * Read the ERA5 surface anchor -- surface pressure, the height that pressure is
+ * valid at, and the 2-m air temperature -- on the level-0 cell-centre grid.
+ * Written by precip_check/make_sfc_anchor.py; see that file for the format.
+ *
+ * Returns false (and says why) if the file is absent, has the wrong header, or
+ * is short. The caller treats that as fatal rather than falling back, because
+ * the fallback is a DIFFERENT initialization and a silent revert would be
+ * indistinguishable in the output from the new path having run.
+ */
+static bool
+read_sfc_anchor (const std::string& fname, const int nx_dom, const int ny_dom,
+                 Gpu::DeviceVector<Real>& sp_d,
+                 Gpu::DeviceVector<Real>& zo_d,
+                 Gpu::DeviceVector<Real>& t2_d)
+{
+    constexpr std::int32_t magic = 0x45524653;      // 'ERFS'
+    const Long npts = Long(nx_dom) * Long(ny_dom);
+    Vector<Real> h(3*npts, Real(0.0));
+    int ok = 0;
+
+    if (ParallelDescriptor::IOProcessor())
+    {
+        std::ifstream ifs(fname, std::ios::binary);
+        if (!ifs.good()) {
+            Print() << "HindCast IC anchor: cannot open '" << fname << "'" << std::endl;
+        } else {
+            std::int32_t hdr[3] = {0,0,0};
+            ifs.read(reinterpret_cast<char*>(hdr), std::streamsize(3*sizeof(std::int32_t)));
+            if (hdr[0] != magic || hdr[1] != nx_dom || hdr[2] != ny_dom) {
+                Print() << "HindCast IC anchor: header mismatch in '" << fname
+                        << "' -- got magic/nx/ny = " << hdr[0] << "/" << hdr[1] << "/" << hdr[2]
+                        << ", expected " << magic << "/" << nx_dom << "/" << ny_dom << std::endl;
+            } else {
+                std::vector<double> buf(std::size_t(3*npts));
+                const std::streamsize nbytes = std::streamsize(3*npts*sizeof(double));
+                ifs.read(reinterpret_cast<char*>(buf.data()), nbytes);
+                if (ifs.gcount() != nbytes) {
+                    Print() << "HindCast IC anchor: short read from '" << fname << "' ("
+                            << ifs.gcount() << " of " << nbytes << " bytes)" << std::endl;
+                } else {
+                    for (Long n = 0; n < 3*npts; ++n) { h[n] = Real(buf[std::size_t(n)]); }
+                    ok = 1;
+                }
+            }
+        }
+    }
+    ParallelDescriptor::Bcast(&ok, 1, ParallelDescriptor::IOProcessorNumber());
+    if (!ok) { return false; }
+    ParallelDescriptor::Bcast(h.data(), int(3*npts), ParallelDescriptor::IOProcessorNumber());
+
+    sp_d.resize(std::size_t(npts)); zo_d.resize(std::size_t(npts)); t2_d.resize(std::size_t(npts));
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin(),        h.begin()+  npts, sp_d.begin());
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+  npts, h.begin()+2*npts, zo_d.begin());
+    Gpu::copyAsync(Gpu::hostToDevice, h.begin()+2*npts, h.begin()+3*npts, t2_d.begin());
+    Gpu::streamSynchronize();
+
+    Print() << "HindCast IC anchor: read ERA5 sp / orography / t2m from '" << fname
+            << "' (" << nx_dom << " x " << ny_dom << ")" << std::endl;
+    return true;
+}
+
+/**
  * Rebuild the HSE base state and the thermodynamic state from the
  * time-interpolated ERA5 frame at initialization time.
  *
@@ -547,11 +673,39 @@ ERF::fill_bdy_data_from_hindcast ()
  * w of +-50 m/s within ~15 model minutes, and NaN. The interior and base
  * state must START on the observed stratification.
  *
- * Method: the interpolated ERA5 density becomes the base-state density;
- * erf_enforce_hse integrates the hydrostatic pressure from it and derives
- * the consistent theta -- so base and state agree exactly (zero buoyancy at
- * init) and carry the real stratification. qv comes from the frame. Momenta
- * remain zero (spin-up from rest, as before).
+ * Method (erf.hindcast_sfc_anchor_file set): specify the THERMODYNAMIC profile
+ * and solve for the mass field, which is the direction real.exe works in.
+ * theta comes from the frame, pressure is integrated hydrostatically upward
+ * from ERA5's surface pressure, and density follows from the equation of state.
+ * Base state and thermodynamic state are then the same field by construction,
+ * so buoyancy is exactly zero at init and the stratification is the observed
+ * one. qv comes from the frame. Momenta remain zero (spin-up from rest).
+ *
+ * This replaces the inverse ordering -- frame density -> erf_enforce_hse ->
+ * derived theta -- which discarded the frame's theta entirely and substituted
+ * whatever theta the pressure integration happened to produce. Measured on
+ * Jan-9 2023 that was +3.77 K at 155 m growing with height, and it inverted
+ * the marine layer: theta FELL 3.35 K through the lowest 150 m over the whole
+ * ocean, i.e. a domain-wide absolutely unstable surface layer at t = 0 where
+ * ERA5 has a stable one. Two separate errors fed it:
+ *
+ *   1. erf_enforce_hse anchors p = p_0 = 101325 Pa at z = 0 in EVERY column,
+ *      a fixed standard-atmosphere sea-level pressure. It cannot represent the
+ *      synoptic pressure field, which is the entire content of a storm.
+ *   2. The frame's own bottom level is a byte-identical duplicate of the level
+ *      above it, so the lowest 155 m had no data at all -- and substituting the
+ *      frame theta without fixing that gives constant rho AND constant theta
+ *      below 155 m, hence constant p, hence zero layer thickness and non-finite
+ *      RRTMGP optical depths at step 1.
+ *
+ * So the anchor is ERA5 sp (carried hydrostatically from ERA5's orography
+ * height to ERF's 3-km terrain height), and the layer below the lowest frame
+ * level with real data is a linear-in-z blend from the ERA5 2-m air
+ * temperature up to that level. The marine layer is then stable because the
+ * observations say it is, not because an integration error made it so.
+ *
+ * Without the knob the old path runs unchanged, gated by
+ * erf.hindcast_ic_frame_theta, so every other HindCast case is untouched.
  */
 void
 ERF::init_thermo_from_hindcast (const int lev)
@@ -576,19 +730,190 @@ ERF::init_thermo_from_hindcast (const int lev)
 
     IntVect ngv = r_hse.nGrowVect();
     ngv.min(fcons.nGrowVect());
-    MultiFab::Copy(r_hse, fcons, Rho_comp, 0, 1, ngv);
     if (l_has_moist) {
         // Forecast state stores PLAIN qv (velocity convention)
         MultiFab::Copy(qv_hse, fcons, RhoQ1_comp, 0, 1, ngv);
     }
 
-    erf_enforce_hse(lev, r_hse, p_hse, pi_hse, th_hse, qv_hse, z_phys_cc[lev]);
+    static const std::string l_anchor_file = [] {
+        std::string s; amrex::ParmParse pp("erf");
+        pp.query("hindcast_sfc_anchor_file", s); return s; }();
+
+    const Box& l_domain = geom[lev].Domain();
+    const int nx_dom = l_domain.length(0);
+    const int ny_dom = l_domain.length(1);
+
+    Gpu::DeviceVector<Real> sp_d, zo_d, t2_d;
+    const bool have_anchor = (!l_anchor_file.empty()) &&
+                             read_sfc_anchor(l_anchor_file, nx_dom, ny_dom, sp_d, zo_d, t2_d);
+
+    if (!l_anchor_file.empty() && !have_anchor) {
+        Abort("erf.hindcast_sfc_anchor_file was set but could not be read. Refusing to fall "
+              "back to the p_0-at-sea-level anchor silently -- the two paths produce "
+              "different initial states and the difference would not be visible downstream.");
+    }
+    if (have_anchor && s_frame_zlow <= zero) {
+        Abort("HindCast IC: the height of the lowest frame level is unset -- "
+              "FillForecastStateMultiFabs must run before init_thermo_from_hindcast.");
+    }
+
+    if (!have_anchor)
+    {
+        MultiFab::Copy(r_hse, fcons, Rho_comp, 0, 1, ngv);
+        erf_enforce_hse(lev, r_hse, p_hse, pi_hse, th_hse, qv_hse, z_phys_cc[lev]);
+    }
+    else
+    {
+        const Real l_gravity = solverChoice.gravity;
+        const Real rdOcp     = solverChoice.rdOcp;
+        const Real z_low     = s_frame_zlow;       // lowest frame level carrying data (m)
+        const Real* sp_p     = sp_d.data();
+        const Real* zo_p     = zo_d.data();
+        const Real* t2_p     = t2_d.data();
+        const int   nxd      = nx_dom;
+        const int   dlo_z    = l_domain.smallEnd(2);
+        const int   dhi_z    = l_domain.bigEnd(2);
+        const bool  lmoist   = l_has_moist;
+
+        for (MFIter mfi(r_hse); mfi.isValid(); ++mfi)
+        {
+            const Box& bx = mfi.validbox();
+            if (bx.smallEnd(2) != dlo_z || bx.bigEnd(2) != dhi_z) {
+                Abort("HindCast IC: the hydrostatic integration needs a whole column on one "
+                      "box. Set amr.max_grid_size_z >= amr.n_cell[2].");
+            }
+            const Box b2d = makeSlab(bx, 2, dlo_z);
+
+            const Array4<Real      >& r_arr  = r_hse.array(mfi);
+            const Array4<Real      >& p_arr  = p_hse.array(mfi);
+            const Array4<Real      >& pi_arr = pi_hse.array(mfi);
+            const Array4<Real      >& th_arr = th_hse.array(mfi);
+            const Array4<Real      >& qv_arr = qv_hse.array(mfi);
+            const Array4<Real const>& f_arr  = fcons.const_array(mfi);
+            const Array4<Real const>& zcc    = z_phys_cc[lev]->const_array(mfi);
+
+            ParallelFor(b2d, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
+            {
+                const Long  n2     = Long(j)*Long(nxd) + Long(i);
+                const Real  p_orog = sp_p[n2];      // ERA5 surface pressure  [Pa]
+                const Real  z_orog = zo_p[n2];      // height it is valid at  [m]
+                const Real  t2m    = t2_p[n2];      // 2-m air temperature    [K]
+
+                // theta of the near-surface air in ERF's DRY convention; moisture
+                // enters everywhere below through theta_m = theta*(1 + R_v/R_d*qv),
+                // which is what getRhogivenThetaPress applies.
+                const Real th_sfc = getThgivenTandP(t2m, p_orog, rdOcp);
+                const Real qv_sfc = lmoist ? f_arr(i,j,dlo_z,RhoQ1_comp) : zero;
+
+                // The theta blend runs from the FIRST CELL CENTRE, not from
+                // z_orog. ERA5's 0.25 deg orography and ERF's 3-km terrain are
+                // different surfaces -- near the coast ERA5 smears land elevation
+                // out over water, so z_orog exceeded the first cell centre in a
+                // band of ocean columns. Blending from z_orog there drove the
+                // weight negative, it clamped to 0, and two or more adjacent
+                // cells were all set to theta_2m: a constant-theta layer, i.e.
+                // exactly the fabricated-uniform-layer defect this restructure
+                // exists to remove. Measured that way: 847 ocean layers with
+                // d(theta) = 0 and up to 2.4 K of departure from the frame over
+                // coastal land. Anchoring on the first cell centre makes the
+                // weight rise strictly monotonically with k, so d(theta) > 0
+                // follows from theta_frame(z_low) > theta_2m alone.
+                //
+                // The PRESSURE integration still starts at (z_orog, sp), which is
+                // where ERA5's surface pressure is actually valid; dz is negative
+                // for the first step wherever z_orog sits above the first cell
+                // centre, which correctly raises p there.
+                const Real z_base = zcc(i,j,dlo_z);
+
+                Real p_prev = p_orog;
+                Real r_prev = getRhogivenThetaPress(th_sfc, p_orog, rdOcp, qv_sfc);
+                Real z_prev = z_orog;
+
+                for (int k = dlo_z; k <= dhi_z; ++k)
+                {
+                    const Real z_c  = zcc(i,j,k);
+                    const Real qv_k = lmoist ? f_arr(i,j,k,RhoQ1_comp) : zero;
+
+                    // Blend the 2-m anchor up to the lowest frame level that carries
+                    // data. At and above z_low the weight is 1 and this is EXACTLY
+                    // the frame value; below it the frame value is the clamped
+                    // z_low value, so this is a linear-in-z profile running from the
+                    // observed 2-m air temperature to the lowest real observation.
+                    // Where the terrain already reaches above z_low the weight is 1
+                    // everywhere and the frame profile is used unmodified.
+                    // amrex::min/max bind by const reference, so the namespace-scope
+                    // constexpr `zero`/`one` would be odr-used and are not device symbols.
+                    Real w = (z_low > z_base) ? (z_c - z_base)/(z_low - z_base) : Real(1.0);
+                    w = amrex::min(amrex::max(w, Real(0.0)), Real(1.0));
+                    const Real th_k = th_sfc + (f_arr(i,j,k,RhoTheta_comp) - th_sfc)*w;
+
+                    // p(k) = p(k-1) - dz*g*(rho(k) + rho(k-1))/2 with rho = rho(p,theta):
+                    // the same trapezoidal rule erf_enforce_hse uses, so the base state
+                    // sits in the model's OWN discrete hydrostatic balance rather than
+                    // merely a continuous one. rho depends on p only as p^(1/Gamma), so
+                    // the fixed point contracts by dz*g*rho/(Gamma*p) ~ 4e-3 per sweep;
+                    // 4 sweeps is exact to single precision.
+                    //
+                    // p is strictly decreasing with height by construction here
+                    // (dz > 0, g > 0, rho > 0), which is what the layer-thickness
+                    // requirement in the radiation driver actually needs.
+                    const Real dz_loc = z_c - z_prev;
+                    Real p_k = p_prev - dz_loc*l_gravity*r_prev;
+                    Real r_k = r_prev;
+                    for (int it = 0; it < 4; ++it) {
+                        r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                        p_k = p_prev - dz_loc*l_gravity*myhalf*(r_k + r_prev);
+                    }
+                    r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+
+                    r_arr (i,j,k) = r_k;
+                    p_arr (i,j,k) = p_k;
+                    pi_arr(i,j,k) = getExnergivenP(p_k, rdOcp);
+                    th_arr(i,j,k) = th_k;
+                    qv_arr(i,j,k) = qv_k;
+
+                    p_prev = p_k; r_prev = r_k; z_prev = z_c;
+                }
+
+                // klo-1 ghost: hydrostatic extension downward at constant theta,
+                // matching what erf_enforce_hse leaves there. physbcs_base runs
+                // straight afterwards and resets it; filled for parity.
+                {
+                    const int  km     = dlo_z - 1;
+                    const Real dz_loc = zcc(i,j,dlo_z) - zcc(i,j,km);
+                    const Real th_k   = th_arr(i,j,dlo_z);
+                    const Real qv_k   = qv_arr(i,j,dlo_z);
+                    const Real p_0z   = p_arr(i,j,dlo_z);
+                    const Real r_0z   = r_arr(i,j,dlo_z);
+                    Real p_k = p_0z + dz_loc*l_gravity*r_0z;
+                    for (int it = 0; it < 4; ++it) {
+                        const Real rr = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                        p_k = p_0z + dz_loc*l_gravity*myhalf*(rr + r_0z);
+                    }
+                    r_arr (i,j,km) = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                    p_arr (i,j,km) = p_k;
+                    pi_arr(i,j,km) = getExnergivenP(p_k, rdOcp);
+                    th_arr(i,j,km) = th_k;
+                    qv_arr(i,j,km) = qv_k;
+                }
+            });
+        }
+         r_hse.FillBoundary(geom[lev].periodicity());
+         p_hse.FillBoundary(geom[lev].periodicity());
+        pi_hse.FillBoundary(geom[lev].periodicity());
+        th_hse.FillBoundary(geom[lev].periodicity());
+        qv_hse.FillBoundary(geom[lev].periodicity());
+    }
+
     (*physbcs_base[lev])(base_state[lev], 0, base_state[lev].nComp(), base_state[lev].nGrowVect());
 
     static const int l_ic_frame_theta = [] {
         int v=0; amrex::ParmParse pp("erf");
         pp.query("hindcast_ic_frame_theta", v); return v; }();
-    const int ic_frame_theta = l_ic_frame_theta;
+    // With the anchor path, th_hse ALREADY holds the frame theta (blended to the
+    // 2-m anchor near the ground), so reading th_arr below is reading the frame.
+    // The gate only chooses between the two OLD behaviours.
+    const int ic_frame_theta = have_anchor ? 0 : l_ic_frame_theta;
 
     for (MFIter mfi(cons); mfi.isValid(); ++mfi) {
         const Box& gbx = mfi.growntilebox(1);
@@ -640,6 +965,58 @@ ERF::init_thermo_from_hindcast (const int lev)
     Print() << "HindCast init: base state and thermodynamic state rebuilt from "
             << "the interpolated ERA5 frame (theta/qv coupling); lev " << lev
             << " rho min/max " << cons.min(Rho_comp) << " " << cons.max(Rho_comp) << std::endl;
+
+    if (have_anchor)
+    {
+        // The two structural properties this restructure exists to guarantee are
+        // cheap to check here, so check them in the log rather than only in the
+        // plotfile: p strictly decreasing with height (equivalently a non-zero
+        // pressure thickness for every layer, which is what the radiation driver
+        // needs), and a stable surface layer.
+        const int dlo_z = l_domain.smallEnd(2);
+        const int dhi_z = l_domain.bigEnd(2);
+
+        ReduceOps<ReduceOpMin,ReduceOpMax,ReduceOpMin,ReduceOpMin> reduce_op;
+        ReduceData<Real,Real,Real,Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (MFIter mfi(p_hse); mfi.isValid(); ++mfi) {
+            const Box  bx  = mfi.validbox();
+            const Box  b2d = makeSlab(bx, 2, dlo_z);
+            const Array4<Real const>& p  = p_hse.const_array(mfi);
+            const Array4<Real const>& th = th_hse.const_array(mfi);
+            reduce_op.eval(b2d, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int) -> ReduceTuple
+            {
+                Real dp_min = std::numeric_limits<Real>::max();
+                Real dth_min = std::numeric_limits<Real>::max();
+                for (int k = dlo_z; k < dhi_z; ++k) {
+                    dp_min  = amrex::min(dp_min , p (i,j,k) - p (i,j,k+1));
+                    dth_min = amrex::min(dth_min, th(i,j,k+1) - th(i,j,k));
+                }
+                return { p(i,j,dlo_z), p(i,j,dlo_z), dp_min, dth_min };
+            });
+        }
+        ReduceTuple hv = reduce_data.value(reduce_op);
+        Real psfc_min = amrex::get<0>(hv), psfc_max = amrex::get<1>(hv);
+        Real dp_min   = amrex::get<2>(hv), dth_min  = amrex::get<3>(hv);
+        ParallelDescriptor::ReduceRealMin(psfc_min);
+        ParallelDescriptor::ReduceRealMax(psfc_max);
+        ParallelDescriptor::ReduceRealMin(dp_min);
+        ParallelDescriptor::ReduceRealMin(dth_min);
+
+        Print() << "HindCast init [anchor]: lowest frame level with data z = " << s_frame_zlow
+                << " m\n    p(k=0) min/max = " << psfc_min << " / " << psfc_max << " Pa"
+                << "\n    min layer pressure thickness = " << dp_min
+                << " Pa  (must be > 0)"
+                << "\n    min d(theta) across any layer = " << dth_min
+                << " K  (negative = superadiabatic somewhere; expected over heated land, "
+                << "not over the ocean)" << std::endl;
+        if (dp_min <= zero) {
+            Abort("HindCast IC: non-positive layer pressure thickness after hydrostatic "
+                  "integration -- the radiation driver cannot run on this state.");
+        }
+    }
 
     hindcast_check_mass_consistency(lev);
 }

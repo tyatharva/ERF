@@ -1719,3 +1719,94 @@ the interior 4x: 17.11x bias at land d>=3 against Davies' 4.05x, RMSE 239.66 vs
 51.20, and 8.2/2.8 mm at d=20 against Davies' 0.5/0.7. Correlation rose (0.443 vs
 0.351) but that does not survive a 4x bias increase. Same domain-wide failure mode as
 tangential-only. **Davies is the base; the band is closed.**
+
+## 19. HindCast initialization solved for the wrong variable, and anchored the
+## pressure field on a fixed 101325 Pa sea-level value in every column
+
+`init_thermo_from_hindcast` ran the thermodynamic initialization backwards. It took
+the interpolated ERA5 **density** as the base state, called `erf_enforce_hse` to
+integrate `dp/dz` from it, and let that integration **derive** theta. The frame's
+theta was read, horizontally interpolated, vertically interpolated onto the ERF
+levels, and then discarded (`ERF_WeatherDataInterpolation.cpp:597` used `th_arr` =
+`th_hse`, not `f_arr`). Whatever error the pressure integration accumulated became
+the state's theta error.
+
+Three defects compounded:
+
+1. **Solving for the wrong variable.** Measured Jan-9 2023: model theta 293.07 K at
+   155 m against the frame's 289.30 K, +3.77 K, growing with height. Worse than the
+   magnitude, the SIGN of the near-surface gradient was wrong -- theta *fell* 3.35 K
+   through the lowest 150 m over the entire ocean, i.e. a domain-wide absolutely
+   unstable marine layer at t = 0 where ERA5 has a stable one.
+
+2. **`erf_enforce_hse` anchors p = p_0 = 101325 Pa at z = 0 in every column**
+   (`ERF_Init1D.cpp:276`). That is a fixed standard-atmosphere sea-level pressure. It
+   cannot represent a synoptic pressure field, which is the entire content of a storm
+   hindcast. Measured ERA5 sp over this domain on Jan-9: 903.7 to 1022.7 hPa.
+
+3. **The frame's bottom level is fabricated.** erftools writes a surface level at
+   z = 0 that is BYTE-IDENTICAL to the level above it (z = 155.07 m): maxdiff exactly
+   0.000e+00 in all eight fields (rho, uvel, vvel, wvel, theta, qv, qc, qr). So the
+   lowest 155 m carries no data at all. Substituting the frame theta without fixing
+   this gives constant rho AND constant theta below 155 m, hence constant p over the
+   lowest five ERF levels, hence zero layer thickness -- 1,818,000 non-finite RRTMGP
+   optical depths and an abort at step 1. The old path masked this only because
+   `erf_enforce_hse` made theta vary hydrostatically, at the cost of being +3.77 K wrong.
+
+### Fix (in fork, gated on `erf.hindcast_sfc_anchor_file`)
+
+Specify the thermodynamic profile and solve for the mass field, the direction
+real.exe works in:
+
+* theta from the frame; p integrated hydrostatically upward from ERA5's `sp`;
+  rho from the equation of state. Base state and state are then the same field, so
+  buoyancy is exactly zero at init.
+* The integration uses the SAME trapezoidal discretization as `erf_enforce_hse`
+  (`p(k) = p(k-1) - dz*g*(rho(k)+rho(k-1))/2` with `rho = rho(p,theta)`, solved by a
+  4-sweep fixed point that contracts ~4e-3 per sweep), so the base state sits in the
+  model's own DISCRETE hydrostatic balance, not merely a continuous one. p is then
+  strictly decreasing by construction.
+* The anchor is ERA5 `sp` carried from ERA5's own orography height to ERF's 3-km
+  terrain height. Deriving p from the lowest good frame level instead would inherit
+  erftools' ~300 m downward displacement -- ~35 hPa of surface-pressure error.
+* The fabricated bottom frame level is detected by exact equality across all eight
+  fields and dropped. This is numerically a no-op for the interpolation (the
+  interpolator clamps below `zvec[0]` either way); what it changes is that nothing
+  downstream can mistake the duplicate for a surface observation.
+* The layer below the lowest frame level with real data is a linear-in-z blend from
+  the ERA5 2-m air temperature. The blend base is the FIRST CELL CENTRE, not ERA5's
+  orography height: ERA5's 0.25 deg orography smears land elevation over coastal
+  water, and blending from it drove the weight negative in a band of ocean columns
+  where it clamped to zero and produced constant-theta layers -- 847 ocean layers
+  with d(theta) = 0, the same fabricated-uniform-layer defect being removed.
+
+### Measured at t = 0 (plt00000, Jan-9 2023 00Z)
+
+| condition | result |
+|---|---|
+| p monotonically decreasing | PASS -- 0 non-decreasing layers, largest dp -206.1 Pa |
+| theta increasing over ocean | PASS -- 0 of 215,264 ocean layers non-increasing; min d(theta) +0.058 K |
+| non-zero layer thickness | PASS -- min dz 19.54 m, min dp 206.1 Pa |
+| T(12 m) vs SST + 0.64 K | PASS -- mean -0.34 K, p5/p95 -1.30/+0.28 K, max 1.90 K |
+| theta vs frame, z >= 155 m | mean 0.019 K, p99 0.42 K; **ocean mean 0.0017 K, max 0.42 K** |
+
+Ocean surface-layer lapse is now **+17.8 K/km** (stable) against the old path's
+-22 K/km (absolutely unstable). `|p - p_hse|` max 0.16 Pa, i.e. base and state agree.
+RRTMGP runs clean at step 1.
+
+### A separate, pre-existing interpolator defect surfaced by the check
+
+The theta-vs-frame comparison has a tail on steep terrain: mean |dtheta| rises
+monotonically with terrain slope, 0.0027 K on flat ground to 0.172 K where the
+terrain changes >75 m/cell, max 2.378 K. **This is not the initialization.** A
+control run with `erf.hindcast_ic_frame_theta = 1` -- raw interpolated frame theta,
+no hydrostatic integration, no blend, no anchor -- reproduces the same worst cell
+(i,j,k = 90,15,2), the same model value 291.345 K, and the same slope distribution to
+four decimals (0.1718 vs 0.1717).
+
+Cause: `FillForecastStateMultiFabs` samples the frame at
+`z = (z_phys_nd(i,j,k) + z_phys_nd(i,j,k+1))/2` -- the height of the (i,j) NODE
+column, averaged in k only -- while x and y are the CELL CENTRE. On flat ground the
+node and cell-centre heights coincide; on a slope they differ by O(terrain
+gradient x dx/2), which against a strong inversion is worth whole kelvins. The
+cell-centred height is already available as `z_phys_cc`.
