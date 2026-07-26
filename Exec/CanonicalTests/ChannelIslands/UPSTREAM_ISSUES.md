@@ -1810,3 +1810,42 @@ column, averaged in k only -- while x and y are the CELL CENTRE. On flat ground 
 node and cell-centre heights coincide; on a slope they differ by O(terrain
 gradient x dx/2), which against a strong inversion is worth whole kelvins. The
 cell-centred height is already available as `z_phys_cc`.
+
+## 20. `erf_enforce_hse` hardcodes p = 101325 Pa at z = 0 in every column
+
+Independent of item 19 and of anything hindcast-specific. `ERF_Init1D.cpp:276`:
+
+```cpp
+pres_arr(i,j,klo) = p_0 - hz * rho_arr(i,j,klo) * l_gravity;
+```
+
+`p_0` is the reference pressure from `ERF_Constants.H`, 1.0e5 Pa. So the base
+state's pressure is anchored to a single fixed sea-level value everywhere, with no
+way to supply another. There is no input to override it and no diagnostic that it
+happened.
+
+**Why it matters beyond the hindcast.** For an idealized problem with a uniform
+background this is the right convention and costs nothing. For any case driven by
+real data it silently discards the synoptic pressure field:
+
+* ERA5 `sp` over this 384 x 192 km domain on 2023-01-09 00Z spans **903.7 to
+  1022.7 hPa** (min over the 1020 m orography in the NE, max offshore). A single
+  101325 Pa anchor is wrong by up to 20 hPa at sea level in this one small domain,
+  and the error is a smooth horizontal field -- i.e. exactly a spurious synoptic
+  pressure gradient.
+* A deepening cyclone is a surface-pressure anomaly. Initializing every hindcast
+  from the same sea-level pressure removes the feature being hindcast.
+* The error is invisible in the usual checks: the base state is still in perfect
+  hydrostatic balance, `p - p_hse` is still ~0, and nothing is non-finite. It only
+  shows up against an independent surface-pressure observation.
+
+The anchor also interacts with terrain. `hz = z_cc(i,j,klo)` is the height of the
+first cell centre above **sea level**, not above ground, so the routine integrates
+from z = 0 up to the first cell centre using the local first-cell density -- a
+reduce-to-sea-level extrapolation through terrain that may be 1700 m thick, using
+the density of the air at the top of it.
+
+**Fix used in the fork** (item 19): anchor on an observed surface pressure at an
+observed height and integrate from there. A general fix upstream would be an
+optional 2-D surface-pressure field, defaulting to the current behaviour when
+absent.
