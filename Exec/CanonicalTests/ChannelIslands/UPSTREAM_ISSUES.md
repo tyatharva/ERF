@@ -1896,3 +1896,63 @@ erftools displacement instead of correcting it, in a new place. Two ways out:
 
 The displacement is not the cosmetic ~1.4 K item 5 described. It breaks the
 initialization.
+
+### 19b. RETRACTION: the blend defect is NOT what suppressed precipitation
+
+Item 19a diagnosed the Davies precipitation collapse as a consequence of the
+over-steep t2m blend. **That causal claim is wrong.** The control: NSCBC and Davies
+were run from the byte-identical initial condition (same anchor file, same blend,
+same dropped level, same `min layer pressure thickness = 206.0625 Pa`), differing
+only in lateral boundary treatment.
+
+| t (h) | NSCBC rain | NSCBC th(k=0) | NSCBC qc>0 | Davies rain | Davies th(k=0) | Davies qc>0 |
+|---|---|---|---|---|---|---|
+| 0 | 0.0000 | 286.50 | 0.00% | 0.0000 | 286.50 | 0.00% |
+| 1 | 1.8399 | 288.60 | 13.95% | 0.1615 | 287.68 | 2.24% |
+| 4 | 2.8077 | 287.79 | 19.07% | 0.1650 | 287.83 | 2.37% |
+| 7 | 9.2849 | 288.32 | 18.46% | 0.1778 | 287.97 | 0.71% |
+
+NSCBC carries the identical blend defect and rains ~50x more. It also warms MORE in
+the first hour (+2.10 K against Davies' +1.18 K) and stays warmer throughout, which
+is the opposite of what the proposed "warming raises q_sat and shuts off
+condensation" mechanism requires.
+
+**What survives from 19a:** the blend IS ~3x too steep, the geometry argument is
+unchanged, and the inversion demonstrably mixes out within the first hour in both
+runs. Correcting `zvec` on read remains justified on its own terms -- the ~1.4 K
+theta residual and ~35 hPa pressure error are real at every level. It is simply not
+the explanation for the precipitation collapse.
+
+**What is now open:** Davies + corrected IC produces 0.18 mm in 24 h while
+Davies + broken IC produced 22.4 mm and NSCBC + corrected IC is on pace for ~30 mm.
+The collapse is specific to the COMBINATION of Davies relaxation with the corrected
+IC, which points at the interaction between the relaxation target and the interior
+state rather than at the interior state alone. Note the boundary planes still take
+theta from the CLAMPED frame profile below 155 m, i.e. the un-blended one, so the
+band is relaxed toward a different near-surface profile than the interior was
+initialized with. That is a candidate, not a conclusion.
+
+### 19c. NSCBC NaN forensics: a localized boundary spike, visible before the crash
+
+Reported earlier that the 7.00 h plotfile "looks like the healthy 5 h state". That
+was wrong -- it was read on domain means and max|w| only. The signal is in v, at the
+wall:
+
+| t (h) | max abs(v) | location | d | n(abs(v)>30) |
+|---|---|---|---|---|
+| 5.00 | 34.77 | (52,63,22) | 0 | 14 |
+| 6.00 | 32.77 | (86,31,3) | 31 | 242 |
+| 7.00 | **295.30** | **(73,63,1)** | **0** | **3397** |
+
+max abs(u) confirms the same site: at 5 h its maximum sits at (127,37,31), the model
+top, which is the jet and physical; by 7 h it has moved to **(72,63,1)** -- the same
+near-surface yhi wall cell, 79.23 m/s. max abs(w) at 7 h is 13.60 at (73,58,2), the
+same i, five cells inboard of the same wall.
+
+So the failure is a localized instability on the **yhi boundary near i = 72-73 at
+k = 1-2**, already at 295 m/s four minutes before the NaN -- not a domain-wide
+convective blowup. It is visible in the plotfile; the earlier read looked at the
+wrong variable.
+
+Consistent with the timestep collapse: dz_min is 18.5 m, so w ~ 23 m/s gives
+dt = 0.2 * 18.5 / 23 = 0.16 s, against the observed floor of 0.158 s.
