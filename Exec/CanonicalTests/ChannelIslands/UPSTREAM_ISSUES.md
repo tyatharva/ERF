@@ -2224,3 +2224,61 @@ nice-to-have.
 
 The IC work is not implicated in the placement error: the IC is verified correct
 against ERA5 to 0.05 K and the amplitude metrics all moved the right way.
+
+## 23. Displacement hypothesis falsified; FSS shows the model does have skill
+
+### 23a. There is no georeferencing error
+
+Island terrain maxima against known positions -- unambiguous point features:
+
+| island | expected (i,j) | terrain there | local max | offset |
+|---|---|---|---|---|
+| Santa Cruz | (49,56) | 358.3 m | (48,56) | -3, +0 km |
+| Catalina | (90,33) | 346.3 m | (91,32) | +3, -3 km |
+| San Clemente | (88,15) | 307.6 m | (89,14) | +3, -3 km |
+| San Nicolas | (57,27) | 117.8 m | (56,28) | -3, +3 km |
+
+All four within ONE 3-km cell. The LCC parameters, the DEM converter and the
+domain anchor are all correct. A 60-150 km georeferencing error is ruled out.
+
+### 23b. The lag-correlation peak was a subset artifact
+
+Extending the scan to +-150 km does not bring the peak interior -- it moves it to
+the search edge (lag_x -150 km, corr +0.800). The giveaway is that the whole
+lag_x = -150 km ROW is uniformly high (+0.61 to +0.72 across every lag_y). A real
+rigid displacement produces a localized peak; a uniformly elevated row is what
+happens when the retained overlap shrinks to a narrow strip whose internal
+gradient dominates the correlation. Pure-y best is only +0.130 at +45 km, i.e. no
+coherent advective displacement either.
+
+**The displacement hypothesis is retracted.** It was reported as a strong candidate
+on the basis of a +-60 km scan whose peak sat at the boundary; bracketing it
+properly, as instructed, killed it.
+
+### 23c. What survives: FSS
+
+| thresh | scale | corrected | baseline |
+|---|---|---|---|
+| 1 mm | 3 km | **0.576** | 0.563 |
+| 1 mm | 30 km | **0.666** | 0.589 |
+| 1 mm | 60 km | **0.700** | 0.611 |
+| 5 mm | 15 km | **0.501** | 0.440 |
+| 5 mm | 60 km | **0.600** | 0.486 |
+
+Better at every scale and threshold, above 0.5 at all scales for 1 mm. CSI 0.405
+vs 0.391. The baseline's POD of exactly 1.000 with FAR 0.609 is what a 4x wet bias
+looks like: it detects everything because it rains everywhere.
+
+Pearson's -0.107 is not a measurement of placement skill. It is a metric dominated
+by extremes (MRMS p50 is 0.2 mm) applied to a field with a different intensity
+distribution.
+
+### 23d. Stage IV comparison is NOT established
+
+Units are confirmed `Inches` from the variable metadata, so the x25.4 conversion is
+right. But the file is a single 2-D field with no time dimension and a maximum of
+25.63 in = 651 mm, and it reads 3.4x MRMS over the scoring footprint. Whether that
+is a genuine inter-product disagreement or a mismatched accumulation window cannot
+be determined without the file's provenance. **The earlier claim that "two
+observational products disagree by 3.6x" is withdrawn pending that check**, and
+with it the +0.554 inter-product correlation, which is equally window-dependent.
