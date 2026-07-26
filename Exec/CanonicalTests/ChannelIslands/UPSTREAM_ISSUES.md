@@ -2334,3 +2334,46 @@ The residual is placement at 3 km, which no advection scheme will supply.
 
 Note the 6-7 km overshoot (ratio 1.13 and 1.48) -- Upwind_5th may be adding
 grid-scale noise at the shortest resolved scales, worth watching before adopting it.
+
+## 25. The 3-km run scores BELOW its own 25-km driver at every scale
+
+FSS of ERA5's own 24-h precipitation against MRMS, on the identical footprint,
+scales and thresholds used to score the model. ERA5 is the information the run is
+forced with, so its FSS is the skill available from the driver.
+
+| thresh | scale | ERA5 (driver) | Upwind_5th | Upwind_3rd | useful thr |
+|---|---|---|---|---|---|
+| 1 mm | 3 km | **+0.633** | +0.566 | +0.576 | 0.690 |
+| 1 mm | 30 km | **+0.679** | +0.649 | +0.666 | 0.690 |
+| 1 mm | 60 km | **+0.725** | +0.685 | +0.700 | 0.690 |
+| 5 mm | 3 km | **+0.625** | +0.395 | +0.423 | 0.617 |
+| 5 mm | 30 km | **+0.722** | +0.522 | +0.549 | 0.617 |
+| 5 mm | 60 km | **+0.838** | +0.576 | +0.600 | 0.617 |
+
+Believable scale (smallest neighbourhood with FSS > 0.5 + f/2):
+
+| thresh | ERA5 | Upwind_5th | Upwind_3rd |
+|---|---|---|---|
+| 1 mm | 60 km | never | 60 km |
+| 5 mm | **3 km** | never | never |
+
+ERA5 also has the better amplitude: mean 9.91 mm over the scoring cells against
+MRMS's 8.51 (bias 1.16x) versus the model's 6.19 mm (0.73x).
+
+**The downscaling is subtracting skill, not adding it.** A 0.25 deg driver has
+useful FSS at 3 km for the 5 mm threshold; the 3-km run built from it does not, at
+any scale. This is the "above us" branch: the residual is NOT the configuration's
+floor, and something in the model is actively degrading information the driver
+already contains.
+
+Consequences for the open decisions:
+
+* Choosing between Upwind_5th and Upwind_3rd is premature -- both sit below the
+  driver at every scale, and the gap (0.20-0.26 FSS at 5 mm) dwarfs the difference
+  between them (0.03).
+* CONUS404 cannot be justified on skill grounds while the run scores below its
+  present driver. Better forcing does not help a pipeline that degrades what it is
+  given. That decision should wait.
+* The next question is not which physics option to tune but WHERE the driver's
+  information is being lost -- boundary relaxation, the 10-cell band, vertical
+  interpolation onto 32 stretched levels, or the microphysics.
