@@ -1228,3 +1228,86 @@ an extra plotfile in which `rain_accum` is NaN over 5852 of 8192 columns while e
 prognostic field is clean and the run exits 0. The preceding output at the same
 wall-clock time is correct. Any analysis that takes the last plotfile silently gets
 a NaN precipitation field.
+
+### Moisture budget: redistribution is measured, and the interior is still spinning up
+
+**Budget across the d = 20 contour** (88x24 cells, 19.0 x 10^9 m2), total water
+(qv + qc + qr + qgraup + qsnow), 2-hourly sampling over 24 h:
+
+| term | NSCBC | Davies |
+|---|---|---|
+| inward flux across contour, IN | -1.29 mm | -14.86 mm |
+| storage change, dS | +6.42 mm | +4.60 mm |
+| precipitation, P | 22.77 mm | 13.61 mm |
+| residual IN - dS - P | -30.48 mm | -33.08 mm |
+
+The residual should be surface evaporation and should be POSITIVE, so the budget
+does **not** close in absolute terms -- the flux uses plotfile (cell-centred)
+velocities on the contour, a differenced-height dz, and 2-hourly sampling. Only the
+DIFFERENCE between the runs is trustworthy, since both use an identical grid, the
+same code path and near-identical evaporation.
+
+    d(IN)         = 13.57 mm
+    d(P) + d(dS)  = 10.98 mm      [ d(P) = 9.16, d(dS) = 1.82 ]
+
+**These match to 19%**, with the 2.6 mm gap being the difference in the (undiagnosed)
+evaporation terms. So the redistribution hypothesis is confirmed as far as this can
+confirm it: NSCBC delivers ~13.6 mm more total water across d = 20 than Davies, and
+~11 mm of that appears as extra interior precipitation plus storage. The extra
+interior rain is not manufactured -- it is moisture Davies was destroying at the
+inflow edge.
+
+**Spin-up: there is no overshoot, and recovery is far from complete.** Binning by
+distance from the two INFLOW walls (xlo, ylo), flat cells (<100 m) only, d >= 20:
+
+| d_inflow | n | NSCBC | Davies | excess |
+|---|---|---|---|---|
+| 20-30 | 1016 | 20.68 | 10.16 | **+10.52** |
+| 30-40 | 796 | 22.47 | 14.63 | **+7.84** |
+| 40-55 | 272 | 26.37 | 19.88 | **+6.49** |
+| 20-30 (terrain >=100 m) | 4 | -- | -- | +31.87 |
+| 30-40 (terrain >=100 m) | 24 | -- | -- | +21.64 |
+
+Two readings, and the second matters more.
+
+1. The excess falls monotonically with distance from the inflow walls (10.52 ->
+   6.49), so it is inflow-related rather than spatially uniform. Orographic cells
+   amplify it 2-3x, though on a small sample (4 and 24 cells).
+2. But absolute precipitation **rises** monotonically with distance from the inflow
+   walls in BOTH runs, out to d_inflow = 40-55 (120-165 km). Nothing overshoots and
+   comes back down. **This is not spin-up overshoot -- it is a spin-up DEFICIT that
+   has not finished recovering at 165 km.** That is much closer to Roberge et al.'s
+   300 km than the 30-48 km estimated earlier from the ring-distance profile, which
+   mixed inflow and outflow walls together.
+
+**Consequence, and it inverts the expected argument for supplying hydrometeors.**
+If the interior is still under-precipitating from the zeroed hydrometeors, then
+supplying them would push interior precipitation UP -- making the interior wet bias
+(currently ~6-8x the matched-footprint ERA5) **worse**, not better. Supplying
+hydrometeors fixes the near-edge deficit and the usable-interior question; it should
+not be expected to fix the wet bias, and may aggravate it.
+
+### Supplying hydrometeors is far cheaper than estimated: the frames already carry qc and qr
+
+`FillForecastStateMultiFabs` already reads and interpolates cloud and rain water --
+the frame variable list is `{"rho","uvel","vvel","wvel","theta","qv","qc","qr"}` and
+`tmp_qc` / `tmp_qr` are computed on the ERF grid -- and then **discards them**: only
+`fine_cons_arr(RhoQ1_comp) = tmp_qv` is stored
+(`ERF_WeatherDataInterpolation.cpp:239`). So qc and qr require no new data, no WPS
+chain and no re-download:
+
+1. store `tmp_qc` / `tmp_qr` into their Morrison component slots;
+2. add QC/QR to the boundary planes (enum, sizing, fill) alongside `HindcastBdyVars::RHO`;
+3. set `cons_read` / `ind_map` for those components in `fill_from_realbdy`;
+4. drop them from the blanket `zero_here = (comp_idx > RhoQ1_comp)`.
+
+Roughly 30-40 lines across three files.
+
+What is NOT cheap is **ice**, which is the species Roberge found dominates the winter
+benefit. The `.bin` frame format carries only qv/qc/qr, so ciwc/cswc would require
+regenerating every frame from ERA5 (which does have them) plus the number
+concentrations Morrison wants. That is a data-regeneration job, not a plumbing job.
+
+### Filed upstream
+
+The clipped-final-step `rain_accum` NaN is filed as erf-model/ERF#3491.
