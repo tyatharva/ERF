@@ -33,8 +33,15 @@ Index order is j*nx + i, i fastest.
 import numpy as np, pygrib, struct, os, sys
 from pyproj import CRS, Transformer
 
-# ERF grid -- must match geometry.prob_lo/prob_hi and amr.n_cell in inputs_hindcast
-PLO = (-195131.04, -126372.41); PHI = (188868.96, 65627.59); NX, NY = 128, 64
+# ERF grid -- must match geometry.prob_lo/prob_hi and amr.n_cell in inputs_hindcast.
+# Overridable so one script serves both domains; defaults are the 128x64 domain.
+PLO = tuple(float(v) for v in os.environ.get('PLO', '-195131.04,-126372.41').split(','))
+PHI = tuple(float(v) for v in os.environ.get('PHI', '188868.96,65627.59').split(','))
+NX, NY = (int(v) for v in os.environ.get('NCELL', '128,64').split(','))
+# AREA is the PROJECTION area and is PINNED -- it is NOT the ERA5 download area.
+# The 192x96 frames are downloaded on a larger box but projected with this one
+# (see era5_run_192x96/WriteICFromERA5Data.py); the anchor must use the same map
+# or it lands on the wrong columns.
 AREA = [36.0, -123.25, 31.25, -115.25]
 lat1, lat2, lon1, lon2 = AREA[2], AREA[0], AREA[1], AREA[3]
 delta = lat2 - lat1; lon0 = (lon1 + lon2) / 2; lat0 = (lat1 + lat2) / 2
@@ -98,6 +105,21 @@ ei, ej = np.meshgrid(np.arange(NX), np.arange(NY), indexing='xy')   # shape (NY,
 elon, elat = to_ll.transform(PLO[0] + (ei + 0.5) * dxe, PLO[1] + (ej + 0.5) * dye)
 print(f'ERF footprint  lat {elat.min():.3f}..{elat.max():.3f}  '
       f'lon {elon.min():.3f}..{elon.max():.3f}')
+
+# bilinear() clamps out-of-range queries, so an ERF footprint that overhangs the
+# GRIB is not an error -- it is a constant strip of sp/t2m/orography along that
+# edge, and nothing downstream would report it. The 192x96 footprint reaches
+# lon -123.49, outside the 128x64 GRIB box. Assert instead of assuming.
+_lo, _hi = min(lat_v[0], lat_v[-1]), max(lat_v[0], lat_v[-1])
+_over = [f'lat {elat.min():.3f} < {_lo:.3f}' if elat.min() < _lo else '',
+         f'lat {elat.max():.3f} > {_hi:.3f}' if elat.max() > _hi else '',
+         f'lon {elon.min():.3f} < {lon_v.min():.3f}' if elon.min() < lon_v.min() else '',
+         f'lon {elon.max():.3f} > {lon_v.max():.3f}' if elon.max() > lon_v.max() else '']
+_over = [s for s in _over if s]
+if _over:
+    sys.exit('ERROR: ERF footprint overhangs the ERA5 GRIB (' + '; '.join(_over) +
+             ').\nbilinear() would clamp those columns silently. Re-download '
+             'with a larger AREA (precip_check/get_era5_sfc.py honours $AREA).')
 
 sp    = bilinear(want['sp'], elon, elat)
 zorog = bilinear(want['z'],  elon, elat) / G0

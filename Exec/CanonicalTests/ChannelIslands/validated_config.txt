@@ -18,33 +18,161 @@
 # the anchor binary, prob_lo/prob_hi, grid stretching -- MUST live in a DOMAIN
 # block, or the guard that catches drift becomes the thing blocking a legitimate
 # domain change.
+#
+# PROVENANCE (added 2026-07-26). Every knob carries a `prov:` line: what it was
+# set for, when, and WHICH CONFIGURATION it was validated against. Three knobs
+# this campaign -- moistscal_*, advect_tke, cfl -- turned out to have been set
+# on the broken IC and never revisited, and each was rediscovered independently
+# at real cost. A value with no stated basis is not validated, it is inherited.
+#
+#   [BROKEN-IC]  set BEFORE the frame_from_T thermodynamic correction reached
+#                the shipped deck (commit 617017b0, 2026-07-26) and NOT
+#                re-validated since. The IC it was tuned against had a
+#                ~18 hPa pressure error and was superadiabatic in places, so
+#                the failure mode it prevents may no longer exist. Treat these
+#                as open questions, not as settled configuration.
+#
+# Provenance lines are comments. They MUST stay on their own line: the parser
+# does split(None, 2), so an inline comment would be swallowed into the
+# asserted value and every deck would fail against a value nobody wrote.
 
+# --- hindcast IC / BC corrections (this campaign) -----------------------------
+# prov: finding 21 -- erftools stores a (rho,theta) pair implying p ~18 hPa low;
+#   T is exactly recoverable from the pair because both errors share that p.
+#   Set 2026-07-25. Validated at t=0 vs ERA5: T error 0.00 K at every level,
+#   theta -0.05 K, rho +0.05%, and the first statically stable IC of the campaign.
 MUST erf.hindcast_frame_from_T         1
+# prov: bottom-cell anchor on t2m/sst blended to frame level 1, applied to the
+#   boundary planes as well as the IC. Set 2026-07-25 with frame_from_T; the two
+#   are one correction and were never scored apart.
 MUST erf.hindcast_blend_bdy_theta      1
+# prov: finding 21 sec.4 -- qc/qr were interpolated onto the mesh and discarded,
+#   so inflow carried zero hydrometeors. Roberge et al. 2024 (GMD 17, 1497-1510)
+#   puts that at 120-165 km of spin-up; the Jan-9 event sits 144-192 km from the
+#   inflow edge. Set 2026-07-25, corrected IC. NOTE: qc/qr only -- no ice.
 MUST erf.hindcast_bdy_hydrometeors     1
+# prov: finding 14 -- the lateral relaxation zone generates spurious updrafts
+#   that precipitate out moisture advected through it. Set 2026-07-24, carried
+#   forward through the IC correction and still active in every scored run.
 MUST erf.hindcast_wall_flux_correction true
 MUST erf.hindcast_wall_flux_tau        3600.0
+# prov: UPSTREAM_ISSUES #12 -- band-density blending perturbs momenta implicitly
+#   via rho_old/rho_new. Held false so every scored run, INCLUDING the baseline,
+#   stays comparable. Set 2026-07-24; unchanged by the IC correction.
 MUST erf.hindcast_blend_band_density   false
+
+# --- failure detection (audit item 4, SEV-2) ----------------------------------
+# prov: re-enabled 2026-07-26 after the audit found detection had been switched
+#   off during debugging and left off. Cost measured on the corrected IC before
+#   re-enabling. rad_freq_in_steps was REMOVED at the same time: a step-based
+#   radiation trigger makes the radiative timescale dt-dependent, and with
+#   adaptive dt that is not a fixed physical cadence. 180 s is the measured
+#   compromise against the periodic wall-clock cliff.
+# prov: [KNOWN DEFECT 2026-07-26, value is NOT honoured] the EFFECTIVE cadence
+#   is 256 s, not 180 s. ERF_Radiation.cpp:210 tests (m_time - m_last_rad_time),
+#   and m_time is ABSOLUTE epoch seconds (~1.673e9). In this single-precision
+#   build float32 ULP at that magnitude is 128 s, so the difference is quantised
+#   to multiples of 128 and the first value >= 180 is 256. MEASURED on the
+#   192x96 benchmark: radiation fired at model t = 194.1, 450.0, 707.0 s, i.e.
+#   gaps of 256 s, matching the prediction exactly. Any request in (128, 256]
+#   yields 256 s. Every run scored so far used 180.0 and therefore ran at 256 s,
+#   so the runs ARE mutually consistent -- do not "fix" this without rescoring.
+#   Fix when addressed: measure the cadence against model-relative time, not the
+#   absolute epoch clock.
 MUST erf.rad_freq_in_time              180.0
 MUST amrex.fpe_trap_invalid            1
+MUST erf.check_for_nans                1
 MUST erf.check_for_nans_int            10
+# prov: audit item 4 found max_step pinned to a small value from a debugging
+#   session, silently truncating runs. -1 = no step cap; stop_datetime governs.
+MUST max_step                          -1
+
+# --- advection ----------------------------------------------------------------
+# prov: dycore/dryscal WENOZ5 is the long-standing configuration. DO NOT set
+#   dryscal to Upwind_3rd: it produces a density NaN at step 1 in the domain
+#   corners (separate unfixed fork bug, UPSTREAM_ISSUES). Predates the campaign;
+#   unaffected by the IC correction, which touched thermodynamics not the scheme.
 MUST erf.dycore_horiz_adv_type         "WENOZ5"
 MUST erf.dycore_vert_adv_type          "WENOZ5"
 MUST erf.dryscal_horiz_adv_type        "WENOZ5"
 MUST erf.dryscal_vert_adv_type         "WENOZ5"
+# prov: [was BROKEN-IC, now resolved] set false during stability work on the
+#   broken IC (RhoKE -> Inf in the xhi relaxation band ~380 s after the first
+#   frame transition). Re-tested on the corrected IC + Upwind_5th, finding 24a:
+#   runs the full 24 h clean, and every skill metric moves under 1% (FSS 5mm@3km
+#   0.399 vs 0.395). No skill basis either way; false retained as the incumbent.
+MUST erf.advect_tke                    false
+
+# --- physics ------------------------------------------------------------------
+# prov: campaign spec. Morrison is the only two-moment scheme wired in this fork
+#   (ERF_ENABLE_P3 gates EAMxx code, not erf.moisture_model).
 MUST erf.moisture_model                "Morrison"
+# prov: campaign spec; MYNNEDMF carries its own TKE closure.
 MUST erf.pbl_type                      "MYNNEDMF"
+# prov: [OPEN, flagged in audit item 4] no LES closure at 3 km, on the argument
+#   that MYNNEDMF is doing the sub-grid work. 3 km is grey-zone: neither fully
+#   parameterised nor resolved. Flagged 2026-07-26, deliberately NOT changed
+#   before the fetch test, since a fetch-limited domain confounds any diffusion
+#   experiment. Revisit after step 7.
+MUST erf.les_type                      "None"
 MUST erf.radiation_model               "RRTMGP"
 MUST erf.land_surface_model            "MM5"
+# prov: [CORRECTED] bulk_coeff -> moeng. With bulk_coeff this fork does not take
+#   its surface state from the land model / hindcast surface data. moeng is the
+#   standard MOST similarity closure.
 MUST erf.surface_layer.flux_type       moeng
 MUST erf.init_type                     "HindCast"
 MUST erf.use_real_bcs                  true
+# prov: compressible. The anelastic path NaN'd at step ~121 with a 3-D
+#   ERA5-derived base state; not pursued.
 MUST erf.anelastic                     0
-MUST max_step                          -1
+
+# --- time integration ---------------------------------------------------------
+# prov: [BROKEN-IC] lowered 0.3 -> 0.2 on 2026-07-24 against the 2023-08-20
+#   (Hilary) case ON THE BROKEN IC. The failure it prevents is a grid-scale w
+#   dipole (+48.9/-29.5 m/s) in the lowest three cells of the ylo relaxation
+#   band -- an IC-adjustment artifact, and the corrected IC is statically stable
+#   where the broken one was not, so the mechanism may be gone. Note #13: at
+#   marginal cfl this fork is not bit-reproducible in SP, so a single clean run
+#   is NOT evidence. Any re-test must show zero w-damping events and zero
+#   low-temperature warnings, on the most violent day, more than once.
+#   RE-TEST DEFERRED to the 192x96 domain.
+MUST erf.cfl                           0.2
+# prov: [BROKEN-IC] absolute dt ceiling, 2026-07-24. change_max is a rate limit
+#   only, so a calm start ramps dt unbounded: a 2023-01-01 segment reached
+#   dt = 15.4 s and NaN'd at t ~ 3.1 h. Chosen just above the dt the storm
+#   regimes self-select, so it is inert on active days. Same broken-IC caveat as
+#   cfl; do not raise without re-running a calm-start segment.
+MUST erf.max_dt                        2.5
+# prov: [BROKEN-IC] IC-adjustment survival settings from the stability era
+#   (first step at 10%, dt may grow 10%/step). Never re-examined against the
+#   corrected IC, whose adjustment transient is much weaker by construction.
+MUST erf.init_shrink                   0.1
+MUST erf.change_max                    1.1
+# prov: [BROKEN-IC] w-damping from the same stability work. It is also the
+#   diagnostic the cfl re-test depends on (a re-test requires ZERO damping
+#   events), so it must stay on until that test is done.
+MUST erf.w_damping                     true
+MUST erf.w_damping_const               0.3
+MUST erf.substepping_type              "Implicit"
+MUST erf.substepping_cfl               1.0
+
+# --- memory -------------------------------------------------------------------
+# prov: RRTMGP column-chunk size. 5000 measured on 128x64 (128*64 = 8192 columns,
+#   so 2 chunks). The 192x96 domain has 18432 columns; step 6 measures whether
+#   5000 causes arena pressure against 16 GB rather than silently lowering it.
+MUST erf.rad_ncol_chunk                5000
 
 # --- deliberate divergences from bdyfix/wz -----------------------------------
+# prov: [BROKEN-IC ORIGIN, partially re-tested] Upwind_3rd was chosen on a calm
+#   2023-01-01 start on the BROKEN IC, because WENOZ5 drove the Morrison number
+#   concentrations (RhoQ8) negative at sharp cloud edges and NaN'd within ~16
+#   steps of a frame transition. On the corrected IC, Upwind_5th survives 24 h.
+#   Note the whole moisture block advects with ONE scheme
+#   (ERF_SlowRhsPost.cpp:398-432, num_comp = n_qstate) -- it cannot be split.
 EXCEPT erf.moistscal_horiz_adv_type OPEN DECISION: deck Upwind_3rd, wz Upwind_5th. Upwind_5th gives better amplitude (bias 0.73x vs 0.57x, spectrum 0.66 vs 0.50) and worse placement (FSS 5mm@3km 0.395 vs 0.423). Unresolved pending finding #25.
 EXCEPT erf.moistscal_vert_adv_type  OPEN DECISION: see moistscal_horiz_adv_type.
+# prov: I/O cadence, not physics. Production checkpoints; experiments do not.
 EXCEPT amr.check_per  Production checkpoints every 6 h; bdyfix experiments disable them (-1) to save I/O.
 EXCEPT amr.check_int  As amr.check_per.
 EXCEPT erf.plot_per_1 Production writes hourly; short benchmarks disable plotting.
@@ -53,21 +181,38 @@ EXCEPT erf.plot_per_1 Production writes hourly; short benchmarks disable plottin
 DOMAIN channelislands-3km-128x64 128 64 32
 # The domain every result through UPSTREAM_ISSUES #25 was scored on. Retained so
 # those runs stay reproducible and comparable.
+# prov: frames in era5_run/Output, ERA5 area [36.0,-123.25,31.25,-115.25], which
+#   is BOTH the download and the projection box for this domain.
 MUST erf.hindcast_sfc_anchor_file  "sfc_anchor_jan09.bin"
 MUST geometry.prob_lo              -195131.04 -126372.41     0.0
 MUST geometry.prob_hi              188868.96   65627.59 17893.69
 MUST erf.grid_stretching_ratio     1.16
 MUST erf.initial_dz                25.0
+MUST erf.terrain_file_name         "channel_islands_terrain_3km.txt"
 
 # =============================================================================
 DOMAIN channelislands-3km-192x96 192 96 48
 # Enlarged domain: NE pin 34.7/-117.2, sized so the scoring cells clear the
 # 240 km spin-up fetch that made the #25 reading ambiguous. 34.5 is excluded --
 # it puts two San Gabriel peaks inside the 10-cell relaxation band, measured
-# failure at 4.3 h. Projection is PINNED to the 128x64 LCC so the two domains
-# stay comparable; see the assertion in WriteICFromERA5Data.py.
+# failure at 4.3 h.
+# prov: frames in era5_run_192x96/Output. The ERA5 DOWNLOAD box is
+#   [36.0,-125.0,30.75,-115.25] but the PROJECTION is PINNED to the 128x64 box
+#   so the two domains share one map; the pin is asserted character-for-character
+#   in era5_run_192x96/WriteICFromERA5Data.py. The download box must exceed the
+#   domain by far more than it looks: erftools insets the frame 100 km per side
+#   and ERF refuses a domain within 4 cells (12 km) of the frame edge
+#   (ERF_WeatherDataInterpolation.cpp:312-323). MEASURED margins: 37.9 km W,
+#   77.3 km E, 42.5 km S, 42.4 km N. The -123.75 box first proposed for this
+#   domain is 77.6 km short in x and 9.2 km short in y and hard-aborts at startup.
 MUST erf.hindcast_sfc_anchor_file  "sfc_anchor_jan09_192x96.bin"
 MUST geometry.prob_lo              -388229.74 -166933.25     0.0
 MUST geometry.prob_hi              187770.26  121066.75  19003.0
-MUST erf.grid_stretching_ratio     1.0931
+MUST erf.grid_stretching_ratio     1.09311734
 MUST erf.initial_dz                25.0
+# prov: same DEM as 128x64, regenerated on the pinned projection at 1000 m.
+#   6.92% of points fall west of the DEM edge (lon < -123.0) and are zero-filled;
+#   that band is contiguous open ocean, no inland holes, and is under the 8.75%
+#   precedent. Cross-checked against the 128x64 terrain in the overlap: bias
+#   +0.03 m, RMS 12.86 m, corr 0.9954 -- the projection carried through.
+MUST erf.terrain_file_name         "channel_islands_terrain_3km_192x96.txt"

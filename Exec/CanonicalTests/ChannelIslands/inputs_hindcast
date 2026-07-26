@@ -46,7 +46,7 @@ erf.hindcast_surface_data_dir = "ERA5Data_Surface"
 #
 #  The anchor binary is case-specific -- regenerate with
 #  precip_check/make_sfc_anchor.py for any other date/domain.
-erf.hindcast_sfc_anchor_file  = "sfc_anchor_jan09.bin"
+erf.hindcast_sfc_anchor_file  = "sfc_anchor_jan09_192x96.bin"
 erf.hindcast_frame_from_T     = 1
 erf.hindcast_blend_bdy_theta  = 1
 erf.hindcast_bdy_hydrometeors = 1
@@ -109,24 +109,35 @@ erf.anelastic = 0
 
 # ---------------------------------------------------------------------------
 #  PROBLEM SIZE & GEOMETRY
-#  Domain: 384 x 192 km @ exactly 3 km, anchored at NE corner (34.2, -117.2).
-#  [3-km OPERATING POINT] 128x64x32 = 262K cells; same extent/vertical grid
-#  as the measured 2-km config (revert n_cell to 192 96 32 + terrain file
-#  channel_islands_terrain.txt for 2 km).
-#  (Pin moved south 0.3 deg: drops Mt. San Antonio / high San Gabriels. The
-#  northern Channel Islands sit ~17 km inside the N edge -- inside the 30 km
-#  sponge; at most ~17 km further southward motion before Santa Cruz clips.)
+#  Domain: 576 x 288 km @ exactly 3 km, anchored at NE corner (34.7, -117.2).
+#  [3-km OPERATING POINT] 192x96x48 = 1.77M cells (6.75x the 128x64x32 domain).
+#
+#  WHY THIS DOMAIN. On 128x64 the scoring region sat entirely inside the
+#  plausible 240 km spin-up fetch from the inflow walls, which is a live
+#  confound on UPSTREAM_ISSUES #25 (the 3 km run scoring below its own 25 km
+#  ERA5 driver). This domain is sized so the scoring cells clear that fetch.
+#  The NE pin is 34.7, NOT 34.5: at 34.5 two San Gabriel peaks fall inside the
+#  10-cell lateral relaxation band (measured failure at 4.3 h).
+#
 #  Coordinates are in the erftools LCC frame for ERA5 area
 #  36.0,-123.25,31.25,-115.25 :
 #    +proj=lcc +lat_1=32.041667 +lat_2=35.208333 +lat_0=33.625000
 #    +lon_0=-119.250000 +datum=WGS84 +units=m
-#  The box sits ~163-173 km inside the ERA5 data box on all sides (ERF
-#  requires only 4*dx; erftools' own guidance is 150 km). Do NOT replace with
-#  domain_extents.txt values -- the domain here is exact by construction.
+#  That projection is PINNED. The ERA5 DOWNLOAD box for this domain is larger
+#  (36.0,-125.0,30.75,-115.25) but the projection is still built from the box
+#  above, so the two domains share one map and #25 stays comparable; the pin is
+#  asserted character-for-character in era5_run_192x96/WriteICFromERA5Data.py.
+#
+#  MEASURED clearance to the frame edge (ERF requires 4*dx = 12 km,
+#  ERF_WeatherDataInterpolation.cpp:312-323): xlo +25.9 km, xhi +65.3 km,
+#  ylo +30.5 km, yhi +30.4 km. This is INSIDE erftools' advisory 50 km inset
+#  (Output/domain_extents.txt suggests prob_lo -376127 -159443) -- that inset is
+#  a heuristic, ERF's 4-cell guard is the real requirement, and the domain here
+#  is exact by construction. Do NOT replace with domain_extents.txt values.
 # ---------------------------------------------------------------------------
-geometry.prob_lo     = -195131.04 -126372.41     0.0
-geometry.prob_hi     =  188868.96   65627.59 17893.69
-amr.n_cell           = 128    64     32
+geometry.prob_lo     = -388229.74 -166933.25     0.0
+geometry.prob_hi     =  187770.26  121066.75  19003.0
+amr.n_cell           = 192    96     48
 geometry.is_periodic = 0 0 0
 
 # Lateral faces: Outflow (features exit; ERA5 sponge does the coupling).
@@ -167,15 +178,16 @@ erf.most.surf_temp      = 288.0   # fallback only; MM5/SST provide the live surf
 #  LCC plane as the erftools ERA5 data. (The _USGS reader path has an
 #  out-of-bounds indexing bug in this fork -- do not use it; see notes.)
 # ---------------------------------------------------------------------------
-erf.terrain_file_name = "channel_islands_terrain_3km.txt"
+erf.terrain_file_name = "channel_islands_terrain_3km_192x96.txt"
 erf.terrain_type      = StaticFittedMesh
-# Generated vertical grid: 32 levels, dz0=25 m, ratio 1.16 -> top exactly
-# 17893.69 m (the generator does NOT rescale to prob_hi; prob_hi z is set to
-# the exact sum). dz: 25,29,34,...,2478 m; monotone, no inversion; min dz
-# stays the 25 m surface layer (vertical-CFL-equivalent to the old grid,
-# better after terrain compression: new max terrain ~1734 m vs 3040 m).
+# Generated vertical grid: 48 levels, dz0=25 m, ratio 1.0931 -> top exactly
+# 19003 m (the generator does NOT rescale to prob_hi; prob_hi z is set to the
+# exact sum). The ratio is LOWER than the 128x64 domain's 1.16 because 48
+# levels reach the same lid with gentler stretching: max dz 1552 m vs 2478 m,
+# so the upper troposphere is better resolved, and the 25 m surface layer is
+# unchanged. Monotone, no inversion.
 erf.initial_dz            = 25.0
-erf.grid_stretching_ratio = 1.16
+erf.grid_stretching_ratio = 1.09311734
 erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
 
 # ---------------------------------------------------------------------------

@@ -154,6 +154,89 @@ O = []
 def emit(s=''): O.append(s)
 
 
+# ---------------------------------------------------------------------------
+#  FLAG -> INDEPENDENTLY CONFIRM -> REPORT        (added 2026-07-26)
+#
+#  Four "findings" came out of this harness and were WRONG, each costing at
+#  least a turn:
+#    * the SST row, TWICE -- first ERA5's masked-array fill value read as a
+#      799 K sea surface, then the frame's own land fill value read as 600 K.
+#      Both presented as a large, clean A->B discrepancy.
+#    * the lag-correlation peak -- np.roll wrapped the domain, and the "peak"
+#      was the wrap. Bracketing it properly killed it.
+#    * the 305 m vertical offset -- a compensating pair. The frame's (rho,theta)
+#      implied a wrong pressure, and profile-matching renders that as a height
+#      shift. A knob was added to the model for it and later retracted.
+#
+#  What they share: THE HARNESS WAS THE ONLY WITNESS. A single route producing a
+#  surprising number is evidence that the route may be broken, at least as much
+#  as it is evidence about the pipeline -- and the more surprising the number,
+#  the more that is true.
+#
+#  So a flagged row is a HYPOTHESIS, not a finding. It is promoted only when a
+#  route that shares no code and no intermediate product with the flagging route
+#  agrees. A row with no such route prints UNCONFIRMED and must not be reported
+#  as a finding, however convincing it looks.
+# ---------------------------------------------------------------------------
+REGISTER = []
+
+
+def flag(name, value, tol, unit='', confirm=None, route='', agree_frac=0.25):
+    """Register a threshold test. Returns the status string.
+
+    confirm : callable -> float, an INDEPENDENT measurement of the same quantity.
+              Independent means it does not reuse the flagging route's code path
+              or its intermediate products. Re-running the same computation with
+              a different tolerance is not a second route.
+    """
+    if not np.isfinite(value):
+        REGISTER.append((name, value, tol, unit, 'NON-FINITE', route, float('nan')))
+        return 'NON-FINITE'
+    if abs(value) <= tol:
+        return 'ok'
+    if confirm is None:
+        REGISTER.append((name, value, tol, unit, 'UNCONFIRMED', route or
+                         'no independent route registered', float('nan')))
+        return 'UNCONFIRMED'
+    try:
+        second = float(confirm())
+    except Exception as e:                      # a confirmation that cannot run
+        REGISTER.append((name, value, tol, unit, 'UNCONFIRMED', f'{route}: {e}',
+                         float('nan')))
+        return 'UNCONFIRMED'
+    ok = abs(second - value) <= max(tol, agree_frac*abs(value))
+    REGISTER.append((name, value, tol, unit, 'CONFIRMED' if ok else 'RETRACTED',
+                     route, second))
+    return 'CONFIRMED' if ok else 'RETRACTED'
+
+
+def report_register():
+    emit('')
+    emit('='*104)
+    emit('R. FLAG REGISTER   a flagged row is a hypothesis; only CONFIRMED rows may be reported')
+    emit('='*104)
+    if not REGISTER:
+        emit('   nothing exceeded tolerance.')
+        return
+    emit('')
+    emit('   status        quantity                     route-1        route-2   tol      independent route')
+    for nm, v, t, u, st, rt, v2 in REGISTER:
+        s2 = f'{v2:>10.3f}' if np.isfinite(v2) else f'{"--":>10s}'
+        emit(f'   {st:<13s} {nm:<26s} {v:>10.3f} {s2} {t:>7.3f}   {rt}')
+    emit('')
+    nc = sum(1 for r in REGISTER if r[4] == 'CONFIRMED')
+    nr = sum(1 for r in REGISTER if r[4] == 'RETRACTED')
+    nu = len(REGISTER) - nc - nr
+    emit(f'   {nc} CONFIRMED (report these)   {nr} RETRACTED (the HARNESS is wrong, '
+         f'fix it)   {nu} UNCONFIRMED (do not report)')
+    if nr:
+        emit('   >>> A RETRACTED row means this script disagrees with itself. Fix the harness')
+        emit('       before reading anything else in this report.')
+    if nu:
+        emit('   >>> UNCONFIRMED rows need a second route before they are findings. Four')
+        emit('       harness bugs were reported as pipeline defects for want of one.')
+
+
 emit('='*104)
 emit('PIPELINE AUDIT   t = 0     ERA5 -> erftools frame -> ERF interp -> ERF state -> planes')
 emit(f'  run {RUN}    frame {os.path.basename(f3)}    ERA5 {STAMP}    stage-C offset applied {ZOFF:.0f} m')
@@ -183,7 +266,26 @@ for nm in ['theta', 'T', 'qv', 'u', 'v', 'rho']:
 med = float(np.median(allb))
 emit('')
 emit(f'   >>> CONSENSUS OFFSET = {med:+.0f} m   (spread {np.min(allb):+.0f} .. {np.max(allb):+.0f} m)')
-emit(f'   >>> {"FLAG: erftools places data at the wrong height" if abs(med) > 50 else "ok"}')
+
+
+def confirm_offset():
+    """Independent route: compare the frame's z LABELS against ERA5's geopotential
+    height at the same pressure levels. Uses no field values and no profile
+    matching, so a thermodynamic inconsistency in the frame cannot masquerade as
+    a height shift here -- which is exactly how the retracted 305 m offset arose
+    (the frame's (rho,theta) implied a pressure ~18 hPa low, and profile-matching
+    reads a pressure error as a vertical displacement).
+    """
+    eh = EH['ocean'][::-1]                       # ERA5 heights, ascending
+    if len(eh) != len(FZ):
+        raise RuntimeError(f'level counts differ ({len(eh)} vs {len(FZ)})')
+    w = (FZ > 300) & (FZ < 6000)
+    return float(np.median(FZ[w] - eh[w]))
+
+
+st = flag('vertical offset', med, 50.0, 'm', confirm=confirm_offset,
+          route='frame z labels vs ERA5 geopotential height, same levels, no profile fit')
+emit(f'   >>> {"FLAG: erftools places data at the wrong height -- " + st if st != "ok" else "ok"}')
 
 # ---- 2. stage table -------------------------------------------------------------
 emit('')
@@ -247,7 +349,32 @@ for nm, era_sn, fr in SFMAP:
             emit(f'   {nm:9s} {"no valid":>11s} {"overlap":>12s}'); continue
         a, b = A[good].mean(), B[good].mean(); msk = good
         d = b-a; t = TOL.get(nm, 1e9)
-        emit(f'   {nm:9s} {a:11.4f} {b:12.4f} {d:+9.4f}   {"!" if abs(d) > t else "."}')
+
+        def confirm_sfc(_nm=nm, _era=era_sn, _fr=fr, _lim=lim):
+            """Independent route: NO interpolation and NO renormalisation on
+            either side. Average ERA5 on its own 0.25 deg cells and the frame on
+            its own LCC cells, both restricted to the shared footprint and both
+            masked only by physical range. Both SST false findings came from a
+            fill value surviving one side's mask; a route that never interpolates
+            and masks by physics alone cannot reproduce that error, so if it
+            agrees the discrepancy is in the data, not in this script.
+            """
+            ea = SFA[_era]
+            inbox = ((elat >= mlat.min()) & (elat <= mlat.max()) &
+                     (elon180 >= mlon.min()) & (elon180 <= mlon.max()))
+            fa = S[_fr]
+            if _lim is not None:
+                ea = np.where((ea > _lim[0]) & (ea < _lim[1]), ea, np.nan)
+                fa = np.where((fa > _lim[0]) & (fa < _lim[1]), fa, np.nan)
+            ea = ea[inbox]
+            if not (np.isfinite(ea).any() and np.isfinite(fa).any()):
+                raise RuntimeError('no in-range points on one side')
+            return float(np.nanmean(fa) - np.nanmean(ea))
+
+        st = flag(f'surface {nm} A->B', d, t, confirm=confirm_sfc,
+                  route='native-grid means, physical-range mask, no interpolation')
+        emit(f'   {nm:9s} {a:11.4f} {b:12.4f} {d:+9.4f}   '
+             f'{"!" if abs(d) > t else "."}   {st if st != "ok" else ""}')
     else:
         emit(f'   {nm:9s} {"n/a":>11s} {B[msk].mean():12.4f}       -       -')
 
@@ -377,4 +504,5 @@ emit('   which un-cancelled the pair and converted a pressure error into a 2 K w
 
 emit('')
 emit('='*104)
+report_register()
 print('\n'.join(O))
