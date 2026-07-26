@@ -588,6 +588,7 @@ ERF::init_thermo_from_hindcast (const int lev)
     static const int l_ic_frame_theta = [] {
         int v=0; amrex::ParmParse pp("erf");
         pp.query("hindcast_ic_frame_theta", v); return v; }();
+    const int ic_frame_theta = l_ic_frame_theta;
 
     for (MFIter mfi(cons); mfi.isValid(); ++mfi) {
         const Box& gbx = mfi.growntilebox(1);
@@ -627,7 +628,7 @@ ERF::init_thermo_from_hindcast (const int lev)
             // being +3.77 K wrong. The correct fix is to integrate hydrostatically FROM
             // the frame theta (specify the thermodynamic profile, solve for the mass
             // field), which is a restructure, not a substitution.
-            cons_arr(i,j,k,RhoTheta_comp) = (l_ic_frame_theta)
+            cons_arr(i,j,k,RhoTheta_comp) = (ic_frame_theta)
                                           ? r_arr(i,j,k) * f_arr(i,j,k,RhoTheta_comp)
                                           : r_arr(i,j,k) * th_arr(i,j,k);
             if (l_has_moist) {
