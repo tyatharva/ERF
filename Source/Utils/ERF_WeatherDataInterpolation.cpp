@@ -585,10 +585,15 @@ ERF::init_thermo_from_hindcast (const int lev)
     erf_enforce_hse(lev, r_hse, p_hse, pi_hse, th_hse, qv_hse, z_phys_cc[lev]);
     (*physbcs_base[lev])(base_state[lev], 0, base_state[lev].nComp(), base_state[lev].nGrowVect());
 
+    static const int l_ic_frame_theta = [] {
+        int v=0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_ic_frame_theta", v); return v; }();
+
     for (MFIter mfi(cons); mfi.isValid(); ++mfi) {
         const Box& gbx = mfi.growntilebox(1);
         const Array4<Real      >& cons_arr = cons.array(mfi);
         const Array4<Real const>& r_arr    = r_hse.const_array(mfi);
+        const Array4<Real const>& th_arr   = th_hse.const_array(mfi);
         const Array4<Real const>& f_arr    = fcons.const_array(mfi);
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
@@ -612,7 +617,19 @@ ERF::init_thermo_from_hindcast (const int lev)
             // Note the lateral forcing was NEVER affected: the boundary planes take theta
             // from fcons (line ~523), so the boundaries relaxed toward the correct frame
             // theta while the interior started ~4 K warmer.
-            cons_arr(i,j,k,RhoTheta_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoTheta_comp);
+            // GATED (erf.hindcast_ic_frame_theta, default 0 = old behaviour).
+            // Substituting the frame theta alone is NOT sufficient: the frame's bottom
+            // level duplicates level 1, so rho and theta are both constant below 155 m
+            // and p = p0(rho R theta/p0)^gamma comes out CONSTANT over the lowest five
+            // ERF levels -> zero layer thickness -> RRTMGP produces non-finite optical
+            // depths and the run aborts at step 1. The old th_hse path masked this
+            // because erf_enforce_hse made theta vary hydrostatically, at the cost of
+            // being +3.77 K wrong. The correct fix is to integrate hydrostatically FROM
+            // the frame theta (specify the thermodynamic profile, solve for the mass
+            // field), which is a restructure, not a substitution.
+            cons_arr(i,j,k,RhoTheta_comp) = (l_ic_frame_theta)
+                                          ? r_arr(i,j,k) * f_arr(i,j,k,RhoTheta_comp)
+                                          : r_arr(i,j,k) * th_arr(i,j,k);
             if (l_has_moist) {
                 cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ1_comp);
             }
