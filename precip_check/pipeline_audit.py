@@ -30,7 +30,11 @@ STAMP    = os.environ.get('STAMP', '20230109_0000')
 FSTAMP   = os.environ.get('FSTAMP', '2023_01_09_00_00')
 SRC      = os.environ.get('SRC', '/app/ERF/Source')
 ZOFF     = float(os.environ.get('ZOFF', '305.0'))     # offset the run applied, for stage C
-PLO = (-195131.04, -126372.41); PHI = (188868.96, 65627.59)
+PLO = tuple(float(v) for v in os.environ.get('PLO', '-195131.04,-126372.41').split(','))
+PHI = tuple(float(v) for v in os.environ.get('PHI', '188868.96,65627.59').split(','))
+# AREA is the PROJECTION area and is PINNED for BOTH domains -- it is NOT the
+# ERA5 download area (the 192x96 frames are downloaded on a larger box and
+# projected with this one). Do not "update" it to match a download box.
 AREA = [36.0, -123.25, 31.25, -115.25]
 la1, la2, lo1, lo2 = AREA[2], AREA[0], AREA[1], AREA[3]
 dl = la2 - la1
@@ -291,6 +295,15 @@ emit(f'   >>> {"FLAG: erftools places data at the wrong height -- " + st if st !
 emit('')
 emit('2. STAGE VALUES AND DELTAS   ocean columns, at model levels')
 emit('   A=ERA5(at that height)  B=frame  C=ERF interp (offset applied)  D=ERF state')
+emit('')
+emit('   KNOWN NON-DIAGNOSTIC ROW: u and v in the D column at t = 0. plt00000 carries')
+emit('   near-zero x/y_velocity in EVERY run of this campaign -- measured |u| mean 0.097')
+emit('   (bdyfix/bt_on), 0.052 (bdyfix/ctl2), 0.078 (run_192x96), against max ~19-23 m/s.')
+emit('   A max that is NOT zero rules out an unset field, so this is the plotfile being')
+emit('   written before momenta are converted to velocities, not a wind-free IC: the same')
+emit('   runs reach realistic winds within 30 model minutes and complete 24 h correctly.')
+emit('   Do not report a C->D velocity discrepancy at t = 0 as a finding. Any OTHER time')
+emit('   is diagnostic.')
 emit('')
 emit('   var    z(m)      A          B          C          D    | A->B      B->C      C->D    flag')
 oc = CLS['ocean']
