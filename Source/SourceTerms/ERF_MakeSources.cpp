@@ -435,7 +435,19 @@ void make_sources (int level,
             ApplySpongeZoneBCsForCC(solverChoice.spongeChoice, geom, bx, cell_src, cell_data, r0, th0, qv0, z_cc_arr, n_qstate);
         }
 
-        if (solverChoice.init_type == InitType::HindCast and solverChoice.hindcast_surface_bcs) {
+        // erf.hindcast_bulk_surface_flux (default 0 = OFF).
+        //
+        // This source term is gated only on init_type/hindcast_surface_bcs and never
+        // checks zlo.type, so with a surface-layer lower boundary it runs ALONGSIDE
+        // MOST -- two additive surface flux closures on the same cell. MOST is the
+        // configured scheme and has stability-dependent coefficients; this one has
+        // fixed Ch = Ce = 0.0015. Default it off and keep MOST. The SST/land-mask
+        // DATA path (hindcast_surface_bcs) is untouched -- it is the flux closure
+        // being removed, not the data.
+        static const int l_bulk_sfc = [] {
+            int v=0; amrex::ParmParse pp("erf");
+            pp.query("hindcast_bulk_surface_flux", v); return v; }();
+        if (l_bulk_sfc && solverChoice.init_type == InitType::HindCast and solverChoice.hindcast_surface_bcs) {
             const Array4<const Real>& surface_state_arr = (*surface_state_at_lev).array(mfi);
             const Array4<const Real>& u_arr_sfc = xvel.const_array(mfi);
             const Array4<const Real>& v_arr_sfc = yvel.const_array(mfi);

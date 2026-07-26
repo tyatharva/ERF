@@ -376,6 +376,42 @@ ERF::SurfaceDataInterpolation(const int lev,
                       0, surface_state_interp[lev].nComp(),
                       surface_state_interp[lev].nGrow());
 
+    // ***********************************************************************************
+    // Push the ERA5 SST into the surface layer's t_surf over OCEAN points.
+    //
+    // Without this the sea surface is a spatially and temporally UNIFORM constant for
+    // the whole run: t_surf is initialised to `default_land_surf_temp` =
+    // erf.most.surf_temp (ERF_SurfaceLayer.H:445) and `set_t_surf` is only ever reached
+    // from InitType::Input_Sounding (ERF.cpp:1615), so the HindCast path never touches
+    // it. `fill_qsurf_with_qsat` then builds q_surf from that constant. On a domain that
+    // is ~75% ocean that is a substantial deficiency in its own right, independent of
+    // the tropical constants that used to sit in the bulk source term.
+    //
+    // Land points are left alone: over land t_surf belongs to the LSM (for this campaign
+    // the MM5 soil_theta constant, since MM5 is inert), so the SST only overwrites where
+    // the land-sea mask says water. The SST guard is two-sided for the same reason it is
+    // in the bulk path -- this field carries fill values, and a one-sided bound lets them
+    // through.
+    // ***********************************************************************************
+    if (m_SurfaceLayer) {
+        MultiFab* tsurf = m_SurfaceLayer->get_t_surf(lev);
+        if (tsurf) {
+            for (MFIter mfi(*tsurf); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.growntilebox();
+                const Array4<Real>&       ts = tsurf->array(mfi);
+                const Array4<const Real>& ss = surface_state_interp[lev].const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    Real ls_mask = ss(i,j,0,0);          // 1 = land, 0 = water
+                    Real sst     = ss(i,j,0,1);
+                    if (ls_mask < Real(0.5) && sst > Real(200.0) && sst < Real(340.0)) {
+                        ts(i,j,k) = sst;
+                    }
+                });
+            }
+        }
+    }
+
     /*MultiFab& mf_surf_interp   = surface_state_interp[lev];
 
     // Fill the time-interpolated forecast states

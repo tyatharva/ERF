@@ -1488,3 +1488,52 @@ The "~130 mm observed interior maximum" used as a reference throughout this camp
 is Santa Ynez at 34.50 N. The domain's north edge is 34.20 N, so that station is
 ~30 km OUTSIDE the domain and its value was never comparable. Every ratio derived
 from it -- including reported passes -- is void.
+
+### THE LARGER FINDING: no HindCast run has ever used the ERA5 SST
+
+Both surface flux closures ran on constants for the entire campaign:
+
+* the bulk source read `surface_state` comp 0 (the land-sea mask) and ignored comp 1
+  (the SST), driving toward hardcoded 301 K / 0.024 kg/kg;
+* MOST's `t_surf` was initialised to `default_land_surf_temp` = `erf.most.surf_temp`
+  (ERF_SurfaceLayer.H:445) and `set_t_surf` is reachable only from
+  `InitType::Input_Sounding` (ERF.cpp:1615), so HindCast never updated it. Over ocean
+  the LSM never touches it either, so it stayed at the deck's 288 K everywhere, and
+  `fill_qsurf_with_qsat` built q_surf from that constant.
+
+So **every HindCast run to date has had a spatially and temporally uniform sea
+surface**, on a domain that is ~75% ocean with a real SST gradient across it. That is
+a substantial deficiency independent of the tropical constants, and it means the deck
+comment `erf.most.surf_temp = 288.0  # fallback only; MM5/SST provide the live surface
+state` was wrong for the whole campaign -- nothing ever provided the live state.
+
+Fixed by pushing the ERA5 SST into `t_surf` over ocean points each time
+`surface_state_interp` refreshes (ERF_SurfaceDataInterpolation.cpp). Land points are
+left to the LSM (here the MM5 `soil_theta` constant, since MM5 is inert), selected on
+the land-sea mask; the SST guard is two-sided because the field carries fill values.
+
+### Measured double-count factor
+
+`erf.hindcast_bulk_surface_flux` (new, default 0 = off) gates the bulk source so the
+two closures can be scored separately. Jan-9, first 1.11 h, ocean cells at k = 0,
+**with the SST fix already applied to both paths**:
+
+| config | d(qv) kg/kg | d(T) K | precip mm |
+|---|---|---|---|
+| MOST only | 0.003234 | -7.837 | 0.023 |
+| MOST + bulk | 0.003497 | -7.695 | 0.040 |
+
+Bulk-path contribution: d(qv) +0.000263, d(T) +0.142 K. As a factor:
+**qv 1.08x, T 0.98x, precipitation 1.71x.**
+
+The moisture tendency is only 8% larger but precipitation is 71% larger -- rain is a
+threshold response, so a small extra moistening of near-saturated marine air produces
+a disproportionate precipitation increase. That is with the SST fix in place; with the
+original 301 K / 0.024 constants the bulk contribution was far larger.
+
+The d(T) = -7.8 K cooling in both configurations is the SST fix working: the initial
+294.7 K near-surface air is now relaxing toward the real ~288 K sea surface instead of
+being driven toward 301 K.
+
+Default is now MOST only. The `hindcast_surface_bcs` DATA path is untouched -- it is
+the flux closure being removed, not the SST/land-mask supply.
