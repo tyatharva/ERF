@@ -1956,3 +1956,51 @@ wrong variable.
 
 Consistent with the timestep collapse: dz_min is 18.5 m, so w ~ 23 m/s gives
 dt = 0.2 * 18.5 / 23 = 0.16 s, against the observed floor of 0.158 s.
+
+### 19d. NSCBC fails when a lateral face reverses from outflow to inflow
+
+19c localized the NSCBC NaN to (72,63,1), the yhi wall. The trigger is not terrain
+and not marginal CFL. It is a **regime reversal of the face**.
+
+Wall-mean v at the yhi boundary, k = 1 (v > 0 = outflow at yhi), and the mean over
+the six cells that blow up (i = 68..73):
+
+| run | 0 h | 1 h | 2 h | 3 h | 4 h | 5 h | 6 h | 7 h | outcome |
+|---|---|---|---|---|---|---|---|---|---|
+| `sst_nsc` (broken IC) | +0.5 | +7.2 | +19.2 | +30.9 | | | | | survived 24 h |
+| `ic_nsc` (corrected IC) | +1.0 | +18.9 | +14.6 | +16.8 | +22.1 | **+4.7** | **-3.4** | **-15.5** | NaN at 7h04m |
+| `ic_ctl` (Davies, same IC) | +2.6 | +3.9 | +4.2 | +4.4 | +4.8 | +5.1 | +5.5 | +5.7 | survived 24 h |
+
+The NSCBC run that survived never reversed -- v at that wall is strictly positive and
+growing to +37 m/s. The NSCBC run that died reversed between 5 h and 6 h and blew up
+one hour later. Cell-level detail at i = 68..78, k = 1:
+
+    5 h:   +9.5  +8.6  +6.2  +3.7  +4.9  +23.1 +23.8 +26.6 +21.7 +20.2 +17.3
+    6 h:   -9.6 -10.8 -18.3 -16.6 -11.9   -7.1  -4.1  -6.7  -7.9  -4.0  -4.8
+    7 h: -174.6 -217.7 -237.4 -209.6 -215.2 -295.3  -8.1  -9.2 -15.5 -19.5 -18.3
+
+The six cells that reverse most strongly at 6 h are exactly the six that blow up at
+7 h; i = 74 onward reversed only weakly and stayed bounded. The 6 h reversal
+magnitude predicts the 7 h failure location.
+
+**Why this is the expected failure mode.** A subsonic face imposes 4+N conditions on
+inflow and exactly 1 on outflow. A face that reverses must switch between those two
+counts mid-run. That switch is the hard case in any characteristic treatment, and it
+is the one this configuration never exercised before: the earlier NSCBC runs all had
+persistently outflowing lateral faces.
+
+**Why the corrected IC exposed it.** Davies relaxes v toward the frame, and the
+frame's v at yhi stays positive, so a Davies run *cannot* reverse there. NSCBC leaves
+the face free, so interior dynamics can reverse it. The corrected IC changed the
+interior enough to produce that reversal; the broken IC's convecting interior did
+not. So the IC is the proximate cause of exposure but not of the defect.
+
+Note `erf.nscbc_outflow=0` in these runs, i.e. the outflow branch was already
+disabled -- so the face was being treated as inflow-or-nothing while physically
+switching between the two.
+
+**Falsified along the way:** terrain steepness. The steepest along-wall terrain step
+on yhi is at i = 111->112 (271.8 m per 3-km cell); the failure is at i = 72, forty
+cells away, where the step is 108 m and does not rank in the top six. The xlo and ylo
+walls are flat ocean throughout (12.5 m), so only xhi and yhi carry terrain at all,
+but within yhi the failure site is not distinguished by terrain.
