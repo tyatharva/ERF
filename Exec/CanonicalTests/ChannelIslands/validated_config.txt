@@ -1,0 +1,44 @@
+# CANONICAL VALIDATED CONFIGURATION  --  single source of truth
+#
+# Eight knobs had drifted between inputs_hindcast and the bdyfix/ runs we
+# actually scored. That was a process failure, not eight bugs: there was no
+# mechanism forcing the shipped deck to match the validated one. This file is
+# that mechanism. stage_run.sh's preflight asserts every MUST line against the
+# staged deck and refuses to stage a mismatch.
+#
+# Adding a knob here makes it mandatory. Moving it to EXCEPT makes it a
+# deliberate, documented divergence. There is no third option.
+#
+# MUST <key> <value>       staged deck must set exactly this
+# EXCEPT <key> <reason>    deliberate divergence; value not asserted
+
+MUST erf.hindcast_sfc_anchor_file      "sfc_anchor_jan09.bin"
+MUST erf.hindcast_frame_from_T         1
+MUST erf.hindcast_blend_bdy_theta      1
+MUST erf.hindcast_bdy_hydrometeors     1
+MUST erf.hindcast_wall_flux_correction true
+MUST erf.hindcast_wall_flux_tau        3600.0
+MUST erf.hindcast_blend_band_density   false
+MUST erf.rad_freq_in_time              180.0
+MUST amrex.fpe_trap_invalid            1
+MUST erf.check_for_nans_int            10
+MUST erf.dycore_horiz_adv_type         "WENOZ5"
+MUST erf.dycore_vert_adv_type          "WENOZ5"
+MUST erf.dryscal_horiz_adv_type        "WENOZ5"
+MUST erf.dryscal_vert_adv_type         "WENOZ5"
+MUST erf.moisture_model                "Morrison"
+MUST erf.pbl_type                      "MYNNEDMF"
+MUST erf.radiation_model               "RRTMGP"
+MUST erf.land_surface_model            "MM5"
+MUST erf.surface_layer.flux_type       moeng
+MUST erf.init_type                     "HindCast"
+MUST erf.use_real_bcs                  true
+MUST erf.anelastic                     0
+MUST max_step                          -1
+
+# --- deliberate divergences from bdyfix/wz -----------------------------------
+EXCEPT erf.moistscal_horiz_adv_type OPEN DECISION: deck Upwind_3rd, wz Upwind_5th. Upwind_5th gives better amplitude (bias 0.73x vs 0.57x, spectrum 0.66 vs 0.50) and worse placement (FSS 5mm@3km 0.395 vs 0.423). Unresolved pending finding #25.
+EXCEPT erf.moistscal_vert_adv_type  OPEN DECISION: see moistscal_horiz_adv_type.
+EXCEPT amr.check_per  Production checkpoints every 6 h; bdyfix experiments disable them (-1) to save I/O.
+EXCEPT amr.check_int  As amr.check_per.
+EXCEPT erf.plot_per_1 Production writes hourly; short benchmarks disable plotting.

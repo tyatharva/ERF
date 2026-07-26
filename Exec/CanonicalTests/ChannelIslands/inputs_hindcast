@@ -51,6 +51,11 @@ erf.hindcast_frame_from_T     = 1
 erf.hindcast_blend_bdy_theta  = 1
 erf.hindcast_bdy_hydrometeors = 1
 
+# Wall flux correction: on in every experiment, absent from the shipped deck.
+# Measured dynamically invisible and halves mass drift.
+erf.hindcast_wall_flux_correction = true
+erf.hindcast_wall_flux_tau        = 3600.0
+
 # Lateral relaxation toward ERA5. [RESIZED] 120 km sponges would consume the
 # whole 192 km N-S extent (2x120 > 192); 30 km keeps ~65% of the domain
 # sponge-free while still relaxing smoothly to ERA5.
@@ -87,7 +92,10 @@ erf.real_width   = 10                             # cells (30 km at 3 km)
 # this entirely (-0.26%/day) because vigorous through-flow ventilated the
 # domain. With the blend on, the same calm segment holds -0.6%/24 h and
 # p_max steady at ~99.9 kPa. Required for every segment.
-erf.hindcast_blend_band_density = true
+# [AUDIT 2026-07-26] was true in the shipped deck and FALSE in every run we
+# scored, including the baseline. UPSTREAM_ISSUES #12: band-density blending is
+# not momentum-consistent and is the dominant band-updraft source.
+erf.hindcast_blend_band_density = false
 
 # Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
 erf.hindcast_zhi_sponge_damping  = true

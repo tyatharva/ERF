@@ -103,32 +103,45 @@ if ms != "-1":
 #     lines for weeks, so the shipped deck silently produced the original
 #     broken IC (UPSTREAM_ISSUES 19-24, audit item 4 SEV-1). Fail loudly
 #     rather than let a deck without them look normal.
-REQUIRED = {
-    "erf.hindcast_sfc_anchor_file":  None,     # any non-empty path
-    "erf.hindcast_frame_from_T":     "1",
-    "erf.hindcast_blend_bdy_theta":  "1",
-    "erf.hindcast_bdy_hydrometeors": "1",
-    "erf.rad_freq_in_time":          None,     # any positive value
-}
-for key, want in REQUIRED.items():
-    got = deck_val(key)
-    if got is None:
-        sys.exit(f"PREFLIGHT: {key} absent from the deck. Without it the run "
-                 "reproduces the pre-fix initial condition (+5 K warm bias, "
-                 "unstable marine layer). See UPSTREAM_ISSUES 19-24.")
-    if want is not None and got != want:
-        sys.exit(f"PREFLIGHT: {key} = {got}; expected {want}")
-    if want is None and (not got or got in ("0", "0.0", "\"\"")):
-        sys.exit(f"PREFLIGHT: {key} = {got}; must be set to a usable value")
-if deck_val("erf.rad_freq_in_steps") is not None:
-    sys.exit("PREFLIGHT: erf.rad_freq_in_steps is still in the deck; it is "
-             "superseded by erf.rad_freq_in_time and the two together make the "
-             "radiative timescale dt-dependent. Remove it.")
-anchor = deck_val("erf.hindcast_sfc_anchor_file")
+#     Asserted against validated_config.txt, the single source of truth.
+manifest = os.path.join(os.path.dirname(os.path.abspath(run.rstrip("/"))),
+                        "Exec/CanonicalTests/ChannelIslands/validated_config.txt")
+if not os.path.exists(manifest):
+    manifest = "/app/ERF/Exec/CanonicalTests/ChannelIslands/validated_config.txt"
+if not os.path.exists(manifest):
+    sys.exit(f"PREFLIGHT: validated_config.txt not found; cannot verify the deck")
+bad = []
+nmust = 0
+for line in open(manifest):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    parts = line.split(None, 2)
+    if parts[0] == "MUST":
+        nmust += 1
+        key, want = parts[1], parts[2].strip().strip('"')
+        got = deck_val(key)
+        got = got.strip().strip('"') if got is not None else None
+        if got is None:
+            bad.append(f"  {key}: ABSENT, must be {want}")
+        elif got != want:
+            bad.append(f"  {key}: deck has {got}, must be {want}")
+if bad:
+    sys.exit("PREFLIGHT: the staged deck diverges from the validated "
+             "configuration (validated_config.txt):\n" + "\n".join(bad) +
+             "\n  Either fix the deck or move the knob to an EXCEPT line "
+             "with a reason. Eight of these had drifted silently before the "
+             "2026-07-26 audit.")
+print(f"PREFLIGHT: {nmust} validated-config knobs match")
+anchor = deck_val("erf.hindcast_sfc_anchor_file").strip('"')
 if not os.path.exists(os.path.join(run, anchor)):
     sys.exit(f"PREFLIGHT: anchor file {anchor} not staged into {run}. "
              "Generate it with precip_check/make_sfc_anchor.py for this "
              "date and domain.")
+if deck_val("erf.rad_freq_in_steps") is not None:
+    sys.exit("PREFLIGHT: erf.rad_freq_in_steps is still in the deck; it is "
+             "superseded by erf.rad_freq_in_time and the two together make the "
+             "radiative timescale dt-dependent. Remove it.")
 
 # 2. frame coverage vs deck datetimes
 t0 = datetime.strptime(deck_val("start_datetime"), "%Y-%m-%d %H:%M:%S")
