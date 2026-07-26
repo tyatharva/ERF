@@ -110,13 +110,26 @@ if not os.path.exists(manifest):
     manifest = "/app/ERF/Exec/CanonicalTests/ChannelIslands/validated_config.txt"
 if not os.path.exists(manifest):
     sys.exit(f"PREFLIGHT: validated_config.txt not found; cannot verify the deck")
+deck_ncell = " ".join((deck_val("amr.n_cell") or "").split())
 bad = []
 nmust = 0
+active = True          # shared block until the first DOMAIN line
+domain_tag = None
+seen_domains = []
 for line in open(manifest):
     line = line.strip()
     if not line or line.startswith("#"):
         continue
     parts = line.split(None, 2)
+    if parts[0] == "DOMAIN":
+        tag, ncell = parts[1], " ".join(parts[2].split())
+        seen_domains.append((tag, ncell))
+        active = (ncell == deck_ncell)
+        if active:
+            domain_tag = tag
+        continue
+    if not active:
+        continue
     if parts[0] == "MUST":
         nmust += 1
         key, want = parts[1], parts[2].strip().strip('"')
@@ -132,7 +145,13 @@ if bad:
              "\n  Either fix the deck or move the knob to an EXCEPT line "
              "with a reason. Eight of these had drifted silently before the "
              "2026-07-26 audit.")
-print(f"PREFLIGHT: {nmust} validated-config knobs match")
+if domain_tag is None:
+    sys.exit(f"PREFLIGHT: amr.n_cell = '{deck_ncell}' matches no DOMAIN block in "
+             "validated_config.txt. Known domains: "
+             + ", ".join(f"{t} ({n})" for t, n in seen_domains) +
+             ". Add a DOMAIN block with this domain's anchor file, prob_lo/hi "
+             "and stretching before staging it.")
+print(f"PREFLIGHT: {nmust} validated-config knobs match [domain {domain_tag}]")
 anchor = deck_val("erf.hindcast_sfc_anchor_file").strip('"')
 if not os.path.exists(os.path.join(run, anchor)):
     sys.exit(f"PREFLIGHT: anchor file {anchor} not staged into {run}. "

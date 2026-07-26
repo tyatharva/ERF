@@ -11,8 +11,14 @@
 #
 # MUST <key> <value>       staged deck must set exactly this
 # EXCEPT <key> <reason>    deliberate divergence; value not asserted
+# DOMAIN <tag> <n_cell>    starts a domain-specific block
+#
+# Lines before the first DOMAIN apply to every domain. Lines after a DOMAIN line
+# apply only when the deck's amr.n_cell matches it. Domain-specific values --
+# the anchor binary, prob_lo/prob_hi, grid stretching -- MUST live in a DOMAIN
+# block, or the guard that catches drift becomes the thing blocking a legitimate
+# domain change.
 
-MUST erf.hindcast_sfc_anchor_file      "sfc_anchor_jan09.bin"
 MUST erf.hindcast_frame_from_T         1
 MUST erf.hindcast_blend_bdy_theta      1
 MUST erf.hindcast_bdy_hydrometeors     1
@@ -42,3 +48,26 @@ EXCEPT erf.moistscal_vert_adv_type  OPEN DECISION: see moistscal_horiz_adv_type.
 EXCEPT amr.check_per  Production checkpoints every 6 h; bdyfix experiments disable them (-1) to save I/O.
 EXCEPT amr.check_int  As amr.check_per.
 EXCEPT erf.plot_per_1 Production writes hourly; short benchmarks disable plotting.
+
+# =============================================================================
+DOMAIN channelislands-3km-128x64 128 64 32
+# The domain every result through UPSTREAM_ISSUES #25 was scored on. Retained so
+# those runs stay reproducible and comparable.
+MUST erf.hindcast_sfc_anchor_file  "sfc_anchor_jan09.bin"
+MUST geometry.prob_lo              -195131.04 -126372.41     0.0
+MUST geometry.prob_hi              188868.96   65627.59 17893.69
+MUST erf.grid_stretching_ratio     1.16
+MUST erf.initial_dz                25.0
+
+# =============================================================================
+DOMAIN channelislands-3km-192x96 192 96 48
+# Enlarged domain: NE pin 34.7/-117.2, sized so the scoring cells clear the
+# 240 km spin-up fetch that made the #25 reading ambiguous. 34.5 is excluded --
+# it puts two San Gabriel peaks inside the 10-cell relaxation band, measured
+# failure at 4.3 h. Projection is PINNED to the 128x64 LCC so the two domains
+# stay comparable; see the assertion in WriteICFromERA5Data.py.
+MUST erf.hindcast_sfc_anchor_file  "sfc_anchor_jan09_192x96.bin"
+MUST geometry.prob_lo              -388229.74 -166933.25     0.0
+MUST geometry.prob_hi              187770.26  121066.75  19003.0
+MUST erf.grid_stretching_ratio     1.0931
+MUST erf.initial_dz                25.0
