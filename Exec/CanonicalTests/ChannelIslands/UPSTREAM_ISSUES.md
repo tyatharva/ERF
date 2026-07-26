@@ -2166,3 +2166,61 @@ Derive theta from frame T and the hydrostatically-integrated pressure that item 
 already computes from ERA5 `sp`. That leaves every trustworthy field untouched and
 drops the erftools pressure error entirely, instead of cancelling it against
 another error.
+
+## 22. 24-h Jan-9 Davies on the corrected IC: amplitude fixed, placement worse
+
+First scoring taken against an initial condition verified correct against ERA5
+(T 0.00 K, theta -0.05 K, rho +0.05%, p +28 Pa at every level; statically stable
+everywhere). Land d>=3, 941 cells, against MRMS.
+
+| metric | baseline (broken IC) | corrected IC | MRMS |
+|---|---|---|---|
+| bias | 3.99x | **0.55x** | 1.00 |
+| correlation | +0.357 | **-0.107** | |
+| RMSE | 51.03 mm | **19.39 mm** | |
+| mean | 33.90 mm | 4.69 mm | 8.51 mm |
+| p50 / p90 / max | 20.1 / 66.1 / 470.7 | 2.1 / 12.4 / 33.1 | 0.2 / 36.1 / 69.1 |
+| island mean (obs 0.00) | 5.82 mm | **0.20 mm** | 0.00 |
+
+**Amplitude is fixed.** Bias 7x closer to unity, RMSE down 62%, and the island
+points -- where MRMS observes exactly zero -- go from 5.82 mm to 0.20 mm.
+
+**Placement is worse, and worst where it matters.** Correlation degrades as the
+subset is restricted toward where it actually rained:
+
+| subset | n | corrected | baseline | corr(MRMS, terrain) |
+|---|---|---|---|---|
+| all land d>=3 | 941 | -0.107 | +0.357 | -0.135 |
+| north band j>=48 | 594 | -0.287 | +0.327 | -0.130 |
+| MRMS > 1 mm | 357 | -0.620 | +0.183 | +0.058 |
+| MRMS > 5 mm | 221 | **-0.826** | -0.067 | -0.032 |
+
+The hypothesis that the baseline's +0.357 was merely the north-south gradient is
+**falsified**: it holds +0.327 within the north band alone. The baseline had modest
+real pattern skill; the corrected run has anti-skill where the rain is.
+
+The large-scale gradient is right, though. Land d>=3 means by j band (S->N):
+
+    MRMS      0.00   0.00   0.05  13.45
+    corrected 0.10   0.03   2.45   6.28
+    baseline  2.95   4.78  22.39  42.79
+
+Correct shape, about half the amount, against a baseline that was wet everywhere.
+
+### Leading hypothesis: hydrometeor spin-up, not the IC
+
+Flow is northward (v at ylo +7.2 m/s inflow, yhi outflow). MRMS puts the event at
+j = 48-64, i.e. **144-192 km from the inflow edge** -- squarely inside the measured
+120-165 km spin-up recovery distance for a model driven with hydrometeors zeroed at
+inflow. The model cannot have mature precipitation there; it is still growing
+condensate from scratch. That predicts exactly what is observed: roughly the right
+domain total, the right large-scale gradient, and the worst pattern error
+concentrated where the observed rain is.
+
+qc and qr are already interpolated onto the ERF mesh and then discarded (item 21,
+section 4 of the audit). Wiring them into the cons components and the boundary
+planes is the next test, and it is now the leading candidate rather than a
+nice-to-have.
+
+The IC work is not implicated in the placement error: the IC is verified correct
+against ERA5 to 0.05 K and the amplitude metrics all moved the right way.
