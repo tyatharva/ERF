@@ -319,7 +319,28 @@ realbdy_compute_relaxation (const int& icomp,
         amrex::Real eta_lo = (y < y_end ) ? (y_end  - y) / (y_end  - ProbLo[1]) : zero;
         amrex::Real eta_hi = (y > y_strt) ? (y - y_strt) / (ProbHi[1] - y_strt) : zero;
         amrex::Real eta    = std::max(eta_lo,eta_hi);
-        amrex::Real Factor = std::max(xi*xi,eta*eta);
+        // CORNER BLEND. Was max(xi^2, eta^2). Level sets of a max are L-shaped,
+        // so inside the corner square grad(F) has components in BOTH directions
+        // and flips branch discontinuously across the diagonal xi = eta. That
+        // makes grad(F).(A-B) a spurious source no wall-normal projection can
+        // remove -- the corner case the tangential-only work predicted survives
+        // by construction. Measured: it became the DOMINANT |w| signal in the
+        // domain (18.0 m/s at the xlo/yhi corner vs a few m/s two cells away)
+        // and killed the 192x96 24-h run at 18 h. See UPSTREAM_ISSUES 27/27a.
+        //
+        // F = 1 - (1-xi^2)(1-eta^2), written EXPANDED as xi^2 + eta^2 - xi^2 eta^2.
+        // The two are algebraically identical but not numerically: the factored
+        // form computes 1-(1-a) on a straight face, which loses the low bits of
+        // a, so every straight face would shift. Expanded, eta^2 = 0 gives
+        // xi^2 + 0 - 0 = xi^2 EXACTLY, so straight faces stay bit-identical and
+        // only the corner square changes.
+        //   - reduces to xi^2 when eta = 0 (straight face, bitwise)
+        //   - equals 1 at the corner, so wall strength is preserved
+        //   - polynomial in (xi,eta), hence C^1 across the diagonal
+        //   - bounded by 1 (unlike xi^2 + eta^2, which overshoots and over-forces)
+        amrex::Real xi2    = xi*xi;
+        amrex::Real eta2   = eta*eta;
+        amrex::Real Factor = xi2 + eta2 - xi2*eta2;
 
         amrex::Real delta = arr_xlo(i  ,j  ,k,n) - data_arr(i  ,j  ,k  ,n+icomp);
         amrex::Real Temp  = Factor*F1*delta;
@@ -337,7 +358,11 @@ realbdy_compute_relaxation (const int& icomp,
         amrex::Real eta_lo = (y < y_end ) ? (y_end  - y) / (y_end  - ProbLo[1]) : zero;
         amrex::Real eta_hi = (y > y_strt) ? (y - y_strt) / (ProbHi[1] - y_strt) : zero;
         amrex::Real eta    = std::max(eta_lo,eta_hi);
-        amrex::Real Factor = std::max(xi*xi,eta*eta);
+        // Corner blend -- see the bx_xlo kernel above for the rationale and for
+        // why this is written expanded rather than as 1-(1-xi^2)(1-eta^2).
+        amrex::Real xi2    = xi*xi;
+        amrex::Real eta2   = eta*eta;
+        amrex::Real Factor = xi2 + eta2 - xi2*eta2;
 
         amrex::Real delta = arr_xhi(i  ,j  ,k,n) - data_arr(i  ,j  ,k  ,n+icomp);
         amrex::Real Temp  = Factor*F1*delta;
