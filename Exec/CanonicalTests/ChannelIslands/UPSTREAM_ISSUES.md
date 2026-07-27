@@ -2878,3 +2878,72 @@ why it is deterministic. Next step is to find what BoxArray/DistributionMap the
 frame-advance path creates and destroys per read.
 
 **Status: NOT FIXED. The 24-h gate is not reached.**
+
+### 29c. It is a GPU MEMORY fault, not physics. Still not fixed.
+
+**Found: per-call BoxArray/DistributionMapping/MultiFab churn.** `strip_to_global_fab`
+(ERF_WeatherDataInterpolation.cpp:725) constructs and destroys a fresh `BoxArray`,
+`DistributionMapping` and `MultiFab` on EVERY call, and `ParallelCopy` registers
+cache metadata keyed on those ids:
+
+```cpp
+BoxArray sba(strip);
+DistributionMapping sdm(Vector<int>({0}));
+MultiFab smf(sba, sdm, 1, 0);
+smf.ParallelCopy(src, scomp, 0, 1);
+```
+
+It is called 4 planes x BdyEnd vars x 9 times ~= 250 times, but only at
+INITIALIZATION, not per frame advance. So the BDKey-recycling shape the search
+predicted is present -- just not on the per-frame path.
+
+**Precedent already in this codebase.** ERF_SurfaceDataInterpolation.cpp:462
+carries this comment, from an earlier fix in this campaign:
+
+> "Allocating these per call -- and worse, allocating `nxt` inside the 12-sweep
+> loop -- meant 12 GPU MultiFab allocations every timestep, which segfaulted a
+> 24-h run at ~27.5k steps (SIGSEGV, no NaN, no assert)."
+
+Same class, same signature, fixed there by hoisting scratch to statics.
+
+**Fix attempt 2 (hoist the 13 per-frame DeviceVectors to reused statics): FAILED,
+and made it WORSE.** The reproducer then failed EARLIER, at step 46226, with
+`Kokkos ERROR: Cuda memory space failed to allocate 205.1 MiB`. Reverted.
+ELIMINATED: allocation churn of the frame scratch buffers is not the cause, and
+removing it costs headroom that something else needs.
+
+**The failure is memory, not physics.** Symptoms across probes:
+
+| probe | result |
+|---|---|
+| default | CUDA 700 at 46227 |
+| `the_arena_init_size=1000000` | CUDA 700 one step EARLIER |
+| `the_arena_is_managed=1` | still faults |
+| static frame scratch | Kokkos OOM, earlier |
+| `rad_ncol_chunk` 2048 / 1024 | CUDA 700, unchanged |
+| restart from chk28351 (12 h) | Kokkos OOM immediately, in `Radiation::run_impl()` |
+
+A 205 MiB allocation failing with 8.5 GB free is not a true OOM -- it is a CUDA
+context already poisoned by an earlier illegal access, after which every
+allocation fails. compute-sanitizer on that restart reports
+`cudaErrorMemoryAllocation` inside `Radiation::run_impl()`.
+
+**There is no leak.** GPU memory over the full 18-h run is flat: mean 7.7-8.2 GB
+per octile, peak 10617 MiB of 16376, growth first-to-last octile **+206 MiB**.
+5.8 GB free at peak. So exhaustion-by-accumulation is ruled out.
+
+**Symptom is not run-to-run stable** (CUDA 700 vs Kokkos OOM for the same build
+and inputs), consistent with item 13's finding that this SP/GPU fork is not
+bit-reproducible.
+
+**Kept:** the lifetime barrier from attempt 1 (real use-after-free window).
+**Reverted:** the static frame scratch.
+
+**STATUS: NOT FIXED. The 24-h gate is not reached.** Two attempts, both
+falsified, both recorded. The remaining strong lead is the init-time
+BoxArray/DistributionMapping churn in `strip_to_global_fab` -- ~250 create/destroy
+cycles whose recycled BDKeys can collide with cached FillBoundary metadata for
+the long-lived `vars_old`/`vars_new`. That is consistent with the sanitizer stack
+(`FB_local_copy_gpu` under `FillPatchCrseLevel`) and with a garbage source
+pointer. Untested fix: give `strip_to_global_fab` a single persistent
+BoxArray/DistributionMapping/MultiFab reused across all ~250 calls.
