@@ -2650,3 +2650,68 @@ boxes meet at a corner the same cell is written by both, so the later launch
 wins and the corner silently takes one face's data while its neighbours take the
 other's. That is a target inconsistency independent of F, and it is consistent
 with a response insensitive to F. Verify the box overlap before assuming it.
+
+## 28. Boundary time interpolation is quantised to 128 s: the float32-epoch class, fifth appearance
+
+Read-only audit, 2026-07-27, prompted by three 24-h runs dying within one step of
+each other at 18.001-18.002 h.
+
+**The frames are clean.** All 9 3-hourly frames, both streams: zero non-finite
+values in any of rho/u/v/w/theta/qv/qc/qr or sst/q_star/t_star/u_star/ls_mask/alb.
+The 18:00 frame's frame-to-frame deltas sit in line with its seven predecessors
+(theta 109 K against 51-127 across the series; u 15.8, v 20.5, w 1.97, all
+mid-range). Sampled at the ERF corner cell (0,95) the forcing ramps smoothly
+through 18:00 with no discontinuity:
+
+| frame | 09Z | 12Z | 15Z | **18Z** | 21Z | 00Z |
+|---|---|---|---|---|---|---|
+| v at (0,95), k=20 | +11.30 | +15.06 | +22.92 | **+29.56** | +38.54 | +45.59 |
+
+So the data hypothesis is dead: nothing is wrong with the 18:00 frame.
+
+**The interpolation is NOT sound.** `ERF_BoundaryConditionsRealbdy.cpp:31-46`:
+
+```cpp
+Real time_tot = time + start_time;                      // ABSOLUTE epoch ~1.673e9
+Real time_since_start_bdy = time_tot - start_bdy_time;  // difference of float32 absolutes
+int  n_time = static_cast<int>( time_since_start_bdy / dT );
+Real alpha  = (time_since_start_bdy - n_time * dT) / dT;
+```
+
+float32 ULP at 1.673e9 is 128 s, so `time_tot` is quantised to 128 s and every
+quantity derived from it inherits that. With dT = 10800 s:
+
+* alpha resolution = 128/10800 = **0.011852**
+* **676** distinct (n_time, alpha) states over 24 h, against ~66,000 for a
+  continuous alpha
+* the boundary target therefore advances as a STAIRCASE: it holds constant for
+  ~128 s, then jumps by 1.19% of the whole frame-to-frame difference in a single
+  step. At the corner between 15Z and 18Z that is an instantaneous +0.079 m/s in
+  v every 128 s; between 18Z and 21Z, +0.107 m/s.
+
+This is the same defect as items 19/21 (frame rho,theta absolute pressure), 20
+(erf_enforce_hse absolute 101325 Pa), retracted 19f (absolute 305 m), and 26
+(rad_freq_in_time absolute epoch clock): **an absolute single-precision value
+used where only a difference was ever meaningful.** Fifth appearance.
+
+**But it does NOT explain the 18 h timing.** Every frame transition shows the
+identical pattern -- alpha climbing to ~0.99, n_time incrementing, alpha
+restarting near 0.01:
+
+| transition | 3 h | 6 h | 9 h | 12 h | 15 h | **18 h** | 21 h |
+|---|---|---|---|---|---|---|---|
+| alpha before | 0.9956 | 0.9911 | 0.9985 | 0.9941 | 0.9896 | **0.9970** | 0.9926 |
+| alpha after | 0.0074 | 0.0030 | 0.0104 | 0.0059 | 0.0015 | **0.0089** | 0.0044 |
+
+18 h is unremarkable among them. The quantisation is a real defect worth fixing
+on its own terms -- it applies impulsive boundary forcing 675 times per day, and
+the impulse size scales with the frame-to-frame difference, which grows through
+this storm -- but it is uniform in time and does not by itself select 18 h.
+
+**Fix:** compute `time_since_start_bdy` from MODEL-RELATIVE time. `time` is
+already small and precise; only the epoch offset destroys it. Same fix as 26,
+and `ERF.cpp:626` (`start_time + cur_time < stop_time`) has the same shape and
+matters for month-long segments.
+
+**Status: the corner line is closed and the frame-data hypothesis is closed.**
+What selects 18 h is not yet explained.
