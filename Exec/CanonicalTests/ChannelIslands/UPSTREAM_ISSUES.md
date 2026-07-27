@@ -2826,3 +2826,55 @@ anything physical. That makes the segment run diagnostic as well as productive.
 
 **Keep the #28 fix regardless:** the elapsed-span stop conditions are required
 for month segments at production epoch magnitudes.
+
+### 29a. Fix attempt 1 (lifetime barrier): FAILED. What it eliminated.
+
+`FillForecastStateMultiFabs` and `FillSurfaceStateMultiFabs` both declare
+FUNCTION-LOCAL `Gpu::DeviceVector`s and capture their raw `.data()` pointers in
+ParallelFors. The only `streamSynchronize` in either function sits after the H2D
+copies, not after the consuming kernels, so both returned -- destroying the
+buffers, which AMReX frees to the arena WITHOUT stream ordering -- while those
+kernels could still be in flight.
+
+That is a genuine lifetime hazard and the barrier is kept. **It is not this bug:**
+the reproducer still faults identically.
+
+ELIMINATED: use-after-free of those functions' own local device buffers by their
+own kernels.
+
+### 29b. The fault tracks arena layout
+
+| arena setting | outcome |
+|---|---|
+| default | CUDA 700 at step 46227 |
+| `the_arena_is_managed=1` | CUDA 700, still faults |
+| `the_arena_init_size=1000000` (1 MB) | CUDA 700 **at step 46226** -- one step EARLIER |
+
+Moving the fault by changing allocator layout confirms a stale/dangling pointer
+whose visibility depends on what the arena hands out where. It does not identify
+the owner.
+
+Sanitizer report is stable across attempts -- same kernel, same call stack, a
+different garbage address each time:
+
+```
+Invalid __global__ read of size 4 bytes at AMReX_FBI.H:553
+  FB_local_copy_gpu <- FBEP_nowait <- FillBoundary
+  <- FillPatchSingleLevel <- ERF::FillPatchCrseLevel <- ERF::timeStep
+```
+
+`FillPatchCrseLevel` FillBoundaries `vars_old/vars_new[0]`, which the frame-read
+path does not touch -- so the frame advance is corrupting something those
+MultiFabs depend on, not the forecast state itself.
+
+**Leading hypothesis, NOT yet tested:** AMReX caches FillBoundary communication
+metadata (`m_TheFBCache`) keyed by BDKey (BoxArray + DistributionMap ids + ngrow
++ periodicity). Those ids are RECYCLED when the objects are destroyed. A cached
+FB whose key collides with a recycled id returns copy tags built for a different
+BoxArray, and the local box indices in those tags then resolve to fabs that do
+not exist -- producing exactly a garbage source pointer in `FB_local_copy_gpu`.
+This is count-driven, which is why it first bites on the seventh frame read and
+why it is deterministic. Next step is to find what BoxArray/DistributionMap the
+frame-advance path creates and destroys per read.
+
+**Status: NOT FIXED. The 24-h gate is not reached.**

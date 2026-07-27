@@ -693,6 +693,23 @@ ERF::FillForecastStateMultiFabs(const int lev,
             time,
             0 // level
         );*/
+
+    // LIFETIME BARRIER (UPSTREAM_ISSUES 29). Every Gpu::DeviceVector declared in
+    // this function is FUNCTION-LOCAL, and its raw .data() pointer is captured by
+    // the interpolation ParallelFors above. AMReX frees an arena block on
+    // destruction WITHOUT stream ordering, so returning here while those kernels
+    // are still in flight releases memory they are actively reading -- and the
+    // arena hands the same block to the next allocation. The single
+    // streamSynchronize earlier in this function covers only the H2D copies, not
+    // the kernels that consume them.
+    //
+    // MEASURED: the collision first bites on the SEVENTH frame read (the frame
+    // pair advancing to (6,7), t = 18.0017 h), deterministically, as an invalid
+    // 4-byte global read inside AMReX FB_local_copy_gpu under
+    // ERF::FillPatchCrseLevel -- i.e. in an unrelated MultiFab that had been
+    // handed the recycled block. It killed four consecutive 24-h runs and was
+    // misread as a physical NaN blowup for six hypotheses.
+    amrex::Gpu::streamSynchronize();
 }
 
 #ifdef ERF_USE_NETCDF

@@ -223,6 +223,12 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
         });
     }
 
+    // LIFETIME BARRIER -- same defect as FillForecastStateMultiFabs, see
+    // UPSTREAM_ISSUES 29. xvec_d/yvec_d/zvec_d/ls_mask_d/sst_d/alb_d are
+    // function-local DeviceVectors whose raw pointers are captured by the
+    // ParallelFors above; returning without a barrier frees them into the arena
+    // while those kernels may still be reading.
+    amrex::Gpu::streamSynchronize();
 }
 
 void
