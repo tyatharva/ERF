@@ -2715,3 +2715,48 @@ matters for month-long segments.
 
 **Status: the corner line is closed and the frame-data hypothesis is closed.**
 What selects 18 h is not yet explained.
+
+### 28a. The quantisation fix is correct and changes nothing: fourth death at 18.001 h
+
+Fix applied (frame index and alpha from model-relative time; three absolute-epoch
+stop comparisons in ERF.cpp/ERF_Coupling.cpp converted to elapsed spans).
+
+**The fix is live** -- clamp-only and clamp+fix diverge at step 25 in the 8th
+significant digit (TIME 17.15820269 vs 17.15820448), which is exactly the size of
+perturbation a continuous-instead-of-staircase alpha should produce.
+
+**And it changes nothing.** Fourth consecutive death at 18.0017 h, and the dt
+trajectory is indistinguishable from the unfixed run:
+
+| window | 0-3 | 3-6 | 6-9 | 9-12 | 12-15 | 15-18 |
+|---|---|---|---|---|---|---|
+| original | 1.5990 | 1.6201 | 1.5561 | 1.3998 | 1.2037 | 1.1907 |
+| +corner clamp +28 fix | 1.5990 | 1.6200 | 1.5571 | 1.4013 | 1.2029 | 1.1898 |
+
+Under 0.1% in every window across 18 hours. The staircase impulses were
+dynamically negligible: the model integrates through them and the response is
+set by the smooth trend, not by the 675 kicks.
+
+**The fix is still worth keeping** -- it is correct, it removes a real defect
+from the forcing path, and the elapsed-span stop conditions are REQUIRED for
+month-long segments where the epoch magnitude is larger. But it is not the
+cause, and the "threshold reading" it was meant to test is falsified with it.
+
+### 28b. Four runs, one death time, six falsified hypotheses
+
+| # | hypothesis | how tested | result |
+|---|---|---|---|
+| 1 | corner weight magnitude | max -> C1 blend, F changed up to 27% | 0.6% response, died 18.001 |
+| 2 | grad(F) branch discontinuity at the diagonal | same change (C1 by construction) | same |
+| 3 | double-write / later-launch-wins at corners | source read | boxes explicitly trimmed; written once |
+| 4 | disagreeing per-face targets | source read | same MultiFab, bit-identical |
+| 5 | bad 18:00 frame data | all 9 frames, both streams | clean; corner forcing ramps smoothly |
+| 6 | float32 epoch quantisation of the forcing | fixed and rerun | fix live, no effect |
+
+Death times: 18.002, 18.001, 18.001, 18.0017 h. dt trajectories agree to <0.1%
+across all four. The failure is robust and deterministic and is insensitive to
+corner weighting, corner |w|, boundary data content, and boundary time
+interpolation.
+
+Whatever selects 18 h is in the bulk solution, not the boundary machinery.
+NOT INVESTIGATED FURTHER -- reporting per instruction before any next step.

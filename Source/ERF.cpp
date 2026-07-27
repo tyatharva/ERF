@@ -621,9 +621,20 @@ ERF::Evolve ()
     // Tracked in double to avoid float32 drift over many timesteps in single-precision builds.
     double cur_time = static_cast<double>(t_new[0]);
 
+    // ELAPSED-TIME STOP CONDITION (UPSTREAM_ISSUES 28).
+    //
+    // This compared `start_time + cur_time` against `stop_time`. Both are absolute
+    // epoch seconds (~1.673e9), where the float32 ULP is 128 s, so the sum did not
+    // change at all for ~100 consecutive steps and the stop instant could only be
+    // resolved to 128 s. Formed ONCE, in double, as an elapsed span, the comparison
+    // is against a small precise cur_time instead. Matters for month-long segments,
+    // where the absolute magnitude is larger still.
+    const Real stop_elapsed = static_cast<Real>(static_cast<double>(stop_time) -
+                                                static_cast<double>(start_time));
+
     // Take one coarse timestep by calling timeStep -- which recursively calls timeStep
     //      for finer levels (with or without subcycling)
-    for (int step = istep[0]; (step < max_step) && (start_time+cur_time < stop_time); ++step)
+    for (int step = istep[0]; (step < max_step) && (cur_time < stop_elapsed); ++step)
     {
         if (use_datetime) {
             Print() << "\n" << getTimestamp(start_time+cur_time, datetime_format)
@@ -737,7 +748,7 @@ ERF::Evolve ()
         }
 #endif
 
-        if (start_time+cur_time >= stop_time - Real(1.e-6)*dt[0]) break;
+        if (cur_time >= stop_elapsed - Real(1.e-6)*dt[0]) break;   // elapsed, not epoch (item 28)
     }
 
     // Write plotfiles at final time

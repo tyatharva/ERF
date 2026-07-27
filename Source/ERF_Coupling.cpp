@@ -15,7 +15,10 @@ ERF::EvolveOneStep (amrex::Real /*time*/, amrex::Real /*dt_request*/)
     amrex::Real cur_time = t_new[0];
     const int step = istep[0];
 
-    if (start_time + cur_time >= stop_time) {
+    // Elapsed span, not an absolute epoch sum -- see UPSTREAM_ISSUES 28.
+    const amrex::Real stop_elapsed = static_cast<amrex::Real>(
+        static_cast<double>(stop_time) - static_cast<double>(start_time));
+    if (cur_time >= stop_elapsed) {
         return amrex::Real(0.0);
     }
 

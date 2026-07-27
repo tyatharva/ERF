@@ -30,15 +30,37 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     // Time interpolation
     Real dT = bdy_time_interval;
 
+    // MODEL-RELATIVE TIME ONLY (UPSTREAM_ISSUES 28).
+    //
+    // This was `time_tot = time + start_time; time_since_start_bdy = time_tot -
+    // start_bdy_time`, forming a float32 difference of two ~1.673e9 epoch values.
+    // ULP at that magnitude is 128 s, so time_since_start_bdy was quantised to
+    // 128 s and alpha to 128/10800 = 0.011852: the boundary target held constant
+    // for ~128 s and then jumped 1.19% of the entire frame-to-frame difference in
+    // a single step. MEASURED: 676 distinct (n_time, alpha) states over 24 h
+    // against ~66,000 for a continuous alpha -- 675 impulsive boundary kicks per
+    // day, each scaling with the frame-to-frame difference.
+    //
+    // `time` is model-relative and precise (the step log prints TIME = 951.4483779).
+    // The frame offset is a run-constant, so it is formed ONCE, in double, and
+    // never re-differenced per step. The preflight requires frame[0] ==
+    // start_datetime, so it is normally exactly zero.
+    const Real bdy_offset = static_cast<Real>(static_cast<double>(start_time) -
+                                              static_cast<double>(start_bdy_time));
+    const Real bdy_span   = static_cast<Real>(static_cast<double>(final_bdy_time) -
+                                              static_cast<double>(start_bdy_time));
+    Real time_since_start_bdy = time + bdy_offset;
+    // Absolute wall-clock instant, for the ReadBndryPlanes path below ONLY.
+    // MUST NOT be used for frame indexing or interpolation weights -- that is
+    // precisely the 128 s quantisation this block exists to avoid.
     Real time_tot = time + start_time;
-    Real time_since_start_bdy = time_tot - start_bdy_time;
     int n_time    = static_cast<int>( time_since_start_bdy /  dT);
     int n_time_p1 = n_time + 1;
     Real alpha    = (time_since_start_bdy - n_time * dT) / dT;
 
     // Do not over run the last bdy file
-    if (time_tot >= final_bdy_time) {
-        n_time    = static_cast<int>( (final_bdy_time - start_bdy_time)/ dT);
+    if (time_since_start_bdy >= bdy_span) {
+        n_time    = static_cast<int>( bdy_span / dT);
         n_time_p1 = n_time;
         alpha     = zero;
     }
