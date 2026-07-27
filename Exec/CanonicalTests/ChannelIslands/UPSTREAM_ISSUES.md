@@ -2604,3 +2604,49 @@ Correcting one number in the report above: the failure cell's "terrain 12 m" is
 `z_phys` at k = 0, which is the FIRST CELL CENTRE -- terrain plus half of the
 25 m initial layer. Terrain there is 0.0. The corner sits over open ocean at
 exactly zero elevation.
+
+### 27d. The corner blend is FALSIFIED, and the null result exonerates the weighting
+
+`F = xi^2 + eta^2 - xi^2*eta^2` replacing `max(xi^2, eta^2)` (commit f54ec3a2).
+Straight faces verified bit-identical (0 of 760 cells changed); only the
+200-cell corner square differs, by up to 0.2461.
+
+Result: **no effect.** The run died at 18.001 h; the unfixed run died at
+18.002 h. Same corner, same curve, ~0.5% higher throughout:
+
+| t (h) | 14 | 15 | 16 | 17 | 18 |
+|---|---|---|---|---|---|
+| max\|w\| at xlo/yhi, `max()` | 8.69 | 11.34 | 13.05 | 15.41 | 18.00 |
+| max\|w\| at xlo/yhi, blend | 8.73 | 11.42 | 13.14 | 15.50 | 18.09 |
+
+**The null result is the useful part.** F in the corner square changed by up to
+27% at individual cells (0.562 -> 0.809 at (2,93)) and the response moved 0.6%.
+That is near-zero sensitivity of the corner |w| to the relaxation weight. If the
+runaway were driven by the weighting -- by its magnitude OR by the grad(F)
+branch discontinuity -- a 27% change in the forcing coefficient could not
+produce a 0.6% change in the response.
+
+**This exonerates the corner weighting as the mechanism, and predicts that the
+other two weighting options will also fail:** `min(F_x,F_y)` and a corner taper
+both act on the same coefficient the response is insensitive to. Neither is
+worth a run. Two experiments saved by a null result.
+
+Note also that corners exceed the interior from t = 1 h in BOTH runs (ratio 1.20
+at t=1, 1.98 at t=3), so "corners hold the domain max" is not a threshold the
+fix has to restore -- it is a property this scheme has never had.
+
+**Correction to 27:** the twelve-hour dt decline was reported there as the
+failure signature. It is not. The blend run reproduces the decline to within 1%
+(6-9 h: 1.5561 -> 1.5596; 9-12 h: 1.3998 -> 1.4108) while the corner weighting
+changed, so the decline is independent of the corner and most likely tracks the
+storm's intensification. The corner runaway begins at 14 h and is a separate,
+later event. The dt trajectory is NOT a diagnostic for this failure.
+
+**Where to look next.** Not the relaxation ramp. The cell (0,95) is in the
+width-1 SPECIFIED region of both the xlo and yhi faces, not merely in both
+relaxation bands. In `ERF_BoundaryConditionsRealbdy.cpp` the x-face and y-face
+fills are separate `ParallelFor` launches writing `dest_arr`, and where their
+boxes meet at a corner the same cell is written by both, so the later launch
+wins and the corner silently takes one face's data while its neighbours take the
+other's. That is a target inconsistency independent of F, and it is consistent
+with a response insensitive to F. Verify the box overlap before assuming it.
