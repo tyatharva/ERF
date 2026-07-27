@@ -3069,3 +3069,69 @@ pointers are corrupt, from a writer this trace has not found.
 
 **Ten hypotheses eliminated. Recommend deciding between the segment-length
 workaround and handing this upstream rather than an eleventh guess.**
+
+### 29h. Hunt for the WRITE: prime suspect ruled out, and the tool cannot see it
+
+Reframed per instruction: look for an out-of-bounds WRITE into neighbouring
+allocation, not the read we already know about.
+
+**`strip_to_global_fab` is definitively ruled out -- on frequency, not on
+plausibility.** Its only caller is `fill_bdy_data_from_hindcast()`, which has
+exactly two call sites: `ERF.cpp:2240` (restart) and `ERF.cpp:2398` (init). Both
+are one-time, before any stepping. It does NOT run per advance and therefore
+cannot corrupt anything at the seventh one.
+
+**compute-sanitizer STRUCTURALLY CANNOT see this write.** `AMReX_Arena.cpp:427`:
+
+```cpp
+the_arena_init_size = Gpu::Device::totalGlobalMem() / numDevicePartners() / 4L * 3L;
+```
+
+AMReX pre-allocates 3/4 of device memory as ONE `cudaMalloc` and sub-allocates
+from it. An overrun from one sub-allocation into the next is INSIDE a valid
+allocation, so memcheck reports nothing. This is why eleven sanitizer runs have
+only ever shown the far-out-of-bounds READ (the eventual dereference of the
+already-corrupted pointer) and never a write. The instrument is blind to the
+hypothesis.
+
+**Loop-bound audit of the per-advance path** (`FillForecastStateMultiFabs`), all
+negative:
+
+* `ParallelFor(gbx, ...)` writes `fine_cons_arr` over `mfi.growntilebox()` of the
+  cons MultiFab itself -- in bounds by construction.
+* `fine_latlon_arr` is written over the same `gbx` but is a DIFFERENT MultiFab,
+  defined with `ngrow = src0.nGrow()` (isotropic int) while cons uses
+  `ng = nGrowVect()` (IntVect). They are sized by different code paths -- a real
+  smell, and `ngrow` is a DEAD STORE in the cons loop at
+  `ERF_MakeNewArrays.cpp:397` -- but isotropic `ngrow` is >= cons's per-direction
+  ghosts, so latlon is over-provisioned, not under.
+* Face writes over `mfi.tilebox(IntVect(1,0,0))` reach i = hi+1, which lands in
+  the ghost region of an array with ng >= 1. In bounds.
+* nz after the level-0 drop: the drop erases `nxy` from every field AND one entry
+  from `zvec_h`, so `nz = 37` and the buffers sized `nx*ny*nz` agree. No 37/38
+  mismatch.
+* `strip_to_global_fab`'s ParallelCopy: `strip` IS `dest.box()`, 1 component both
+  sides, so extents and counts are equal by construction.
+* Host->device writes: `Gpu::copy` (synchronous) in `strip_to_global_fab`;
+  `copyAsync` + `streamSynchronize` in the frame fill.
+
+**Layout perturbations move the fault; serialization does not fix it.**
+
+| perturbation | result |
+|---|---|
+| default arena (12 GB slab) | CUDA 700 at 46227 |
+| `the_arena_init_size` 1 MB | CUDA 700 one step EARLIER |
+| 8 MB / 128 MB, no sanitizer | CUDA 700, no steps |
+| 8 MB + compute-sanitizer | **passes 46227**, zero invalid accesses |
+| `CUDA_LAUNCH_BLOCKING=1` | CUDA 700 at 46227 -- NOT a launch race |
+
+The sanitizer "pass" is memcheck's allocation padding changing adjacency, the
+same class of effect as the arena knobs -- not evidence of a race, since
+serializing launches does not help. Adjacency-dependence is confirmed; the
+writer is not localized.
+
+**Eleven hypotheses eliminated. The blocker is now tooling, not ideas:** the
+write cannot be caught until each buffer is individually bounded. The concrete
+next step is a diagnostic AMReX build whose arena performs a direct `cudaMalloc`
+per allocation instead of slab sub-allocation, using the same hash-gated patch
+machinery -- then memcheck bounds every buffer and the first bad write surfaces.
