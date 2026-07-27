@@ -39,7 +39,15 @@
 # LOCAL SUBMODULE PATCHES -- state required for a shippable run:
 #   Submodules/RRTMGP  MUST be patched (apply_rrtmgp_patch.sh, applied by the
 #                      build script). Correctness fix, keep.
-#   Submodules/AMReX   MUST be CLEAN. apply_amrex_fbcache_patch.sh exposes
+#   Submodules/AMReX   MUST be CLEAN. TWO diagnostic patches exist, both
+#                      reverted, both re-appliable from their hash-gated scripts:
+#                        apply_amrex_fbcache_patch.sh  (29e, BDKey -- falsified)
+#                        apply_amrex_arena_patch.sh    (29i, arena hunk size --
+#                          adds amrex.the_arena_hunk_size; default 0 is stock
+#                          behaviour, and hunk=64 + init_size=0 MAKES THE ITEM-29
+#                          FAULT DISAPPEAR by eliminating block reuse. That is a
+#                          DIAGNOSTIC, NOT A CONFIGURATION -- do not ship it as a
+#                          workaround; it masks a live use-after-free.) apply_amrex_fbcache_patch.sh exposes
 #                      private flushFBCache/flushCPCache for the UPSTREAM_ISSUES
 #                      29e BDKey diagnostic. That diagnostic is DONE (it
 #                      falsified the hypothesis) and the patch is unwired from

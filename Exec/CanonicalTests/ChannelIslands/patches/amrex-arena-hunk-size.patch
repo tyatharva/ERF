@@ -1,0 +1,35 @@
+--- a/Src/Base/AMReX_Arena.cpp	2026-07-27 16:09:08.424374225 -0400
++++ b/Src/Base/AMReX_Arena.cpp	2026-07-27 16:09:08.430056415 -0400
+@@ -459,6 +459,15 @@
+     pp.queryAdd( "the_pinned_arena_defragmentation",  the_pinned_arena_defragmentation);
+     pp.queryAdd(  "the_comms_arena_defragmentation",   the_comms_arena_defragmentation);
+     pp.queryAdd("the_arena_is_managed", the_arena_is_managed);
++    // ERF DIAGNOSTIC PATCH (UPSTREAM_ISSUES 29i). CArena sub-allocates from
++    // 8 MB hunks, so an overrun from one sub-allocation into the next is INSIDE
++    // a valid cudaMalloc and compute-sanitizer cannot see it. With a tiny hunk,
++    // CArena's `N = max(m_hunk, nbytes)` makes every allocation its own
++    // exact-sized cudaMalloc, so memcheck bounds each buffer individually and
++    // the first out-of-bounds WRITE surfaces. Default 0 preserves stock
++    // behaviour exactly. DIAGNOSTIC ONLY -- slow and memory-hungry.
++    long the_arena_hunk_size = 0;
++    pp.queryAdd("the_arena_hunk_size", the_arena_hunk_size);
+     pp.queryAdd("abort_on_out_of_gpu_memory", abort_on_out_of_gpu_memory);
+ 
+     {
+@@ -467,14 +476,14 @@
+         ai.SetReleaseThreshold(the_arena_release_threshold);
+         ai.SetDefragmentation(the_arena_defragmentation);
+         if (the_arena_is_managed) {
+-            the_arena = new CArena(0, ai.SetPreferred());
++            the_arena = new CArena(static_cast<std::size_t>(the_arena_hunk_size), ai.SetPreferred());
+ #ifdef AMREX_USE_GPU
+             the_arena->registerForProfiling("Managed Memory");
+ #else
+             the_arena->registerForProfiling("Cpu Memory");
+ #endif
+         } else {
+-            the_arena = new CArena(0, ai.SetDeviceMemory());
++            the_arena = new CArena(static_cast<std::size_t>(the_arena_hunk_size), ai.SetDeviceMemory());
+ #ifdef AMREX_USE_GPU
+             the_arena->registerForProfiling("Device Memory");
+ #else

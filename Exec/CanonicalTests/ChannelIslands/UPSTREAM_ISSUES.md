@@ -3135,3 +3135,58 @@ write cannot be caught until each buffer is individually bounded. The concrete
 next step is a diagnostic AMReX build whose arena performs a direct `cudaMalloc`
 per allocation instead of slab sub-allocation, using the same hash-gated patch
 machinery -- then memcheck bounds every buffer and the first bad write surfaces.
+
+## 29i. MECHANISM: it is a USE-AFTER-FREE on a recycled arena block, not an overrun
+
+Established by making every allocation its own exact-sized `cudaMalloc`.
+
+**The patch.** `CArena` sub-allocates from 8 MB hunks
+(`AMReX_CArena.H:161`), and `AMReX_CArena.cpp:81` sizes each new block
+`N = max(m_hunk, nbytes)`. A hash-gated diagnostic patch adds
+`amrex.the_arena_hunk_size` (default 0 = stock, verified bit-identical): with a
+tiny hunk, every allocation gets its own exact-sized `cudaMalloc` and every free
+a real `cudaFree`, so there is neither sub-allocation nor block REUSE.
+
+**Two measurements settle it:**
+
+| run | result |
+|---|---|
+| hunk=64, `init_size=0`, **with** compute-sanitizer, to 46227 | **zero invalid accesses**, step 46227 completes |
+| hunk=64, `init_size=0`, **no** sanitizer, to 46400 | **reaches 46400**, 173 steps past the fault, zero CUDA 700 |
+
+The second is the important one: it is not the sanitizer's padding and it is not
+bounding. **Eliminating arena block reuse removes the fault**, and with every
+buffer individually bounded there is **NO out-of-bounds write to find**.
+
+**Mechanism.** Something retains a device pointer into an arena block after that
+block is freed. CArena returns the block to its free list and hands it to a later
+allocation, whose writes overwrite the retained data. The stale holder is then
+used -- specifically the fab pointers that `FB_local_copy_gpu` dereferences under
+`FillPatchCrseLevel` -- producing a garbage address. With reuse eliminated the
+block is never handed out and never overwritten, so nothing breaks.
+
+**This explains every observation, including the ones that killed earlier models:**
+
+| observation | use-after-free explanation |
+|---|---|
+| deterministic step number | fixed alloc/free sequence; collision occurs at a fixed point |
+| garbage address varies run to run | whatever the new owner of the block wrote |
+| `the_arena_init_size` moves the fault | changes which block is recycled when |
+| cache flushing changes nothing | the pointers are overwritten, not the tags |
+| `CUDA_LAUNCH_BLOCKING=1` changes nothing | host-side free/realloc ordering, not a launch race |
+| per-allocation bounding finds NO write | correct -- there is no overrun |
+| no reuse => no fault | the defining test |
+
+It also explains why 29a's lifetime barrier did not help: that fixed
+kernels-still-in-flight for two functions, whereas this is a STORED pointer
+outliving its allocation.
+
+**NOT YET IDENTIFIED: which pointer.** The mechanism is established; the specific
+retained pointer is not. `hunk=64` is a DIAGNOSTIC, not a configuration -- it
+masks a live use-after-free and must not ship.
+
+**Next step, concrete:** binary-search the holder by keeping candidate
+allocations alive. AMReX's `Arena::free` is the choke point; instrumenting it to
+log (ptr, size) alongside the FabArray fab pointers at each frame advance would
+name the block whose reuse coincides with the corruption. The reproducer is 30
+seconds, so this is bisectable rather than speculative.
