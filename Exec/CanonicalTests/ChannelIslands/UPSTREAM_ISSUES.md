@@ -2947,3 +2947,49 @@ the long-lived `vars_old`/`vars_new`. That is consistent with the sanitizer stac
 (`FB_local_copy_gpu` under `FillPatchCrseLevel`) and with a garbage source
 pointer. Untested fix: give `strip_to_global_fab` a single persistent
 BoxArray/DistributionMapping/MultiFab reused across all ~250 calls.
+
+### 29d. CORRECTION: 29c's memory conclusions were contaminated. Attempt 3 falsified.
+
+**A leftover Docker container held 7072 MiB of GPU memory for 11 hours.** It was
+a survivor of a `timeout`-killed compute-sanitizer run: `timeout` kills the
+client, not the container. With 7.2 GB unavailable against a ~10.6 GB peak, the
+machine could not run the model at all.
+
+**Every OOM result in 29c is therefore invalid**, including:
+
+* attempt 2 (static frame scratch) "made it worse, Kokkos OOM" -- untested;
+* the chk28351 restart failing immediately in `Radiation::run_impl()`;
+* the `rad_ncol_chunk=5000` Kokkos OOM;
+* the inference that "the failure is memory, not physics" and that a poisoned
+  context explained a 205 MiB allocation failing with 8.5 GB free. **There was
+  not 8.5 GB free.** That reading was wrong, and 29c is retracted on that point.
+
+The one 29c finding that survives is from an uncontaminated source: GPU memory
+over the real 18-h run is flat, +206 MiB first-to-last octile, peak 10617 MiB.
+
+**On a clean GPU the original signature is exactly reproducible again:**
+step 46226 completes, `CUDA error 700` on the (6,7) frame advance at step 46227,
+`Compressible dt = 1.224641323` throughout -- a healthy solution up to the fault.
+
+**Attempt 3 (persistent box-keyed scratch in `strip_to_global_fab`): FAILED, and
+it is incorrect.** One persistent MultiFab per distinct box means the SAME
+MultiFab serves T, QV, RHO, QC and QR -- all cell-centred, all the same strip
+box -- across all 9 frame times. The state is corrupted immediately on restart:
+`Compressible dt` collapses from 1.2246 s to **0.0093 s**, a 130x drop, before
+any fault. Reverted.
+
+ELIMINATED: not the mechanism, and box-keyed persistence is the wrong shape --
+any persistent-scratch fix here must key on (box, variable, time) or explicitly
+clear between uses, or it cross-contaminates the boundary planes.
+
+**Process lesson, and it is the expensive one this session.** Three consecutive
+"results" were environmental. The tell was available and ignored: the symptom
+changed across builds on identical inputs (CUDA 700 -> Kokkos OOM), and item 13
+already establishes that this fork is not bit-reproducible, so a CHANGED FAILURE
+MODE should have prompted an environment check before a code conclusion. Check
+`nvidia-smi --query-compute-apps` and `docker ps` before interpreting any GPU
+memory symptom.
+
+**STATUS: NOT FIXED.** Three attempts, all falsified, all recorded. The
+strip_to_global_fab churn is real and remains the leading suspect, but the fix
+must not reuse one buffer across variables.
