@@ -349,6 +349,71 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     } // var
 
     // ***********************************************************************************
+    // CORNER w CONTAINMENT (erf.realbdy_corner_w_clamp, default on)
+    //
+    // The four cells where two lateral bands meet run away in |w|: measured 18.0 m/s
+    // at (0,95) on 192x96 against 0.2-0.8 two cells along the same wall, growing
+    // monotonically from 14 h and going non-finite at 18 h. On 128x64 the same four
+    // cells hold the domain maximum (7.75 against an interior 2.09) on every run we
+    // scored as clean. See UPSTREAM_ISSUES 27.
+    //
+    // This is CONTAINMENT, not a fix. Three candidate mechanisms were tested and
+    // falsified, and the falsifications are what justify clamping rather than
+    // continuing to hunt:
+    //   * corner weight MAGNITUDE and the grad(F) branch discontinuity: replacing
+    //     max(xi^2,eta^2) with a C1 blend changed F by up to 27% at individual corner
+    //     cells and moved the response 0.6%, dying at 18.001 h against 18.002 h
+    //     (item 27d). Near-zero sensitivity to F rules out the weighting, and with it
+    //     min(F_x,F_y) and a corner taper, which act on the same coefficient.
+    //   * double-writing / later-launch-wins: realbdy_bc_bxs_xy explicitly trims the
+    //     y-face boxes in x ("Remove overlapping corners from y-face boxes"), so a
+    //     corner is written exactly once, by the x box.
+    //   * disagreeing per-face targets: all four planes are filled by
+    //     strip_to_global_fab from the SAME MultiFab, so bdy_data_xlo and
+    //     bdy_data_yhi at a corner are copies of one source element -- bit-identical,
+    //     for every variable.
+    //
+    // The four corner cells are inside the discard region at any resolution (the outer
+    // ~10 cells are forcing-dominated and excluded from every diagnostic), so clamping
+    // |w| there costs nothing scientific. Clamp to the largest |w| among the 8
+    // horizontal neighbours, preserving sign, so the corner can never lead the domain.
+    if (!cons_only && corner_w_clamp()) {
+        MultiFab& wmf = *mfs[Vars::zvel];
+        const auto& dlo = lbound(geom[lev].Domain());
+        const auto& dhi = ubound(geom[lev].Domain());
+        const int ci[4] = {dlo.x, dlo.x, dhi.x, dhi.x};
+        const int cj[4] = {dlo.y, dhi.y, dhi.y, dlo.y};
+        for (MFIter mfi(wmf); mfi.isValid(); ++mfi) {
+            const Box& vbx = mfi.validbox();
+            const Array4<Real>& w = wmf.array(mfi);
+            for (int c = 0; c < 4; ++c) {
+                const int I = ci[c], J = cj[c];
+                // Inward neighbour offsets: a corner has neighbours only on the
+                // inward side, so step toward the interior in each direction.
+                const int si = (I == dlo.x) ? 1 : -1;
+                const int sj = (J == dlo.y) ? 1 : -1;
+                Box col(IntVect(I,J,vbx.smallEnd(2)), IntVect(I,J,vbx.bigEnd(2)));
+                col &= vbx;
+                if (!col.ok()) { continue; }
+                ParallelFor(col, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    Real nmax = Real(0.0);
+                    for (int dj = 0; dj <= 2; ++dj) {
+                        for (int di = 0; di <= 2; ++di) {
+                            if (di == 0 && dj == 0) { continue; }
+                            nmax = amrex::max(nmax, std::abs(w(i+si*di, j+sj*dj, k)));
+                        }
+                    }
+                    const Real a = std::abs(w(i,j,k));
+                    if (a > nmax) {
+                        w(i,j,k) = (w(i,j,k) > Real(0.0)) ? nmax : -nmax;
+                    }
+                });
+            }
+        }
+    }
+
+    // ***********************************************************************************
     // NSCBC lateral boundary treatment (erf.nscbc_lateral)
     //
     // Replaces the "specify everything, everywhere" fill above with the admissible

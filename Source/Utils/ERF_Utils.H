@@ -85,6 +85,28 @@ inline int realbdy_tangential_only ()
 }
 
 /*
+ * erf.realbdy_corner_w_clamp (default 1 = on): clamp |w| at the four cells where
+ * two lateral relaxation bands meet to the largest |w| among their 8 horizontal
+ * neighbours, preserving sign.
+ *
+ * CONTAINMENT of a diagnosed but unexplained artifact, not a fix. Those four cells
+ * hold the domain maximum |w| on every run of this campaign, and on 192x96 the
+ * xlo/yhi corner runs away from 8.7 m/s at 14 h to 18.0 at 18 h and takes the whole
+ * state non-finite. Three mechanisms were tested and falsified -- corner weight
+ * magnitude, the grad(F) branch discontinuity, and per-face target disagreement --
+ * see UPSTREAM_ISSUES 27a-e. The cells are inside the forcing-dominated discard
+ * region at any resolution, so the clamp costs nothing scientific, but it DOES
+ * change results and must be declared in validated_config.txt.
+ */
+inline int corner_w_clamp ()
+{
+    static const int s_v = [] {
+        int v = 1; amrex::ParmParse pp("erf"); pp.query("realbdy_corner_w_clamp", v); return v;
+    }();
+    return s_v;
+}
+
+/*
  * Create a new BoxArray in which every grid touches the bottom boundary
  */
 void ChopGrids2D (amrex::BoxArray& ba, const amrex::Box& domain, int target_size);
@@ -319,28 +341,7 @@ realbdy_compute_relaxation (const int& icomp,
         amrex::Real eta_lo = (y < y_end ) ? (y_end  - y) / (y_end  - ProbLo[1]) : zero;
         amrex::Real eta_hi = (y > y_strt) ? (y - y_strt) / (ProbHi[1] - y_strt) : zero;
         amrex::Real eta    = std::max(eta_lo,eta_hi);
-        // CORNER BLEND. Was max(xi^2, eta^2). Level sets of a max are L-shaped,
-        // so inside the corner square grad(F) has components in BOTH directions
-        // and flips branch discontinuously across the diagonal xi = eta. That
-        // makes grad(F).(A-B) a spurious source no wall-normal projection can
-        // remove -- the corner case the tangential-only work predicted survives
-        // by construction. Measured: it became the DOMINANT |w| signal in the
-        // domain (18.0 m/s at the xlo/yhi corner vs a few m/s two cells away)
-        // and killed the 192x96 24-h run at 18 h. See UPSTREAM_ISSUES 27/27a.
-        //
-        // F = 1 - (1-xi^2)(1-eta^2), written EXPANDED as xi^2 + eta^2 - xi^2 eta^2.
-        // The two are algebraically identical but not numerically: the factored
-        // form computes 1-(1-a) on a straight face, which loses the low bits of
-        // a, so every straight face would shift. Expanded, eta^2 = 0 gives
-        // xi^2 + 0 - 0 = xi^2 EXACTLY, so straight faces stay bit-identical and
-        // only the corner square changes.
-        //   - reduces to xi^2 when eta = 0 (straight face, bitwise)
-        //   - equals 1 at the corner, so wall strength is preserved
-        //   - polynomial in (xi,eta), hence C^1 across the diagonal
-        //   - bounded by 1 (unlike xi^2 + eta^2, which overshoots and over-forces)
-        amrex::Real xi2    = xi*xi;
-        amrex::Real eta2   = eta*eta;
-        amrex::Real Factor = xi2 + eta2 - xi2*eta2;
+        amrex::Real Factor = std::max(xi*xi,eta*eta);
 
         amrex::Real delta = arr_xlo(i  ,j  ,k,n) - data_arr(i  ,j  ,k  ,n+icomp);
         amrex::Real Temp  = Factor*F1*delta;
@@ -358,11 +359,7 @@ realbdy_compute_relaxation (const int& icomp,
         amrex::Real eta_lo = (y < y_end ) ? (y_end  - y) / (y_end  - ProbLo[1]) : zero;
         amrex::Real eta_hi = (y > y_strt) ? (y - y_strt) / (ProbHi[1] - y_strt) : zero;
         amrex::Real eta    = std::max(eta_lo,eta_hi);
-        // Corner blend -- see the bx_xlo kernel above for the rationale and for
-        // why this is written expanded rather than as 1-(1-xi^2)(1-eta^2).
-        amrex::Real xi2    = xi*xi;
-        amrex::Real eta2   = eta*eta;
-        amrex::Real Factor = xi2 + eta2 - xi2*eta2;
+        amrex::Real Factor = std::max(xi*xi,eta*eta);
 
         amrex::Real delta = arr_xhi(i  ,j  ,k,n) - data_arr(i  ,j  ,k  ,n+icomp);
         amrex::Real Temp  = Factor*F1*delta;

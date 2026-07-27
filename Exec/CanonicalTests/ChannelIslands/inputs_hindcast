@@ -53,6 +53,16 @@ erf.hindcast_bdy_hydrometeors = 1
 
 # Wall flux correction: on in every experiment, absent from the shipped deck.
 # Measured dynamically invisible and halves mass drift.
+# [CONTAINMENT 2026-07-27, UPSTREAM_ISSUES 27e] Clamp |w| at the four cells where
+# two lateral relaxation bands meet to the max of their 8 neighbours. Those cells
+# hold the domain maximum |w| in EVERY run of this campaign, and on 192x96 the
+# xlo/yhi corner ran away 8.7 -> 18.0 m/s over 14-18 h and took the state
+# non-finite. Three mechanisms tested and falsified (corner weight magnitude, the
+# grad(F) branch discontinuity, per-face target disagreement). The cells are inside
+# the forcing-dominated discard region at any resolution, so this costs nothing
+# scientific -- but it is containment, not a fix, and it DOES change results.
+erf.realbdy_corner_w_clamp = 1
+
 erf.hindcast_wall_flux_correction = true
 erf.hindcast_wall_flux_tau        = 3600.0
 

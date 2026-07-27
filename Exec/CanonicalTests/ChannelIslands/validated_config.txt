@@ -56,6 +56,14 @@ MUST erf.hindcast_bdy_hydrometeors     1
 #   forward through the IC correction and still active in every scored run.
 MUST erf.hindcast_wall_flux_correction true
 MUST erf.hindcast_wall_flux_tau        3600.0
+# prov: [CONTAINMENT, not a fix] 2026-07-27, UPSTREAM_ISSUES 27e. The four
+#   band-corner cells hold the domain max |w| in every run of this campaign; on
+#   192x96 the xlo/yhi corner ran away 8.7 -> 18.0 m/s over 14-18 h and killed two
+#   24-h runs at 18.001/18.002 h. Corner weight magnitude, the grad(F) branch
+#   discontinuity, and per-face target disagreement were each tested and falsified
+#   (27a, 27d). The cells sit inside the discard region at any resolution. This
+#   CHANGES RESULTS vs every run before 2026-07-27; baselines were re-scored.
+MUST erf.realbdy_corner_w_clamp        1
 # prov: UPSTREAM_ISSUES #12 -- band-density blending perturbs momenta implicitly
 #   via rho_old/rho_new. Held false so every scored run, INCLUDING the baseline,
 #   stays comparable. Set 2026-07-24; unchanged by the IC correction.
