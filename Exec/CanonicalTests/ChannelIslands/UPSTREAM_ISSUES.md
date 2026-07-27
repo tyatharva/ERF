@@ -2464,3 +2464,73 @@ cadence test and keep the epoch value solely for the solar-geometry call, or
 accumulate `m_time_since_rad += dt` and compare that. Note the run-termination
 test at `ERF.cpp:626` (`start_time + cur_time < stop_time`) has the same shape
 and should be checked for the same quantisation.
+
+## 27. Relaxation-band CORNER instability kills the 192x96 24-h run at 18 h
+
+Measured 2026-07-26. The 192x96 Jan-9 run reached **18.002 h** (46,270 steps)
+and then went non-finite in all 15 conserved components at once. The tripwire
+(`check_for_nans_int = 10`) caught it; there was no crash.
+
+**Where.** A single cell: `(i, j) = (0, 95)` -- the corner where the xlo and yhi
+relaxation bands intersect, at 34.632, -123.470, over open ocean with 12 m of
+terrain, at mid-levels (k = 32-34, z = 4585-5530 m).
+
+At t = 18 h, along the entire xlo inflow wall:
+
+| j | 75 | 79 | 83 | 87 | 91 | 93 | **95** |
+|---|---|---|---|---|---|---|---|
+| max\|w\| | 0.27 | 0.26 | 0.77 | 0.31 | 0.20 | 0.80 | **18.00** |
+
+A factor of 22 over its own neighbours two cells away. It decays inward from the
+corner (18.00 at i=0, 13.05 at i=12, 10.62 at i=24), which is the corner
+spreading, not a wall-wide problem.
+
+**How.** Monotonic growth at a FIXED location over three hours, while the argmax
+before that was in the interior/east:
+
+| t (h) | 14 | 15 | 16 | 17 | 18 |
+|---|---|---|---|---|---|
+| argmax \|w\| | (182,82,31) | (182,83,32) | **(0,95,34)** | **(0,95,33)** | **(0,95,32)** |
+| max \|w\| | 11.31 | 11.38 | 13.05 | 15.41 | **18.00** |
+| v there | -3.39 | -3.38 | +15.43 | +16.29 | +16.56 |
+
+The corner has westerly INFLOW on x and +16.6 m/s northward flow into the yhi
+face simultaneously -- the relaxation has to reconcile two specified states in
+one cell. dt had been declining for twelve hours before the failure (median
+1.599 at 0-3 h, 1.556 at 6-9 h, 1.400 at 9-12 h, 1.204 at 12-15 h, 1.191 at
+15-18 h): a slow squeeze, not a sudden event.
+
+**This is NOT the terrain-in-band risk flagged before the run, and NOT a
+timestep problem.** The terrain-loaded band (xhi, 1204-1322 m) oscillated in
+7-11 m/s for the whole run and never led. The Alamo/Liebre block at
+34.676/-118.952, the specific worry, peaked at 4.63 m/s and decayed; the failure
+is 412 km away from it over water.
+
+**The mechanism is chronic and pre-existing.** Corner |w| on the completed
+128x64 runs at t = 24 h:
+
+| run | interior max\|w\| | xlo/ylo | xlo/yhi | xhi/yhi | xhi/ylo |
+|---|---|---|---|---|---|
+| bdyfix/wz | 2.09 | 0.17 | 4.84 | 5.60 | 7.75 |
+| bdyfix/ic_hyd | 2.08 | 0.17 | 4.84 | 5.59 | 7.75 |
+| bdyfix/sst_ctl | 12.47 | 0.26 | 4.77 | 5.26 | 7.92 |
+
+The four corners hold the largest |w| in the baseline domain -- 7.75 against an
+interior 2.09, a 3.7x ratio -- on runs we scored and called clean. The 192x96
+domain did not create this; it moved the same corner from 4.84 to 18.00 and past
+the margin. **Every scored result in this campaign was produced with corner
+amplification already the dominant |w| signal in the domain.**
+
+Related to item 14 (the relaxation zone manufactures spurious updrafts) and item
+18 (the ramp-gradient term), but distinct: those are wall-wide, this is
+specifically where two bands overlap and each wants a different state.
+
+**Not yet diagnosed:** why this corner and not the other three, and why worse on
+the larger domain. Candidates, untested -- the NW corner now sits 2 deg further
+west in open ocean under stronger cross-corner flow; the corner is inside the
+6.92% zero-filled terrain strip (lon < -123.0), though terrain there is
+genuinely 0; the larger domain places the corner in a different synoptic
+position relative to the storm.
+
+**#25 IS NOT ANSWERED.** The run needed 24 h of accumulation to score against
+the MRMS 24-h total. It has 18 h. No FSS comparison was made.
