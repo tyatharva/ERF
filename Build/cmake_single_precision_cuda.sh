@@ -22,6 +22,11 @@ fi
 # RRTMGP submodule. Applied with byte-exact verification; the build HARD-FAILS
 # if the file is in an unknown state. See Exec/CanonicalTests/ChannelIslands/.
 "$ERF_SOURCE_DIR/Exec/CanonicalTests/ChannelIslands/apply_rrtmgp_patch.sh" || exit 1
+# DIAGNOSTIC (UPSTREAM_ISSUES 29e): exposes AMReX flushFBCache/flushCPCache so
+# erf.realbdy_flush_fb_cache=1 can test the BDKey-collision hypothesis. Inert
+# with the knob off (default), but the source references the symbols, so the
+# patch must be applied for the build to compile.
+"$ERF_SOURCE_DIR/Exec/CanonicalTests/ChannelIslands/apply_amrex_fbcache_patch.sh" || exit 1
 
 echo "Source: $ERF_SOURCE_DIR | Build: $ERF_BUILD_DIR | Install: $ERF_INSTALL_DIR | PWD: $(pwd)"
 echo "Customize: export ERF_BUILD_DIR=... ERF_SOURCE_DIR=... ERF_INSTALL_DIR=... or ERF_HOME=..."

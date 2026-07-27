@@ -1,0 +1,15 @@
+--- a/Src/Base/AMReX_FabArrayBase.H	2026-07-27 15:22:26.209004769 -0400
++++ b/Src/Base/AMReX_FabArrayBase.H	2026-07-27 15:22:26.214787670 -0400
+@@ -730,7 +730,11 @@
+ 
+     [[nodiscard]] static std::uint64_t getNextCommMetaDataId ();
+ 
+-private:
++// ERF DIAGNOSTIC PATCH (UPSTREAM_ISSUES 29e): these were private. Exposed so a
++// local instrumented build can drop the FillBoundary/ParallelCopy metadata
++// caches after hindcast boundary-plane setup, to test whether a recycled BDKey
++// has seeded a stale cache entry. DIAGNOSTIC ONLY -- not part of any fix.
++public:
+ 
+     void flushFB (bool no_assertion=false) const; //!< This flushes its own FB.
+     static void flushFBCache (); //!< This flushes the entire cache.

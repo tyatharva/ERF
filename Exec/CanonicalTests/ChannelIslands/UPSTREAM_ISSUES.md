@@ -2993,3 +2993,48 @@ memory symptom.
 **STATUS: NOT FIXED.** Three attempts, all falsified, all recorded. The
 strip_to_global_fab churn is real and remains the leading suspect, but the fix
 must not reuse one buffer across variables.
+
+### 29e. BDKey collision is DEAD. Flushing AMReX's caches changes nothing.
+
+AMReX's `flushFBCache()` / `flushCPCache()` are private, so a hash-gated local
+patch exposes them (`apply_amrex_fbcache_patch.sh`, same machinery as the RRTMGP
+fix, wired into the build). `erf.realbdy_flush_fb_cache=1` drops the entire
+FillBoundary and ParallelCopy metadata cache immediately after boundary-plane
+setup, forcing every later FillBoundary to rebuild its copy tags from the
+CURRENT BoxArray.
+
+Reproducer from `chk46225`, verified-clean GPU, flush confirmed firing in the log:
+
+| | last step | fault |
+|---|---|---|
+| `realbdy_flush_fb_cache=0` | 46226 ends | CUDA 700 at 46227 |
+| `realbdy_flush_fb_cache=1` | 46226 ends | CUDA 700 at 46227 |
+
+Identical. **A stale cache entry seeded by a recycled BoxArray/DistributionMapping
+id is NOT the mechanism**, and with it dies the `strip_to_global_fab` churn as a
+suspect -- the churn is real, but it is not what produces the garbage pointer.
+
+That also disposes of the timing objection raised against it: the churn is
+init-only and never explained why the fault waits for frame 7. It does not have
+to, because it is not the cause.
+
+**Eliminated so far, on this bug:** corner weight magnitude; grad(F) branch
+discontinuity; corner double-write; per-face target disagreement; bad frame data;
+float32 epoch quantisation of the forcing; frame-scratch lifetime; frame-scratch
+allocation churn; BDKey cache collision. Nine.
+
+**What survives:** an invalid 4-byte global read in `FB_local_copy_gpu` under
+`ERF::FillPatchCrseLevel`, deterministically on the (6,7) frame advance, with a
+healthy solution (`dt = 1.2246 s`) up to the fault and a garbage source pointer
+(offsets of order 1e17-1e19 bytes). Since the tags are rebuilt fresh after a
+flush and are still wrong, the corruption is in what the tags are built FROM --
+the FabArray's own fab pointers -- not in cached metadata describing them.
+
+### 29f. Structural guard against environment contamination
+
+`gpu_preflight.sh` refuses to start any experiment if a stray erf-hindcast
+container is running or if the GPU holds more than a desktop baseline, printing
+the holders. `--clean` kills strays first. Wired into every experimental
+invocation. This is the 29d lesson made structural: `timeout` kills the docker
+client, not the container, and eleven hours of results were invalidated by one
+survivor.
