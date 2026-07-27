@@ -28,23 +28,6 @@ enum class MultiFabType { CC, NC };
  * blends from the ERA5 2-m anchor up to it. Negative until the first frame is
  * read.
  */
-/*
- * erf.realbdy_flush_fb_cache (default 0): DIAGNOSTIC (UPSTREAM_ISSUES 29e).
- * After the hindcast boundary planes are built, drop AMReX's entire FillBoundary
- * and ParallelCopy metadata cache, so every later FillBoundary rebuilds its copy
- * tags from the CURRENT BoxArray. Tests whether a recycled BDKey from the ~250
- * BoxArray/DistributionMapping create-destroy cycles in strip_to_global_fab has
- * seeded a stale cache entry. Requires apply_amrex_fbcache_patch.sh, which makes
- * AMReX's private flushes public. DIAGNOSTIC ONLY -- not part of any fix.
- */
-static int realbdy_flush_fb_cache ()
-{
-    static const int s_v = [] {
-        int v = 0; amrex::ParmParse pp("erf"); pp.query("realbdy_flush_fb_cache", v); return v;
-    }();
-    return s_v;
-}
-
 static amrex::Real s_frame_zlow = amrex::Real(-1.0);
 
 /**
@@ -908,13 +891,6 @@ ERF::fill_bdy_data_from_hindcast ()
             strip_to_global_fab(*src, scomp, bdy_data_yhi[itime][nvar].box(), bdy_data_yhi[itime][nvar]);
         }
     } // itime
-
-    if (realbdy_flush_fb_cache()) {
-        amrex::FabArrayBase::flushFBCache();
-        amrex::FabArrayBase::flushCPCache();
-        Print() << "HindCast real BCs: DIAGNOSTIC -- flushed the AMReX FB and CPC "
-                << "metadata caches (erf.realbdy_flush_fb_cache=1)" << std::endl;
-    }
 
     Print() << "HindCast real BCs: filled " << ntimes << " boundary-plane times "
             << "(width " << real_width << " cells, interval "

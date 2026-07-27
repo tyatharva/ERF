@@ -3038,3 +3038,34 @@ the holders. `--clean` kills strays first. Wired into every experimental
 invocation. This is the 29d lesson made structural: `timeout` kills the docker
 client, not the container, and eleven hours of results were invalidated by one
 survivor.
+
+### 29g. Path trace: nothing found that satisfies the timing constraint
+
+Read-only trace of what touches `vars_old`/`vars_new[0]` fab storage around a
+frame advance. The filter throughout: it must fire on the (6,7) advance and NOT
+on (0,1) through (5,6). Six clean advances, then a fault.
+
+| checked | finding | verdict |
+|---|---|---|
+| growth/resize/push_back in both interpolation TUs | every resize is at INIT (`bdy_data_*` to `ntimes`, `next/last_read_forecast_time` to `nlevs`); nothing grows per advance | no count-triggered reallocation |
+| `bdy_data_xlo[n_time][ivar]` indexing | outer dim is `ntimes` = 9, inner is `BdyEnd` = 7. `n_time_p1` = 7 indexes the OUTER (9) dim -- in range | the `BdyEnd == 7` coincidence is only a coincidence |
+| `ivar` range against the 7-element inner dim | `ivar` comes from `cons_map` at the read components only: RHO(4), T(2), QV(3), QC(5), QR(6). Max 6 | in range, no OOB write to corrupt neighbours |
+| surface per-read `resize(1)` blocks (`sst_lev`, `tsk_lev`, `lmask_lev`, `alb_lev`) | all guarded `if (empty())`; allocate once, refresh contents after. Comment confirms the surface layer holds raw pointers and the allocation must persist | fires on read 1, not read 7 |
+| `define`/`clear`/`resize`/`swap`/`move` of `vars_new[0]` on the advance branch | none | -- |
+| alias/non-owning views over `vars_new` | `ERF_MakeNewArrays.cpp:880` builds `MultiFab(cons_mf, make_alias, 0, ncomp_cons)` into the MRI integrator state, so the integrator holds an alias sharing `vars_new[lev][Vars::cons]`'s fab pointers. Real latent hazard if the parent is ever redefined | called at init/regrid, NOT on the advance -- does not satisfy the timing filter |
+
+**Nothing surfaced that fires on the seventh advance and not the first six.**
+
+The two-deep-cache idea checked out negative specifically: the frame containers
+are sized once to `ntimes` at init and only indexed thereafter; there is no
+small container growing per read whose reallocation could invalidate a held
+pointer.
+
+What remains true and unexplained: an invalid 4-byte global read in
+`FB_local_copy_gpu` under `FillPatchCrseLevel`, deterministic on the (6,7)
+advance, with `dt = 1.2246 s` healthy up to the fault, a garbage source pointer,
+and no improvement from flushing the metadata caches -- so the FabArray's own fab
+pointers are corrupt, from a writer this trace has not found.
+
+**Ten hypotheses eliminated. Recommend deciding between the segment-length
+workaround and handing this upstream rather than an eleventh guess.**

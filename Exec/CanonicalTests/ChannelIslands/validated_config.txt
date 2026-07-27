@@ -36,6 +36,18 @@
 # does split(None, 2), so an inline comment would be swallowed into the
 # asserted value and every deck would fail against a value nobody wrote.
 
+# LOCAL SUBMODULE PATCHES -- state required for a shippable run:
+#   Submodules/RRTMGP  MUST be patched (apply_rrtmgp_patch.sh, applied by the
+#                      build script). Correctness fix, keep.
+#   Submodules/AMReX   MUST be CLEAN. apply_amrex_fbcache_patch.sh exposes
+#                      private flushFBCache/flushCPCache for the UPSTREAM_ISSUES
+#                      29e BDKey diagnostic. That diagnostic is DONE (it
+#                      falsified the hypothesis) and the patch is unwired from
+#                      the build. If you re-apply it to re-run the diagnostic,
+#                      revert before any scored or production run:
+#                          git -C Submodules/AMReX checkout Src/Base/AMReX_FabArrayBase.H
+#                      Check with: git -C Submodules/AMReX status --porcelain
+
 # --- hindcast IC / BC corrections (this campaign) -----------------------------
 # prov: finding 21 -- erftools stores a (rho,theta) pair implying p ~18 hPa low;
 #   T is exactly recoverable from the pair because both errors share that p.
