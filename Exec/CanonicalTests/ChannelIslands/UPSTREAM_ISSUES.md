@@ -2760,3 +2760,69 @@ interpolation.
 
 Whatever selects 18 h is in the bulk solution, not the boundary machinery.
 NOT INVESTIGATED FURTHER -- reporting per instruction before any next step.
+
+## 29. The 18 h failure is an ILLEGAL DEVICE MEMORY ACCESS, not a NaN. Six hypotheses were tested in the wrong neighbourhood.
+
+Restart from `chk46225` (step 46225, t = 17.9999 h, five steps before the death)
+with `check_for_nans_int = 1`. Reproduces in ~30 s and two steps.
+
+**Step 46226** completes normally. **Step 46227**:
+
+```
+Reading weather data 64801.21094 6 7 9          <- frame pair advances (5,6) -> (6,7)
+The values of alpha1 and alpha2 are 0.9998878837 0.0001121163368
+amrex::Abort::0::CUDA error 700 ... an illegal memory access was encountered !!!
+```
+
+**There is no first non-finite value.** The NaNs reported in all four 24-h runs
+were downstream of memory corruption: with `check_for_nans_int = 10` the model
+ran up to ten steps on a corrupted device heap before anything looked, which is
+why all 15 conserved components went non-finite simultaneously across ~87% of the
+domain. We were reading the debris, not the event.
+
+**compute-sanitizer names the faulting kernel:**
+
+```
+Invalid __global__ read of size 4 bytes
+  at AMReX_FBI.H:553  (FabArray<FArrayBox>::FB_local_copy_gpu)
+  by thread (128,0,0) in block (0,0,0)
+  Address 0xac7d163cb27cde8 is out of bounds
+  and is 776685958333975529 bytes after the nearest allocation
+Host: FB_local_copy_gpu <- FBEP_nowait <- FillBoundary
+      <- FillPatchSingleLevel <- ERF::FillPatchCrseLevel <- ERF::timeStep
+```
+
+An address 7.8e17 bytes past the nearest allocation is not an indexing slip; it
+is a garbage pointer. A MultiFab reaching `FillPatchCrseLevel` carries a
+dangling or corrupt FAB in its FillBoundary copy tags, and the trigger is
+deterministically the frame-pair advance to (6,7).
+
+**This explains every observation that defeated six hypotheses:**
+
+| observation | explanation |
+|---|---|
+| four runs died at 18.002/18.001/18.001/18.0017 h | triggered by a frame INDEX transition, not by dynamics |
+| insensitive to corner weighting, corner \|w\|, boundary data, time interpolation | none of them touch the faulting path |
+| all 15 components non-finite at once | memory corruption, not a physical instability |
+| dt trajectories identical to <0.1% across all four runs | the solution was healthy right up to the fault |
+
+The corner |w| growth from 14 h is real but is a separate, benign feature of the
+storm's intensification. It was never the cause, and #27's containment, #27d's
+blend, and the #28 fix were all treating a solution that was not failing.
+
+**Ruled out already:** frame indices are in range (6, 7 of 9, guarded);
+all 9 frames have the level-0 duplicate and drop uniformly to nz = 37, so no
+frame-to-frame size mismatch.
+
+**NOT diagnosed:** which MultiFab, and why the (6,7) advance specifically. This
+is a memory-lifetime bug, a different class from everything investigated so far.
+Reported without further investigation, per instruction.
+
+**Prediction for the two-segment test.** The trigger is index-driven, not
+elapsed-time-driven and not amplitude-driven. A fresh-init 12-h segment gets its
+own frame list and never reaches idx2 = 7, so it should survive -- and if it
+does, that is evidence for an index/count-driven resource bug rather than
+anything physical. That makes the segment run diagnostic as well as productive.
+
+**Keep the #28 fix regardless:** the elapsed-span stop conditions are required
+for month segments at production epoch magnitudes.
