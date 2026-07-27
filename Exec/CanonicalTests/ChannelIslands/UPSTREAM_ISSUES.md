@@ -2534,3 +2534,73 @@ position relative to the storm.
 
 **#25 IS NOT ANSWERED.** The run needed 24 h of accumulation to score against
 the MRMS 24-h total. It has 18 h. No FSS comparison was made.
+
+### 27a. How the corner weights actually combine: already `max`, not compounding
+
+Read before changing anything. `Source/Utils/ERF_Utils.H`,
+`realbdy_compute_relaxation`, four kernels:
+
+```cpp
+// bx_xlo / bx_xhi  -- "Corners with x boxes"
+Real eta    = std::max(eta_lo, eta_hi);
+Real Factor = std::max(xi*xi, eta*eta);      // <-- combination
+rhs_arr(i,j,k,n+icomp) += Factor*F1*delta;
+
+// bx_ylo / bx_yhi  -- "No corners for y boxes"
+Real Factor = eta*eta;                        // x weight not consulted
+rhs_arr(i,j,k,n+icomp) += Factor*F1*delta;
+```
+
+**It is not a product, not a sum, and not compounding sequential application.**
+The x boxes OWN the corners and the y boxes explicitly EXCLUDE them, so a corner
+cell is written exactly once, by the x kernel, with `max(xi^2, eta^2)`. There is
+no double `+=`. The nearest-wall-weight fix is already implemented.
+
+Note the sign convention before proposing `min`: the weight is 1 AT the wall and
+0 at the band's inner edge, so the NEAREST wall is the LARGER weight. `max` IS
+the nearest-wall rule; `min` would be the weaker/farther wall, which is the
+opposite of what is there. These are not the same change.
+
+**What `max` does geometrically -- this is the actual defect.** Level sets of a
+max are L-shaped, so the corner square carries nested L-contours. Factor with
+width = 10, NW corner:
+
+| | j=95 | j=93 | j=91 | j=89 | j=87 | j=85 |
+|---|---|---|---|---|---|---|
+| i=0 | 0.902 | 0.902 | 0.902 | 0.902 | 0.902 | 0.902 |
+| i=2 | 0.902 | 0.562 | 0.562 | 0.562 | 0.562 | 0.562 |
+| i=4 | 0.902 | 0.562 | 0.303 | 0.303 | 0.303 | 0.303 |
+| i=6 | 0.902 | 0.562 | 0.303 | 0.122 | 0.122 | 0.122 |
+| i=8 | 0.902 | 0.562 | 0.303 | 0.122 | 0.022 | 0.022 |
+
+Along a straight face F depends on ONE coordinate, grad(F) is wall-normal, and
+the tangential-only fix kills grad(F).(A-B) identically. Inside the corner
+square grad(F) has components in BOTH directions and flips direction
+discontinuously across the diagonal xi = eta, where the max switches branch.
+
+**This is the corner case of grad(F).(A-B) identified during the tangential-only
+work: corners survive BY CONSTRUCTION, because grad(F) varies in both
+directions and no wall-normal projection can remove it.** What is new here is
+not that the term survives -- that was predicted -- but that it is now the
+DOMINANT |w| signal in the domain rather than a residual.
+
+### 27b. Every scored result carries this
+
+The four corners hold the largest |w| in the 128x64 baseline (7.75 against an
+interior 2.09) on runs scored as clean, and the corner term is a grad(F) source
+with no physical counterpart. **If a corner fix changes the baselines
+materially, every comparison in items 22-25 needs re-reading**, including the
+#25 conclusion that the 3 km run scores below its own driver. The fix must
+therefore be scored on the 128x64 domain too, not only on 192x96.
+
+### 27c. Ocean elevation verified
+
+Not a fill artifact. In `channel_islands_terrain_3km_192x96.txt`: 141,122 of
+166,753 points (84.63%) are EXACTLY 0.0, with no negative values, no -0.0, and
+nothing in the 1e-9 range. The 8 points in (0, 1) m and the 0.402 m minimum
+nonzero are real coastal DEM values.
+
+Correcting one number in the report above: the failure cell's "terrain 12 m" is
+`z_phys` at k = 0, which is the FIRST CELL CENTRE -- terrain plus half of the
+25 m initial layer. Terrain there is 0.0. The corner sits over open ocean at
+exactly zero elevation.
