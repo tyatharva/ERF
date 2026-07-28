@@ -46,6 +46,13 @@ void ERF::advance_radiation (int lev,
             rad[lev]->set_albedo(alb_lev[lev][0].get());
         }
 
+        // The rad_freq_in_time trigger runs on MODEL time, not on the absolute
+        // instant below: t_old + start_time is a float32 sum of a ~1.673e9
+        // epoch value (ULP 128 s), which quantised the cadence to multiples of
+        // 128 s and turned a 180 s request into a measured 255.4 s
+        // (UPSTREAM_ISSUES #26, the same float32-epoch class as #28).
+        rad[lev]->set_model_time(t_old[lev]);
+
         // Enter radiation class driver
         amrex::Real time_for_rad = t_old[lev] + start_time;
         rad[lev]->Run(lev, istep[lev], time_for_rad, dt_advance,

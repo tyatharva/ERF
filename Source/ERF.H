@@ -171,6 +171,13 @@ public:
                                    surface_state_2,
                                    surface_state_interp;
 
+    // NSCBC lateral inflow/outflow regime latch, per level: 4 components
+    // (xlo,xhi,ylo,yhi), cell-centred, only the wall-adjacent column of each
+    // face is ever touched. 1 = inflow, 0 = outflow, -1 = unset. Persistent
+    // because the regime switch is hysteretic (UPSTREAM_ISSUES #19d); defined
+    // lazily on first use in fill_from_realbdy.
+    amrex::Vector<amrex::MultiFab> nscbc_regime;
+
     amrex::Vector<amrex::Vector<amrex::MultiFab>> bckgnd_state;
 
     std::string MakeVTKFilename(int nstep);

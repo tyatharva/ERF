@@ -219,8 +219,16 @@ private:
     // Step number
     int m_step;
 
-    // Current time
+    // Current time -- ABSOLUTE epoch seconds. In single precision the ULP at
+    // ~1.673e9 is 128 s, so this value must never carry a cadence decision
+    // (UPSTREAM_ISSUES #26); it is only used for the orbital date/time and as
+    // the plotfile time stamp, where 128 s is immaterial.
     amrex::Real m_time;
+
+    // Model-relative time (seconds since the run's start_datetime), set by
+    // set_model_time(). Precise: ULP at 86400 s is 0.008 s. This is the clock
+    // the rad_freq_in_time trigger runs on.
+    amrex::Real m_model_time = amrex::Real(0.0);
 
     // Timestep at given level
     amrex::Real m_dt;
@@ -285,6 +293,10 @@ public:
     // When unset, columns fall back to land/sea constants
     // (erf.rad_alb_land over land, the 0.06 ocean default otherwise).
     void set_albedo (const amrex::MultiFab* albedo) override { m_albedo = albedo; }
+
+    // Model-relative clock for the rad_freq_in_time trigger (see the comment
+    // on m_model_time below).
+    void set_model_time (const amrex::Real model_time) override { m_model_time = model_time; }
 private:
     const amrex::MultiFab* m_base_state = nullptr;
     const amrex::MultiFab* m_albedo = nullptr;

@@ -206,9 +206,16 @@ Radiation::set_grids (int& level,
     if (m_rad_freq_in_time > amrex::Real(0.0)) {
         // Time-based trigger takes precedence: fire on the first step, then
         // whenever the requested interval of MODEL time has elapsed.
+        //
+        // UPSTREAM_ISSUES #26: this used m_time, which is an ABSOLUTE epoch
+        // instant (~1.673e9 for a 2023 case). Its float32 ULP is 128 s, so the
+        // difference below could only take values that are multiples of 128 s
+        // and a 180 s request fired at 256 s -- measured 255.4 s effective over
+        // a 30 h leg. m_model_time is the run-relative clock (ULP 0.008 s at
+        // 86400 s), formed once in double at the caller.
         m_update_rad = (m_step == 0) ||
-                       ((m_time - m_last_rad_time) >= m_rad_freq_in_time);
-        if (m_update_rad) { m_last_rad_time = m_time; }
+                       ((m_model_time - m_last_rad_time) >= m_rad_freq_in_time);
+        if (m_update_rad) { m_last_rad_time = m_model_time; }
     } else if (m_rad_freq_in_steps > 0) {
         m_update_rad = ( (m_step == 0) || (m_step % m_rad_freq_in_steps == 0) );
     }

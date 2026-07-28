@@ -4228,3 +4228,270 @@ root-cause fix.
   old cfl pin premises are gone with the fixed IC, but the storm-peak window
   (12-21 h) is untested: full bracketed-day validation required before
   production adoption.
+
+### 30q. The 4-stream reproducer is a NaN BLOW-UP, not a memory fault -- and the `fill_from_realbdy` site is a DETECTOR, not a source
+
+compute-sanitizer memcheck on the 2-second 4-stream reproducer
+(`amrex.max_gpu_streams=4 max_step=2 amrex.fpe_trap_invalid=0`):
+
+    ========= ERROR SUMMARY: 0 errors
+
+Zero invalid accesses, zero out-of-bounds, zero misaligned. What the run
+produced instead, immediately after `Done with advance_dycore at level 0` on
+**step 1**:
+
+    Component 0 ... contains NaNs/Infs   total NaN count comp 0: 776496
+    Component 1 ... 776496
+    ... every component through 14, all 776496
+
+All fifteen conserved components, the whole field, on the first step. So the
+4-stream failure is a **data race producing NaN** (or a systematic missing
+stream sync), not the illegal-access class of #29. The perf-pin section's
+"unsynchronised access in the boundary-fill path" is retracted in its
+memory-fault form; the pin still cannot be lifted, but the reason is different.
+
+**The more useful half of this result.** With the trap ON (the deck default),
+that same NaN field kills the run inside `ERF::fill_from_realbdy` -- the exact
+resolved stack of the 30p 18.0003 h death. The reason is now explicit:
+`fill_from_realbdy` performs HOST ordered comparisons on device-reduced values
+(the wall-flux correction's `if (f > 0)` accumulation and the mass controller's
+`if (cap > 0)` / `min(max(du,-2),2)` clamp, ERF_BoundaryConditionsRealbdy.cpp
+~947-973). An ordered compare against a quiet NaN raises FE_INVALID, and
+`amrex.fpe_trap_invalid=1` turns that into SIGFPE. **The function is the first
+host code to look at a reduced field value, so it is where any NaN anywhere in
+the state announces itself.** It is a smoke alarm, not a fire.
+
+This reframes 30p: the question is no longer "what does the [6,7] rotation
+corrupt in `fill_from_realbdy`" but "what goes non-finite at 18.0003 h, or --
+if nothing does -- which host operation traps on a value that is locally
+invalid but harmless". Instrument: rerun the cold-init gate with
+`amrex.fpe_trap_invalid=0` and `erf.check_for_nans_int=1`, which either names
+the first non-finite component and cells (ERF.cpp:3294 reports both) or runs
+the day through. Both outcomes are decisive; the 4-stream run above is the
+known-nonzero control proving the instrument reports real content.
+
+## 19d FIXED (2026-07-28): the regime switch was driven by the DRIVER's velocity, not the model's
+
+**Reproduced on the production deck.** 19d was diagnosed on the 128x64 deck.
+Gate take 2 (NSCBC, 192x96, corrected IC, died 4.7 h by dt collapse) carries
+the identical signature, measured from its hourly plotfiles as the
+wall-adjacent normal velocity made OUTWARD-POSITIVE over k=0..3 -- with the
+Davies day (same deck, same hours, survived) as the control:
+
+| t (h) | face | NSCBC mean u_n | NSCBC n_inflow | NSCBC max abs | Davies mean u_n | Davies n_inflow |
+|---|---|---|---|---|---|---|
+| 1 | xhi | +8.14 | 129/384 | 27.7 | +2.83 | **0/384** |
+| 2 | xhi | +0.05 | 275/384 | 17.2 | +2.70 | **0/384** |
+| 3 | xhi | **-3.85** | 355/384 | 23.3 | +2.74 | **0/384** |
+| 4 | xhi | **-6.02** | 258/384 | 28.9 | +3.99 | **0/384** |
+| 4 | yhi | +2.44 | 276/768 | **28.6** | +7.09 | 8/768 |
+
+Davies literally cannot reverse -- it relaxes toward the frame, and the frame's
+u_n at xhi is outflowing all day, so `n_inflow` is exactly zero at every hour
+after the first. NSCBC leaves the face free, xhi reverses wholesale between
+2 h and 3 h, and the run dies at 4.7 h. Same sequence as the 19c/19d 128x64
+run (reversal at 6 h, 295 m/s spike at 7 h, NaN at 7h04m), one deck up.
+
+**Root cause.** `sigma` -- the inflow/outflow weight -- was computed from
+`un_w`, the velocity the DRIVER had just prescribed on the wall face. That was
+chosen because it is smooth in time and will not chatter. But it is not the
+model's regime: the driver's u_n at xhi/yhi stays positive all day, so sigma
+stayed 0 while the model's own flow ran INWARD at 6 m/s. Sigma 0 selects the
+outflow branch, and with the shipped default `nscbc_outflow=0` that branch is a
+zeroth-order extrapolation from the interior. A face carrying inflow needs 4+N
+conditions; extrapolation supplies **none**. The boundary was unconstrained,
+and the resulting mode grew until dt collapsed.
+
+**Fix, both halves:**
+1. The regime is taken from `un_i`, the model's own normal velocity one face
+   inboard, through a Schmitt trigger with a +-`nscbc_eps` deadband, latched
+   per column and per face in a persistent `nscbc_regime` MultiFab (ERF member,
+   4 comps = xlo/xhi/ylo/yhi, defined lazily, -1 = unset). Outside the deadband
+   the regime follows the flow; inside it the previous regime is held, so it
+   cannot chatter on acoustic noise. sigma is now exactly 0 or 1 -- never
+   between -- so the condition COUNT is always 4+N or 1, which the old linear
+   blend could not promise (its own APPROXIMATION 2 note said so).
+2. `erf.nscbc_outflow` now defaults to **1**, the characteristic (Riemann)
+   outflow solve -- the actual one-incoming-condition treatment -- instead of
+   the raw extrapolation that 19d showed is unconstrained on a reversed face.
+
+Files: ERF_BoundaryConditionsRealbdy.cpp (regime latch + default), ERF.H
+(`nscbc_regime`). Validation pending: NSCBC must first clear 4.7 h, then a full
+day scored against Davies on the same binary.
+
+## 26 FIXED (2026-07-28): the radiation cadence now runs on a model-relative clock
+
+Confirmed broken first, by measurement on the 48-h leg-2 log: 423 "Radiation
+advancing" calls over 108031 model-s = **255.4 s effective** against the 180 s
+request. The trigger differenced `m_time`, which `ERF_AdvanceRadiation.cpp` had
+formed as `t_old[lev] + start_time` -- a float32 sum of a ~1.673e9 epoch value,
+ULP 128 s. The difference could therefore only be a multiple of 128 s, and 180
+first cleared at 256. Fifth appearance of the float32-epoch class (#26, #28,
+and the two the item-28 fix already covered).
+
+Fix is item 28's pattern: keep the absolute instant for what genuinely needs it
+(the orbital date/time, and the plotfile stamp, where 128 s is immaterial), and
+give the cadence a MODEL-relative clock. `IRadiation::set_model_time()` (no-op
+default), called from `advance_radiation` with `t_old[lev]`; the trigger
+differences that. ULP at 86400 s is 0.008 s.
+
+Consequence for scoring: every result in this file, #25 included, was produced
+with radiation firing at 255 s. The Davies baseline must be re-run on the fixed
+binary before it can be compared against anything built on it.
+
+## 25 RE-SCORED (2026-07-28, same day): the first scoring was geolocated 86 km off. Verdict survives, numbers do not
+
+`score_foundation.py` built the ERF grid's lat/lon from the LCC of the
+**download** area in era5_input.txt, `(36.0,-125.0,30.75,-115.25)` -> lon_0
+-120.125. The frames -- and therefore the model grid -- are on the **pinned**
+projection area `(36.0,-123.25,31.25,-115.25)` -> lon_0 -119.25. This is the
+same defect as the process_pool.py projection drift found earlier the same day,
+in the scoring script instead of the pipeline, and it went unnoticed because the
+only geolocation gate was a domain-mean sanity band, which a rigid shift barely
+moves.
+
+**Measured, not argued.** The frame .bin carries both its projected grid
+(xvec[nx], yvec[ny]) and the lat/lon of the same points, so the projection is
+over-determined:
+
+| candidate LCC | max residual vs frame coordinates |
+|---|---|
+| pinned  (lon_0 -119.25)  | **0.42 m** |
+| scoring (lon_0 -120.125) | **88,211 m** |
+
+Independent check on the corrected mapping: the model's own terrain islands now
+land on the real Channel Islands -- 34.04/-120.38 San Miguel, 33.97/-120.11
+Santa Rosa, 34.02/-119.74 Santa Cruz, 34.01/-119.43 Anacapa, 33.24/-119.50 San
+Nicolas, 33.47/-119.04 Santa Barbara, 33.39/-118.44 Catalina, 32.90/-118.48 San
+Clemente -- every one within 0.02 deg of its true position.
+
+The old sampling pulled MRMS and ERA5 from 86 km west, i.e. largely offshore,
+where MRMS QPE is smooth: that flattened the observed field (old MRMS interior
+N/S ratio 1.72, i.e. no north-south storm gradient at all, against 9.70 truth)
+and inflated every ratio taken against its variance.
+
+**Corrected numbers.** Gates: projection residual 0.42 m; regrid-vs-native
+interpolation control ERA5 15.06 vs 15.04 mm and MRMS 14.84 vs 15.02 mm;
+self-FSS == 1.
+
+| thr | scale | ERF | ERA5 | useful | (old ERF / old ERA5) |
+|---|---|---|---|---|---|
+| 1 mm | 3 km  | +0.646 | +0.773 | 0.792 | 0.608 / 0.737 |
+| 1 mm | 63 km | +0.742 | +0.822 | 0.792 | 0.685 / 0.796 |
+| 5 mm | 3 km  | +0.466 | +0.829 | 0.713 | 0.403 / 0.777 |
+| 5 mm | 33 km | +0.546 | +0.890 | 0.713 | 0.469 / 0.837 |
+| 5 mm | 63 km | +0.617 | +0.926 | 0.713 | 0.527 / 0.874 |
+
+(d >= 20 interior.) ERF still clears the believable threshold at NO threshold
+and NO scale; ERA5 clears it at 5 mm everywhere and at 1 mm from 30 km up.
+
+- Interior d>=20 bias: ERF 3.24 mm vs MRMS **8.48** -> **0.38x dry** (was 0.45x).
+- Whole domain: ERF 34.20 mm vs MRMS 14.84 -> 2.31x WET, all of it the band.
+- Band unchanged (ERF-internal, so the projection never touched it): d=0 mean
+  210.4 mm/day, max 2404.7 mm, decaying inward through d=15.
+- South interior third: ERF 0.14 mm vs MRMS 2.20; N/S ratio ERF 66.6, MRMS 9.7,
+  ERA5 6.6. The south is still dead.
+- Islands: ERF 0.0-5.1 mm where MRMS has up to 59.7 on the three western
+  islands -- **10-20x dry**, worse than the old 3-8x reading.
+- Interior 8-19 km spectral power: ERF/MRMS 0.003, ERA5/MRMS 0.008. The old
+  0.024 / 0.604 pair was the offshore-flattened MRMS variance in the
+  denominator. Read it as ERF carrying **0.4x the small-scale variance of its
+  own 25 km driver**.
+- Categorical, interior 5 mm: ERF POD/FAR/CSI 0.326/0.189/0.303 vs ERA5
+  0.998/0.291/0.708.
+
+**The verdict is unchanged and sharper:** the band wrings the inflowing moisture
+out at the walls and the interior starves -- drier (0.38x), southern half dead,
+essentially no storm-scale variance. Re-opening NSCBC is the right move against
+exactly this failure.
+
+Guards added so this cannot recur: `score_foundation.py` now pins the projection
+area, asserts the LCC against the frame's own coordinates (<10 m), and replaces
+the remembered-mean gate with a regrid-vs-native interpolation control on both
+observation fields. Fields in /home/atyagi/ERF/scoring_jan9_fixed/.
+
+### 19d premise check: NSCBC does remove the band, but the interior gain at 4 h is small
+
+Before spending a day of GPU on the A/B, the reason for re-opening NSCBC was
+tested on the pair already on disk -- gate take 2 (NSCBC, died 4.7 h) against
+the Davies day, same deck, same hours. Interior = d >= 20 (the #25 science
+cells), band = d = 0.
+
+| t (h) | rain d=0 NSCBC | rain d=0 Davies | rain d>=20 NSCBC | rain d>=20 Davies | CWV d>=20 NSCBC | CWV d>=20 Davies |
+|---|---|---|---|---|---|---|
+| 1 | 1.09 | 16.66 | 0.097 | 0.026 | 23.15 | 25.43 |
+| 2 | 1.50 | 27.65 | 0.130 | 0.107 | 21.53 | 25.20 |
+| 3 | 1.67 | 37.99 | 0.181 | 0.265 | 23.47 | 25.44 |
+| 4 | 1.98 | **48.17** | 0.379 | 0.334 | 25.25 | 26.08 |
+
+(rain_accum mm; CWV = column-integrated qv, kg/m2.)
+
+**The band is a Davies artifact and NSCBC does not have it.** By 4 h Davies has
+already put 48.2 mm on the d=0 ring -- more than twice MRMS's entire 24-h total
+there (18.6 mm) -- while NSCBC has 2.0 mm. A factor of **24**. This is the #25
+skill blocker measured directly at its source, four hours in.
+
+**The interior claim is weaker than the record implied.** Interior rain is 3.8x
+Davies at 1 h but only +13% by 4 h, and interior column water vapour is
+consistently *lower* under NSCBC in this window (21.5-25.2 vs 25.2-26.1), not
+higher. So "NSCBC delivers more moisture to the interior" is not established at
+4 h; what is established is that it does not wring the inflow out at the wall.
+Whether that converts into interior skill over a full day is exactly what the
+A/B has to answer -- it is not assumed here.
+
+### 30r. The 18 h death is a REAL NaN, and a two-step bit-identical bracket proves it is memory, not arithmetic
+
+Cold-init gate, identical to takes 3/4 except `amrex.fpe_trap_invalid=0` and the
+NaN reporter armed (`check_for_nans_int=10`):
+
+    Coarse STEP 46650 ends. TIME = 64807.13494
+    Component 0..14 of conserved variables contains NaNs/Infs
+      total NaN count, every component: 884736      (= 192*96*48, the whole field)
+
+So the trap was not spurious. The state genuinely goes non-finite at the [6,7]
+rotation; with the trap on it dies at t=64801.05 because a host compare in
+`fill_from_realbdy` sees the NaN first (30q), and with the trap off it runs four
+more steps and the whole field is gone.
+
+**A checkpoint landed one step before the event** (`chk46645`, t = 64800.42936,
+written by the 6-hourly cadence). Restarting from it re-executes the rotation
+identically -- same read `64800.42969 6 7 9`, same weights alpha1 = 0.9999602437,
+alpha2 = 3.975629807e-05 -- and runs on cleanly. Comparing the two dt sequences:
+
+| step | cold init | restart from chk46645 |
+|---|---|---|
+| 46646 | 1.188644409 | 1.188644409 |
+| 46647 | 1.188738823 | 1.188738823 |
+| 46648 | **1.307612777** | 1.188817263 |
+| 46649 | 1.438374043 | 1.188907385 |
+| 46650 | 1.582211494 | 1.188995838 |
+
+**Bit-identical for two full steps after the rotation, then divergence.** The
+restart's dt continues its smooth trend; the cold run's dt *rises* 10% per step,
+which is the NaN itself -- `fmax` ignores NaN operands, so as cells go non-finite
+the max-wave-speed reduction runs over a shrinking finite population and the
+timestep grows. (The first NaN therefore appears in step 46646 or 46647, in cells
+that do not hold the domain maximum; it reaches every cell by 46650.)
+
+**What this rules out.** Two runs executing identical arithmetic on identical
+data cannot diverge. The checkpointed state is identical, the frame data is
+identical, the interpolation weights are identical, the binary is identical.
+Therefore something read during those two steps is **not part of the checkpointed
+state and differs between the runs** -- i.e. memory content, which is the #29
+family, not a formulation error. Combined with 30q (memcheck: 0 errors) the class
+is now pinned: a legal read of memory whose *contents* depend on allocation
+history, not an out-of-bounds and not an arithmetic defect.
+
+**Also ruled out, this round:** uninitialized FArrayBox data in the hot path.
+`fab.init_snan=1` (every newly allocated FAB starts as signalling NaN) plus a
+per-step NaN check runs 30 cold-start steps clean. That does not cover
+`Gpu::DeviceVector`/raw arena allocations, which is where
+`FillForecastStateMultiFabs` churns ~13 device vectors on every rotation.
+
+**Cheap reproducer for whoever continues:** run_nan/chk46645 plus the cold log.
+The failing window is two steps wide and the clean counterfactual is one command.
+Next discriminator on the list: vary `amrex.the_arena_init_size` on a cold run --
+#29b already established that this fault class tracks arena layout, and a shift
+in the failure step would confirm it here.
+
+Production is unaffected: one bracketing restart per segment, validated to 48 h.

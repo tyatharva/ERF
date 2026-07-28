@@ -475,18 +475,31 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     // lambda_0 family which we take from the interior separately -- the isentropic
     // assumption enters only in the acoustic pair.
     //
-    // APPROXIMATION 2 (the sigma blend).  Blending a (4+N)-condition inflow state with
-    // a 1-condition outflow state is NOT a preserved count inside the blend window; it
-    // is a Robin-type condition there. Marchesiello et al. instead blend the relaxation
-    // TIMESCALE between inflow and outflow values, keeping the condition set fixed.
-    // The blend is used here because it is pointwise in u_n rather than in distance from
-    // the wall, so it cannot rebuild the monotone wall-normal ramp whose gradient is
-    // the artifact -- but it is an approximation, not a derivation.  eps is small
-    // (0.5 m/s) so sigma is 0 or 1 almost everywhere.  If it flaps, replace with a hard
-    // switch plus hysteresis on a persistent per-face flag.
+    // THE REGIME SWITCH (UPSTREAM_ISSUES #19d, fixed 2026-07-28).  The earlier
+    // formulation was a linear blend of sigma over +-eps, driven by `un_w` -- the
+    // velocity the DRIVER had just prescribed on the wall face.  That is smooth in
+    // time, but it is not the model's regime: the driver's u_n at xhi/yhi stays
+    // outflowing all day, so when interior dynamics reversed those faces, sigma
+    // stayed 0 and an INFLOWING face was handled by the outflow branch.  With
+    // variant 0 that branch is a zeroth-order extrapolation, i.e. NO incoming
+    // condition on a face that needs 4+N of them: unconstrained, and it grows.
+    // Measured on the production deck (gate take 2, died 4.7 h): xhi wall-mean u_n
+    // went +8.1 (1 h) -> +0.05 (2 h) -> -3.9 (3 h) -> -6.0 (4 h) with 355/384
+    // columns inflowing, and max|u_n| reached 28.9 m/s at the wall.  Davies on the
+    // same deck and hours: xhi n_inflow == 0 at every hour, max|u_n| <= 12.4.
+    //
+    // The regime is now taken from `un_i`, the model's own normal velocity one face
+    // inboard, through a Schmitt trigger with a +-eps deadband latched per column
+    // and per face in `nscbc_regime` (persistent across calls).  Inside the deadband
+    // the previous regime is held, so the switch cannot chatter on acoustic noise;
+    // outside it, the condition COUNT follows the physical flow direction, which is
+    // the property the blend never had.
     // ***********************************************************************************
+    // Outflow branch: 1 = the characteristic (Riemann) solve, which is the proper
+    // one-incoming-condition treatment; 0 = zeroth-order extrapolation, the variant
+    // that 19d showed is unconstrained on a reversed face.  Default is 1.
     static const int l_nscbc_outflow = [] {
-        int v=0; ParmParse pp("erf"); pp.query("nscbc_outflow", v); return v; }();
+        int v=1; ParmParse pp("erf"); pp.query("nscbc_outflow", v); return v; }();
     static const Real l_nscbc_eps = [] {
         Real e=Real(0.5); ParmParse pp("erf"); pp.query("nscbc_eps", e); return e; }();
     // Bisection bitmask: 1=cons pass, 2=velocity pass, 4=specify KE/scalar at
@@ -520,6 +533,18 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         const int ng_nsc = std::max(ngvect_cons.max(), ngvect_vels.max());
         MultiFab nsc(cons_mf.boxArray(), cons_mf.DistributionMap(), 5, ng_nsc);
         nsc.setVal(0.0);
+
+        // Persistent regime latch (see THE REGIME SWITCH above). -1 = unset, so the
+        // first call on a column falls back to the sign of un_i.
+        if (static_cast<int>(nscbc_regime.size()) <= lev) { nscbc_regime.resize(lev+1); }
+        // A default-constructed MultiFab has an empty BoxArray, so this one test
+        // covers "never defined" and "regridded" alike.
+        if (nscbc_regime[lev].boxArray()        != cons_mf.boxArray() ||
+            nscbc_regime[lev].DistributionMap() != cons_mf.DistributionMap())
+        {
+            nscbc_regime[lev].define(cons_mf.boxArray(), cons_mf.DistributionMap(), 4, 0);
+            nscbc_regime[lev].setVal(Real(-1.0));
+        }
 
         const Real gm1  = Gamma - Real(1.0);
         const int  ncmp = ncomp_cons;
@@ -555,23 +580,21 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                 if (bx.isEmpty()) continue;
 
                 const Array4<Real>&       ns = nsc.array(mfi);
+                const Array4<Real>&       rg = nscbc_regime[lev].array(mfi);
                 const Array4<const Real>& cs = cons_mf.const_array(mfi);
                 const Array4<const Real>& uu = xvel_mf.const_array(mfi);
                 const Array4<const Real>& vv = yvel_mf.const_array(mfi);
                 const Array4<const Real>& rh = r_hse.const_array(mfi);
                 const Array4<const Real>& ph = p_hse.const_array(mfi);
+                const int fd = fdir;
 
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
                     // Driver normal velocity at the wall face, made OUTWARD-positive.
-                    // This is the just-prescribed boundary value (the Eta rule): it is
-                    // smooth in time, so the regime does not chatter on model noise.
+                    // This is the just-prescribed boundary value (the Eta rule); it is
+                    // the far-field target of the characteristic solves below, NOT the
+                    // regime discriminator (see THE REGIME SWITCH above).
                     Real un_w = (ndir == 0) ? nsign * uu(wface,j,k) : nsign * vv(i,wface,k);
-
-                    // sigma = 1 deep inflow (un_w <= -eps), 0 deep outflow (un_w >= +eps)
-                    Real sig = Real(0.5) - un_w / (Real(2.0)*eps);
-                    sig = amrex::min(amrex::max(sig, Real(0.0)), Real(1.0));
-                    ns(i,j,k,0) = sig;
 
                     // Interior state, one cell / one face in
                     const int ii = (ndir == 0) ? icell : i;
@@ -580,7 +603,21 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                     Real rt_i  = cs(ii,jj,k,RhoTheta_comp);
                     Real un_i  = (ndir == 0) ? nsign * uu(iface,j,k) : nsign * vv(i,iface,k);
 
-                    // Default (variant 0): zeroth-order extrapolation from the interior,
+                    // Regime latch on the MODEL's normal velocity, with an +-eps
+                    // deadband: outside it the regime follows the flow, inside it the
+                    // previous regime is held. sigma is 1 (inflow) or 0 (outflow) --
+                    // never in between, so the condition count is always 4+N or 1.
+                    Real prev = rg(i,j,k,fd);
+                    Real sig;
+                    if      (un_i <= -eps)      { sig = Real(1.0); }
+                    else if (un_i >=  eps)      { sig = Real(0.0); }
+                    else if (prev >= Real(0.0)) { sig = prev; }
+                    else                        { sig = (un_i <= Real(0.0)) ? Real(1.0)
+                                                                            : Real(0.0); }
+                    rg(i,j,k,fd) = sig;
+                    ns(i,j,k,0)  = sig;
+
+                    // Fallback (variant 0): zeroth-order extrapolation from the interior,
                     // which for an outflow face IS the upwind-biased stencil.
                     Real rho_b = rho_i, rt_b = rt_i, un_b = un_i;
 

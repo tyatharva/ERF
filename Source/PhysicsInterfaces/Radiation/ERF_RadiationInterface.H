@@ -23,6 +23,11 @@ public:
     // hindcast surface frames); no-op by default.
     virtual void set_albedo (const amrex::MultiFab* /*albedo*/) {}
 
+    // MODEL-relative time, for cadence decisions only (UPSTREAM_ISSUES #26):
+    // the `time` handed to Run() is an absolute epoch instant, whose float32
+    // ULP is 128 s, so it cannot drive a 180 s trigger. No-op by default.
+    virtual void set_model_time (const amrex::Real /*model_time*/) {}
+
     virtual
     void
     Init (const amrex::Geometry& geom,
