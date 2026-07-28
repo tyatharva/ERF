@@ -4127,3 +4127,9 @@ mechanism rule).
 Production impact tonight: 0-18 h runs continuously with bounded mass; a
 restart bracketing the 18 h rotation completes the remainder. The mass fix
 (hindcast_global_mass_tau=60) is independent of this bug and stands.
+
+30p coda: the 18->24 h completion from chk46617 ran to TIME = 86400 exactly,
+exit 0, zero FPE, crossing the 21 h rotation cleanly on the restart path as
+predicted. Full Jan-9 day mass excursion, 24 storm hours: -0.032% (unfixed:
+~+9%/day). Day artifacts in run_a3: hourly plots 0-24 h, chk at 6/12/18 h +
+final. The restart-bracketed day is production-viable pending the 30p hunt.
