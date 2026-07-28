@@ -4050,3 +4050,48 @@ bounded signature with Davies' dt; then gate take 3.
 
 Open (parked): why NSCBC collapses on this deck; the 3.6% attribution
 (driver-data-side vs model-side) from 30n.
+
+### 30p. Gate take 3 (Davies + global controller): MASS BOUNDED FOR 18 H; the run still dies at 18.0003 h -- and the death is NOT mass, NOT data, NOT deterministic from a checkpoint
+
+**The mass fix holds under storm conditions.** Davies + `hindcast_global_mass_tau=60`:
+M stayed within [-0.018%, +0.012%] of start for the full 18 h (unfixed: +9.1%/day),
+tracking the ERA5 target through the Jan-9 AR. dt healthy throughout (1.2-1.6 s).
+2000-step validation had already shown peak transient +0.0124% (better than NSCBC's
++0.78% -- the controller acts from step 1). The MASS GATE CONDITION IS MET.
+
+**The completion gate is not.** Death at TIME = 64801.05 s = 18.0003 h, step 46633,
+"Erroneous arithmetic operation" (SIGFPE; deck has amrex.fpe_trap_invalid=1),
+immediately after "Reading weather data 64801 6 7 9" and "Reading surface data
+64801 6 7 9" -- the FIRST substep after the boundary window rotated to frames
+[6,7] (18:00 -> 21:00 UTC). This is the same model time as the ORIGINAL 18h death
+(pre-mass-fix), which the mass hypothesis was supposed to explain. **Mass is now
+bounded and the run still dies there: the mass explanation for the 18 h death is
+FALSIFIED. The frame rotation itself is the trigger.**
+
+Facts assembled (all reads/cheap runs):
+- Backtrace (addr2line vs the live binary): SIGFPE handler ->
+  `ERF::fill_from_realbdy` <- `FillIntermediatePatch` <- substep apply_bcs
+  lambda <- advance_dycore. Host-side invalid FP op (device kernels cannot
+  raise host SIGFPE).
+- All 18 frame files (3-D + surface) scanned: zero NaN/inf, identical sizes;
+  3-D frames have identical raw min/max. Frame 7 is not visibly poisoned.
+- **Restart from chk46632 (the death step) does NOT reproduce**: 68 steps
+  through the crossing, clean, with the controller ON and OFF (both). Same
+  time, same frames, same binary -- different outcome. The trap is therefore
+  HISTORY-DEPENDENT (fresh run carries 46k steps of allocation/rotation
+  history; restart carries none) -- the #29 memory-class signature, not an
+  arithmetic property of the data.
+- gate take 2 (NSCBC) also died by FPE but at 17073 s mid-fast-integration
+  (not a frame boundary); its backtrace addresses are unresolvable (binary
+  rebuilt since). Same underlying class or not: UNKNOWN.
+- Reproduction attempt from chk29146 (12 h, crosses the 15 h and 18 h
+  rotations with 17k steps of history): launched, result pending.
+
+Segment-relevant property: a restart that brackets the 18 h rotation clears
+it. Ugly but load-bearing for production sequencing if the root cause holds
+out.
+
+STOPPED here per standing rule: this is a new mechanism (memory-history class,
+#29 family) and the hunt needs sign-off. Evidence: run_a3/gate_nscbc_fail/
+(take 2), scratchpad gate24c.full / repro18_*.full, chk13785/29146/46632, plt
+hourly through 17 h.
