@@ -4095,3 +4095,11 @@ STOPPED here per standing rule: this is a new mechanism (memory-history class,
 #29 family) and the hunt needs sign-off. Evidence: run_a3/gate_nscbc_fail/
 (take 2), scratchpad gate24c.full / repro18_*.full, chk13785/29146/46632, plt
 hourly through 17 h.
+
+30p addendum: the chk29146 (12 h) restart ALSO survived -- 17,554 steps through
+BOTH the 15 h and 18 h rotations, clean to t=64983 s. 17k steps of history + two
+rotations is insufficient. The trap needs the full cold-init history, or is a
+rare race (consistent with item 13 non-reproducibility and with take 2's FPE at
+an unrelated time under NSCBC). Gate relaunched as-is: a second death at exactly
+18.0003 h would argue cold-init x rotation-7 interaction over a race; a pass is
+a legitimate continuous 24 h. Take-3 evidence moved to run_a3/gate3_evidence/.
