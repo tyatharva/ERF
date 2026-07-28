@@ -758,3 +758,52 @@ Verified: 24 h Jan-1 with erf.check_for_nans=1 armed: 37,798 steps,
 8 frame transitions, zero non-finite trips. erf.check_for_nans also
 detects Inf and prints locations (contains_nan alone misses Inf -- an
 SP overflow becomes NaN only one step later via Inf-Inf).
+
+---
+
+## Item 29 postmortem: the reproducer introduced the bug it was used to hunt
+
+**The SST ghost-vector overrun (29m) is RESTART-PATH-ONLY.** `sst_lev[lev][0]` is
+allocated with a mismatched `ng[2]=0` only by `ERF_Checkpoint.cpp:851`; a fresh
+start allocates it in `SurfaceDataInterpolation` with the matching `(4,4,4)` and
+never overruns. Every item-29 reproducer used `amr.restart=chk46225`.
+
+So the memory fault that 29a-29m chased was, on a code reading, **not present in
+the fresh 24-h runs at all** -- the restart-based reproducer created it. The fresh
+gate run confirms the shape: `cuda700=0`, sanitizer `0 errors`, and it dies of
+something else entirely (item 30, mass drift).
+
+The fix still matters and must ship: **production recovers month-long segments by
+restart**, so that path was genuinely broken and would have corrupted any
+restarted segment. It was simply never the gate blocker.
+
+Lesson: a reproducer that differs from the failing configuration in ANY code path
+can manufacture its own failure. The restart path allocates state the fresh path
+does not. Before trusting a reproducer, confirm it reproduces the ORIGINAL
+signature -- not merely a failure at the same time.
+
+Related: `hunk=64` was read in 29i as confirming a use-after-free. It was
+mechanism-PERTURBING, not mechanism-confirming -- it relocates every allocation
+out of the blast radius of an out-of-bounds write. Prefer instruments that OBSERVE
+(canary, tag check) over instruments that PERTURB (hunk size, added syncs).
+
+Also: `BL_ASSERT(dst.nGrowVect().allGE(nghost) && ...)` at `AMReX_MultiFab.cpp:205`
+catches 29m exactly, and is compiled out in Release. **A periodic Debug-build
+smoke run would have ended item 29 in an afternoon instead of thirteen
+diagnostics.** Worth adding to the standing checklist.
+
+## PERFORMANCE: `amrex.max_gpu_streams = 1` is very likely recoverable -- LARGEST WIN AVAILABLE
+
+The deck carries `amrex.max_gpu_streams = 1` (line 433) as a workaround for a
+believed stream race, at **roughly 3x the per-step cost** (see "What a healthy run
+looks like": ~15-17 s/step with it vs multi-stream).
+
+**The premise is now known to be false.** Item 29 was an out-of-bounds write, not
+a race: `CUDA_LAUNCH_BLOCKING=1` had no effect, the fault was bit-deterministic,
+and the actual cause (29m) is a ghost-vector mismatch in `MultiFab::Copy` with no
+concurrency component whatsoever.
+
+If the 3x is recoverable this is the single largest throughput win available to a
+year-long campaign -- larger than any cfl retune. **Phase 3, after the gate**:
+changing it now would alter gate conditions. Re-test with the item-29 fix in place
+and compute-sanitizer racecheck clean before shipping it.

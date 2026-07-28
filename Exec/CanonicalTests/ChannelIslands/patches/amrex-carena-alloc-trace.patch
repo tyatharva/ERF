@@ -1,0 +1,90 @@
+diff --git a/Src/Base/AMReX_CArena.cpp b/Src/Base/AMReX_CArena.cpp
+index af5fcdc1..208b4d4a 100644
+--- a/Src/Base/AMReX_CArena.cpp
++++ b/Src/Base/AMReX_CArena.cpp
+@@ -1,5 +1,9 @@
+ 
+ #include <AMReX_CArena.H>
++#include <cstdio>
++#include <cstdlib>
++#include <execinfo.h>   // ERF diagnostic 29j
++#include <dlfcn.h>      // ERF diagnostic 29j
+ #include <AMReX_BLassert.H>
+ #include <AMReX_Gpu.H>
+ #include <AMReX_ParallelReduce.H>
+@@ -10,6 +14,59 @@
+ 
+ namespace amrex {
+ 
++// ERF DIAGNOSTIC (UPSTREAM_ISSUES 29j): trace alloc/free in a size window so the
++// block whose reuse coincides with the item-29 corruption can be named. Enabled
++// by AMREX_ARENA_TRACE_LO/HI (bytes) in the environment; zero cost when unset.
++//
++// Sizes alone were not enough -- thousands of same-size blocks churn per step, so
++// a block cannot be attributed to an owner. Each record therefore carries a
++// monotonic sequence number and the demangled callers above CArena, which is what
++// turns "some 768-byte block was recycled" into "X allocated it, Y freed it, Z was
++// handed it". backtrace() (unwind tables) rather than __builtin_return_address(n),
++// which is unreliable at -O3 without frame pointers.
++//
++// NOTE WHEN READING THE OUTPUT: alloc logs the REQUESTED nbytes, free logs
++// busy_it->size(), the ALIGNED block size. Requests just under the filter floor
++// are invisible on alloc but visible on free, so counts do not balance and
++// unmatched frees are an artifact, not a double free.
++namespace {
++    struct ErfArenaTrace {
++        long lo{0}, hi{0}; bool on{false};
++        ErfArenaTrace () {
++            if (const char* l = std::getenv("AMREX_ARENA_TRACE_LO")) { lo = std::atol(l); on = true; }
++            if (const char* h = std::getenv("AMREX_ARENA_TRACE_HI")) { hi = std::atol(h); }
++        }
++    };
++    const ErfArenaTrace& erf_arena_trace () { static ErfArenaTrace t; return t; }
++
++    // Frame 0 is erf_trace, 1 is CArena::alloc_protected/free, 2 is CArena::alloc
++    // or the Arena entry point -- the informative callers start around 3.
++    constexpr int erf_bt_skip = 3;
++    constexpr int erf_bt_show = 4;
++
++    inline void erf_trace (const char* op, const void* p, std::size_t n) {
++        const auto& t = erf_arena_trace();
++        if (!(t.on && long(n) >= t.lo && (t.hi == 0 || long(n) <= t.hi))) { return; }
++        static long seq = 0;
++        void* bt[erf_bt_skip + erf_bt_show];
++        const int nf = ::backtrace(bt, erf_bt_skip + erf_bt_show);
++        char buf[512];
++        int off = std::snprintf(buf, sizeof(buf), "ARENATRACE %ld %s %p %zu", ++seq, op, p, n);
++        for (int f = erf_bt_skip; f < nf && off < int(sizeof(buf)) - 32; ++f) {
++            Dl_info di;
++            if (::dladdr(bt[f], &di) && di.dli_sname) {
++                off += std::snprintf(buf + off, sizeof(buf) - off, " %s", di.dli_sname);
++            } else if (::dladdr(bt[f], &di) && di.dli_fbase) {
++                off += std::snprintf(buf + off, sizeof(buf) - off, " +0x%lx",
++                                     (unsigned long)((const char*)bt[f] - (const char*)di.dli_fbase));
++            } else {
++                off += std::snprintf(buf + off, sizeof(buf) - off, " ?");
++            }
++        }
++        std::fprintf(stderr, "%s\n", buf);
++    }
++}
++
+ CArena::CArena (std::size_t hunk_size, ArenaInfo info)
+     : m_hunk(align(hunk_size == 0 ? DefaultHunkSize : hunk_size))
+ {
+@@ -158,6 +215,7 @@ CArena::alloc_protected (std::size_t nbytes)
+ 
+     BL_ASSERT(vp != nullptr);
+ 
++    erf_trace("ALLOC", vp, nbytes);
+     return vp;
+ }
+ 
+@@ -314,6 +372,7 @@ CArena::free (void* vp)
+     }
+     BL_ASSERT(!m_freelist.contains(*busy_it));
+ 
++    erf_trace("FREE ", vp, busy_it->size());
+     m_actually_used -= busy_it->size();
+ 
+ #ifdef AMREX_TINY_PROFILING

@@ -119,6 +119,24 @@ ensure_sfc_anchor (const int nx_dom, const int ny_dom)
     { amrex::ParmParse pp("erf"); pp.query("hindcast_sfc_anchor_file", fname); }
     if (fname.empty()) { return false; }
 
+    // These are file-scope Gpu::DeviceVectors, so libc destroys them AFTER
+    // amrex::Finalize(). Their ArenaAllocator then calls The_Arena()->free() on
+    // an arena already destroyed by Arena::Finalize() (AMReX.cpp:908) -- a
+    // virtual call through a dead base, reported as "pure virtual method called",
+    // and the process exits 134 even after a completely successful run. That
+    // makes a finished segment indistinguishable from a crashed one to the
+    // wrapper driving month-long segments. Finalize callbacks run at
+    // AMReX.cpp:854, BEFORE Arena::Finalize(), so releasing here is safe.
+    static bool s_anchor_cleanup_registered = false;
+    if (!s_anchor_cleanup_registered) {
+        s_anchor_cleanup_registered = true;
+        amrex::ExecOnFinalize([] {
+            s_sp_d.clear(); s_sp_d.shrink_to_fit();
+            s_zo_d.clear(); s_zo_d.shrink_to_fit();
+            s_t2_d.clear(); s_t2_d.shrink_to_fit();
+        });
+    }
+
     s_anchor_ok = read_sfc_anchor(fname, nx_dom, ny_dom, s_sp_d, s_zo_d, s_t2_d);
     if (!s_anchor_ok) {
         Abort("erf.hindcast_sfc_anchor_file was set but could not be read. Refusing to fall "

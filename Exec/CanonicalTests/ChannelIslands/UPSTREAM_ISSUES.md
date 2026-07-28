@@ -3190,3 +3190,441 @@ allocations alive. AMReX's `Arena::free` is the choke point; instrumenting it to
 log (ptr, size) alongside the FabArray fab pointers at each frame advance would
 name the block whose reuse coincides with the corruption. The reproducer is 30
 seconds, so this is bisectable rather than speculative.
+
+## 29j. THE POINTER IS NAMED. Culprit: `FabArray::clear()` frees fab data ~25 lines before its only stream sync
+
+The search 29i called for was run: `CArena::alloc_protected` and `CArena::free`
+instrumented to log `(seq, op, ptr, size, 4 resolved callers)` for a size window
+(`apply_amrex_carena_trace_patch.sh`), plus a validator on the cached FillBoundary
+tag vector (`apply_amrex_fbi_tagcheck_patch.sh`). Both are diagnostics; neither
+ships.
+
+**First, two dead ends killed by measurement, not argument.**
+
+The "512-byte size class" that framed the search was an artifact. The sanitizer
+reports `Address 0xfc87c88ebce80728 ... is 18196602103903290665 bytes after the
+nearest allocation at 0x775a92a00000 of size 512 bytes`. That address is wild
+(high bits set); the "nearest allocation" is simply the closest thing memcheck
+knew about, 1.8e19 bytes away, and has no relationship to the fault. There are no
+arena records for it at all -- it is not even a CArena sub-allocation. **The real
+object is 4352 bytes.** Filtering to 512 would have missed it entirely.
+
+The victim is not stale, it is SCRIBBLED. On every cache hit the validator
+rebuilt the tags from the current fabs and compared against the device buffer:
+
+```
+ERFTAGCHECK fb_id=0 ntags=22 tag=0 sizeof_tag=176 first_diff_byte=0
+  d_tags=0x7faa83133900 fabarray=0x577f959ac640 nbytes=3872
+  device dfab.p=0x43905337439051b1 sfab.p=0x4390036043900360 dindex=1133511520
+  fresh  dfab.p=0x7faa473c3f00     sfab.p=0x7faa48460700     dindex=0
+```
+
+`0x43905337`, `0x439051b1`, `0x43900360` are float32 **288.65, 288.64, 288.03** --
+field data written over the fab-pointer array. It fires immediately after
+`Reading surface data 64801.21094 6 7 9`, the frame pair advancing to (6,7): the
+seventh advance, exactly the documented timing.
+
+(Caveat for whoever reads the raw output: `sizeof(Array4CopyTag<float,float>)` is
+176 with a **4-byte padding hole at offset 68**. `TagVector::define` memcpy's the
+struct including padding, so 26 of the 27 reported mismatches say
+`first_diff_byte=68` and are noise. Only `first_diff_byte=0` is real.)
+
+**The block's history**, from the arena trace, symbols via `addr2line`:
+
+| seq | op | size | call site |
+|-----|----|------|-----------|
+| 3287 | ALLOC | 768 B | `FabArray::setVal` <- `compute_wall_flux_correction` <- `ERF::fill_from_realbdy` <- `FillIntermediatePatch` |
+| 3291 | FREE | 768 B | **`FabArray::~FabArray()`** <- `ERF::fill_from_realbdy` <- `FillIntermediatePatch` <- `advance_dycore` |
+| 3335 | ALLOC | 4352 B | `FB_get_local_copy_tag_vector` <- `FB_local_copy_gpu` <- `FBEP_nowait` <- `ERF::advance_microphysics` |
+| -- | never freed | | live at the fault |
+
+**The holder** is `FabArray::m_fb_local_copy_handler` (`AMReX_FabArray.H:1594`), a
+`map<uint64_t, unique_ptr<TagVector>>` populated by
+`FB_get_local_copy_tag_vector` (`AMReX_FBI.H:491`). It caches raw `Array4` fab
+pointers for the **lifetime of the FabArray** and is cleared only in
+`FabArray::clear()`. That is why the block never reappears in the trace, and why
+one scribble is permanent rather than transient: every later `FillBoundary` on
+that MultiFab re-reads the same corrupted tags.
+
+**The defect**, `AMReX_FabArray.H:1942-1982`:
+
+```cpp
+template <class FAB> void FabArray<FAB>::clear () {
+    ...
+    for (auto *x : m_fabs_v) {
+        if (x) { nbytes += amrex::nBytesOwned(*x);
+                 m_factory->destroy(x); }   // <-- line 1952: fab data -> arena free list.
+    }                                       //     NO stream synchronization.
+    ...
+    m_fb_local_copy_handler.clear();        // <-- line 1977: ~TagVector -> undefine()
+                                            //     -> Gpu::streamSynchronize().
+```
+
+The only synchronization in the destructor path runs **after** the fab memory has
+already been returned to the arena. `FillBoundary`'s local-copy path is
+fire-and-forget on the stream -- `FB_local_copy_gpu` launches and returns, and it
+is not inside an `MFIter`, so it gets none of `~MFIter`'s all-stream sync
+(`AMReX_MFIter.cpp:249-255`). So a short-lived MultiFab that ends with a
+`FillBoundary` -- exactly what `compute_wall_flux_correction` does at
+`ERF_InteriorGhostCells.cpp:219`, on a temporary owned by `fill_from_realbdy` --
+releases memory a live kernel is still writing to.
+
+**This accounts for every prior observation:**
+
+- deterministic step number -- allocation order is deterministic, so which block
+  lands under which cache is deterministic. Not a race.
+- `hunk=64` + `init_size=0` makes it vanish (29i) -- no reuse, so the freed block
+  is never handed to the tag vector.
+- eleven compute-sanitizer runs found no out-of-bounds write (29h) -- there isn't
+  one. The write is perfectly in bounds of a block that was legitimately freed.
+- the victim is a fab-pointer array -- it is the cached TagVector.
+- the lifetime barriers added to `FillForecastStateMultiFabs` and
+  `FillSurfaceStateMultiFabs` did not help. They are in ERF's interpolation
+  functions; this is in AMReX's FabArray destructor. Both barriers are still
+  correct and stay.
+
+**Not yet proven:** that the specific kernel writing those 288 K bytes is the
+`FB_local_copy_gpu` launched on the temporary. What is proven is the release site,
+the ordering defect, and that the buffer is overwritten with float field data
+rather than going stale. The candidate writers all sit in the same window.
+
+**Standing constraint reminder:** no upstream activity. This is an AMReX defect
+and it stays in this file. Both diagnostic patches revert before the 24-h gate.
+
+### 29j-bis. VERIFICATION FAILED: the `clear()` ordering defect is REAL but is NOT the cause
+
+Per the step-1 plan, `FabArray::clear()` was patched to hoist
+`Gpu::Device::synchronize()` above the fab-release loop
+(`apply_amrex_clear_sync_patch.sh`, hash-gated). If the mechanism in 29j were the
+cause, the fault had to disappear.
+
+**It did not.** Same death at step 46227, `CUDA error 700`, and ERFTAGCHECK still
+reports exactly one real mismatch (`first_diff_byte=0`) alongside the 26 padding
+artifacts.
+
+The instrument was verified live before accepting the negative -- this campaign
+has been burned by unverified results six times on this item:
+
+- `~FabArray()` routes through `clear()` (`AMReX_FabArray.H:2187`).
+- The build recompiled all 249 objects, so the header change was picked up.
+- `Device::synchronize()` is a real `cudaDeviceSynchronize()` +
+  `streamSynchronizeAll()` (`AMReX_GpuDevice.cpp:844-852`), not a no-op.
+- **Decisive:** the abort now surfaces at `AMReX_GpuDevice.cpp:848`, which IS the
+  `cudaDeviceSynchronize()` in the patched path. The sync is executing.
+
+**What this rules out, and what it leaves.** If no kernel can be in flight when
+the block is released and the tag buffer is still overwritten, then the
+corrupting write happens *after* the free. It is a stale pointer captured and
+launched later, NOT a live kernel racing a destructor. Every "in-flight kernel"
+framing of item 29 -- including the two lifetime barriers already in the tree --
+is aimed at the wrong half of the problem. (Those barriers are independently
+correct and stay; they are just not this.)
+
+The block-provenance chain in 29j stands as measured. What does not stand is the
+inference from "previous owner of the block" to "writer of the bytes". The
+previous owner was identified correctly; it is simply not who wrote.
+
+**Next instrument** (not yet run, needs sign-off per the standing no-new-hunt
+rule): a device-side canary written into the tag buffer immediately after
+`TagVector::define`'s `htod_memcpy_async`, checked at each cache hit. That
+brackets the write to a single call and can be bisected within a step, naming the
+writer directly instead of inferring it from block provenance.
+
+### 29j-ter. Upstream note: two real AMReX defects, not ERF-specific
+
+Not filed -- standing constraint is no upstream activity, and this stays local.
+Recording so it is not lost, because both are genuine and neither depends on
+anything ERF does:
+
+1. **`FabArray::clear()` frees before it syncs.** Fab storage goes back to the
+   arena at `AMReX_FabArray.H:1952` with no stream ordering; the only
+   synchronization in the destructor path is `m_fb_local_copy_handler.clear()`
+   ~25 lines later (`~TagVector` -> `undefine()` -> `Gpu::streamSynchronize()`).
+   Any GPU work outstanding on those fabs is racing the free.
+
+2. **`FB_local_copy_gpu` gets no `MFIter` sync.** `FillBoundary`'s local-copy path
+   launches and returns; it is not inside an `MFIter`, so it never sees
+   `~MFIter`'s all-stream synchronization (`AMReX_MFIter.cpp:249-255`). A
+   short-lived MultiFab whose last operation is a `FillBoundary` therefore has
+   outstanding device work at destruction by construction.
+
+Together these are a latent use-after-free for any temporary MultiFab ending in a
+FillBoundary. That it is not what kills THIS run does not make it safe; on a
+year-long hindcast it is exactly the class of thing that surfaces at month seven.
+Worth reporting upstream when the campaign's no-upstream freeze lifts.
+
+## 29m. ROOT CAUSE, FIXED: `MultiFab::Copy` writes 82944 bytes outside the SST fab on restart
+
+Item 29 is **not** a use-after-free. It is a plain out-of-bounds write, and every
+lifetime hypothesis (29a-29l) was chasing the wrong class of bug.
+
+**The defect**, `ERF_SurfaceDataInterpolation.cpp`:
+
+```cpp
+MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, surf_mf.nGrowVect());
+```
+
+The ghost vector comes from the SOURCE. A fresh start allocates `sst_lev[lev][0]`
+a few lines above with `surf_mf.nGrowVect()` = (4,4,4), so source and destination
+agree. **The restart path allocates it first** -- `ERF_Checkpoint.cpp:851`,
+`ng = vars_new[lev][Vars::cons].nGrowVect(); ng[2]=0;` -- and the
+`if (sst_lev[lev].empty())` branch is then skipped. Destination ghosts are
+(4,4,0); the copy still addresses k = -4..4.
+
+Measured geometry across the three calls in one reproducer run:
+
+```
+2 x  surf_ng=(4,4,4)  sst_ng=(4,4,0)   <-- MISMATCH
+1 x  surf_ng=(4,4,4)  sst_ng=(4,4,4)
+```
+
+The destination fab is 72x72x1 = 20736 B. `kstride` = 72*72*4 = 20736 B, so k=-4
+indexes **82944 bytes BELOW** `p`, and k>0 the same distance above. The arithmetic
+closes exactly: the second-set fabs start at `0x775a47138800`; minus 82944 is
+`0x775a47124400`, and all seven corrupted blocks (`0x775a4712b900` ...
+`0x775a47133900`) lie inside `[0x47124400, 0x47138800)`.
+
+**The victim** is the CACHED FillBoundary tag vector of `vars_new[0][cons]`
+(`m_fb_local_copy_handler`, `AMReX_FabArray.H:1594`), which holds raw fab pointers
+for the FabArray's lifetime. Its `Array4CopyTag` array is overwritten with SST
+floats, so `dfab.p` becomes `0x439051b1`/`0x43905337` = 288.64 / 288.65 K. Because
+the tag vector is cached and never rebuilt, the damage is permanent: the next
+`FillPatchCrseLevel` -> `FillBoundary` -> `FB_local_copy_gpu` dereferences a
+temperature as a pointer -> CUDA 700.
+
+**Why nothing caught it for eleven diagnostics.**
+
+- AMReX guards exactly this: `BL_ASSERT(dst.nGrowVect().allGE(nghost) && ...)`,
+  `AMReX_MultiFab.cpp:205`. `BL_ASSERT` is **compiled out in Release**. A Debug
+  build would have aborted on the first frame with the right message.
+- compute-sanitizer is blind to it: with 8 MB `CArena` hunks the write stays
+  inside a valid `cudaMalloc`. Eleven memcheck runs found nothing (29h).
+- `hunk=64` "fixing" it (29i) was a red herring -- it changed which allocation sat
+  in the blast radius, not whether the overrun happened. That single false signal
+  is what created the use-after-free model and cost 29i-29l.
+- The fault is deterministic because arena layout is deterministic.
+
+**The fix** (3 lines): copy only what the destination owns.
+
+```cpp
+IntVect ng_sst_copy = surf_mf.nGrowVect();
+ng_sst_copy.min(sst_lev[lev][0]->nGrowVect());
+MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, ng_sst_copy);
+```
+
+Not chosen: reallocating `sst_lev` to match. The comment above that block warns
+that `m_SurfaceLayer` "stores raw pointers at construction, so the allocation must
+persist and only its contents change" -- reallocating would dangle those.
+
+**Verified.** Reproducer restart from `chk46225` to `max_step=46260`, i.e. 33
+steps past the fault that killed five 24-h runs at 46227: `cuda700=0`, and the
+tag-vector canary reports **zero** modifications (previously one real scribble at
+the (6,7) advance).
+
+**How it was found**, since inference failed repeatedly and measurement did not:
+a canary comparing each cached tag buffer against its own `h_buffer` on every
+cache hit, bracketing the write between the last clean and first dirty call site,
+then bisecting that window with probes -- `C:after-surface` -> `S2:after-sst-lmask`
+-> `T1:after-copy-sst`. Note the trap this avoided: the SST *sanitize* ParallelFor
+20 lines below contains the literal `Real(288.0)`, matching the corrupting bytes
+perfectly. It is not the writer. Stopping at the matching literal would have named
+the wrong statement for the third time on this bug.
+
+**Lesson for the campaign.** `hunk=64` was treated as a mechanism-confirming
+measurement in 29i. It was a mechanism-*perturbing* one. A change that makes a
+symptom disappear constrains the mechanism far less than it appears to, because it
+also relocates every allocation. Prefer instruments that OBSERVE (canary, tag
+check) over instruments that PERTURB (hunk size, added syncs).
+
+## 30. GATE BLOCKER: +20%/day global mass gain. Supersedes the corner framing entirely
+
+The 24-h gate run (fresh, post-29m) died at step 46181, **18.003 h**, first NaN in
+density at (0,22,7) -- the xlo boundary -- spreading to 300 cells across i=0..39
+and all 15 conserved components. `cuda700=0`, compute-sanitizer `0 errors`,
+clean exit. **The item-29 memory fault is genuinely gone. This is a different,
+larger problem that it was hiding.**
+
+### The drift
+
+| | t=0 | t=18 h | change |
+|-----|-----|--------|--------|
+| interior mean rho | 0.8685 | 1.0166 | **+17.1%** |
+| global mass (yt)  | 7.637e5 | 8.948e5 | **+17.2%** |
+| solver `MASS`     | 1.5957e15 | 1.9239e15 | **+20.6%** |
+
+Monotonic from the first hour. Two independent measurements agree. Interior
+column gain is **17.06% +/- 0.24%** -- uniform to 1.4% relative across the whole
+interior, so it is NOT a boundary influx advecting inward (that leaves gradients)
+and NOT terrain-slope pumping (that concentrates over slopes). Gain is present at
+every level, 15.6% through the low/mid column rising to 36.6% at the lid.
+
+**A 20%/day mass gain corrupts every scored result from this deck, including runs
+that do not crash.** It is upstream of #25, of the corner work, and of item 29.
+
+### Term attribution (all by measured null, not by argument)
+
+Protocol: 800 steps, `MASS` vs `TIME` from the solver's own diagnostic.
+
+| config | drift | verdict |
+|--------|-------|---------|
+| baseline | **+2.374 %/h** | -- |
+| `hindcast_wall_flux_correction=false` | +2.401 | excluded |
+| `hindcast_zhi_sponge_damping=false` | +2.375 | excluded |
+| `w_damping=false` | +2.374 | excluded |
+| `moisture_model="None"` (Morrison off) | +2.373 | excluded |
+| `hindcast_blend_bdy_theta=0` | +2.374 | excluded |
+| `cfl` 0.2 -> 0.1 (2x the steps) | +2.545 | **not per-step; not SP rounding** |
+
+The cfl test matters: a per-step accumulation bias would roughly DOUBLE the
+drift per unit time when dt halves. It moved 7%. So this is a continuous-time
+source, single-precision rounding is excluded, and **no DP build is needed** to
+establish that.
+
+(Early rate +2.374 %/h vs the 18-h average ~0.86 %/h: there is a fast spin-up
+transient on top of a steady drift. Toggle comparisons are all same-window.)
+
+### Leading mechanism: net lateral boundary mass flux is UNENFORCED in the compressible path
+
+The anelastic control could not run -- it aborts in the initial projection:
+
+```
+Projecting initial velocity field at level 0
+ TOTAL INFLUX / OUTFLOW 238790832 234497616
+Erroneous arithmetic operation
+```
+
+influx exceeds outflux by 4.29e6, a **1.8% imbalance in the boundary data**, and
+the projection dies trying to remove it. `enforceInOutSolvability`
+(`ERF_ConvertForProjection.cpp:325`) exists precisely to rescale outflow by
+`alpha_fcf = influx/outflux` so net flux is zero -- **and it is called only from
+the projection path, i.e. only when anelastic. The compressible path has no
+equivalent.** A net influx therefore just accumulates.
+
+This is consistent with every measurement: uniform in space (acoustic waves cross
+576 km in ~28 min, fast vs 18 h, so an imbalance equilibrates into a uniform
+compression), continuous-time, immune to every physics toggle. It also explains
+why the ONLY clean mass result on record (RUNBOOK ~line 329, "rho sum
+bit-identical over 24 h") was measured on a **double-precision, `anelastic=1`**
+build -- a configuration that ENFORCES solvability, and in which rho is fixed to
+rho0 anyway. That note is vacuous as evidence for the compressible path.
+
+**NOT YET CONFIRMED.** Direct flux integration from the gate plotfiles did not
+reproduce the steady drift: net flux came out -0.228 / +0.781 / -0.128 %/h at
+4/9/18 h, fluctuating in sign against a steady +0.86 %/h. That estimate uses
+cell-centred velocities from the outermost cell instead of true face fluxes and
+ignores terrain-following dz, so it is too crude to settle magnitude (the mass
+integral itself checks out to 0.7% against the solver). **The decisive next
+measurement is to call `compute_influx_outflux` every step in the compressible
+path and log it** -- the model's own definition, no reconstruction.
+
+### Why the wall flux correction does not save this
+
+It is enabled and firing (`cons_only=false` at `ERF.cpp:1383`), but measurably
+does nothing (+2.401 vs +2.374 with it off), and it has a real metric defect:
+
+```cpp
+const Real dz = geom.CellSize(2);      // UNIFORM
+M  += rm(i,j,k,Rho_comp) * dz;
+Mt += rt(i,j,k,Rho_comp) * dz;
+```
+
+This domain is stretched (ratio 1.09311734, dz_k spans ~55x) and
+terrain-following. The constant cancels in `Mt/M`, so amplitude is fine, but every
+level is weighted EQUALLY where true column mass weights by the actual `dz_k`. It
+constrains an unweighted density sum to the ERA5 target, not column mass -- and
+drives it exactly, which is how a metric error becomes persistent drift. Worth
+fixing on its own merits; it is not the remedy for 20%/day, and it only touches
+the outermost ring in any case.
+
+### This supersedes the corner framing
+
+Band-maximum rho sits at **(0,95,0)** -- the exact corner the original 24-h runs
+blamed -- climbing 1.3536 -> 1.4143 over seven hours while theta there falls
+288.4 -> 286.6. **The corner clamp (27e) constrained |w| and did nothing about rho
+accumulation at that cell.** It moved the failure rather than removing it, exactly
+as suspected. The corner was never the mechanism; it is where a global mass drift
+concentrates first.
+
+### 30a. FALSIFIED: the boundary flux imbalance does NOT carry the drift (and a correction)
+
+Instrumented the boundary flux budget every step with the model's own convention
+(`erf_bdy_mass_flux_diag`, gated by `ERF_MASSFLUX_DIAG`), logging both volume flux
+and rho-weighted mass flux with the true metric face areas `ax`/`ay`, then
+integrated net mass flux and compared against the solver's own `MASS`:
+
+| quantity | value |
+|----------|-------|
+| integrated net boundary mass flux | 3.370e10 kg |
+| measured mass gain, same window | 1.303e13 kg |
+| **ratio** | **0.0026** |
+
+**The boundary carries 0.26% of the gain -- off by a factor of ~390.** The
+imbalance is real (mass in/out 2.391e8 / 2.342e8 = **+2.07%**) but far too small
+to matter: 4.8e6 kg/s against a 1.6e15 kg domain is ~1e-5 %/h, four orders below
+the observed 2.374 %/h. Enforcing solvability in the compressible path would not
+have fixed anything, and shipping it would have been a plausible-looking no-op.
+
+**CORRECTION to 30.** I claimed `compute_influx_outflux` carries no density and so
+enforces only a VOLUME balance, making `enforceInOutSolvability` untransferable to
+the compressible path. That was wrong. The function is called on `vels_vec` AFTER
+`ConvertForProjection` has converted velocity to rho-weighted momentum, so it is
+already a mass-like flux. Confirmed numerically: this diagnostic's mass flux
+(2.391e8 / 2.342e8) matches the projection's printed `238790832 / 234497616`
+almost exactly, while its volume flux is 2.3x larger. **The function is more
+transferable than 30 said** -- it simply is not the remedy for this defect.
+
+### 30b. Therefore: mass is created in the INTERIOR
+
+With the boundary excluded quantitatively and all seven physics terms excluded by
+measured null, the only surviving reading is that **the compressible dycore's
+density update is not conservative in this configuration**. Consistent with every
+measurement: uniform to +/-0.24% in space, continuous-time (cfl halving moved it
+7%, not 2x), immune to every option toggle.
+
+Note the ERA5 net-flux check at R ~ 6.4 mm/s is CONSISTENT with this: the driving
+data being mass-consistent under ERF's own operator is exactly what you expect
+when the defect lives downstream of the boundary entirely.
+
+### 30c. Scope: this is upstream of #25 and invalidates prior scoring
+
+**Every scored result from this compressible deck was measured on a run inflating
+at ~20%/day**, including runs that completed without crashing. That includes the
+FSS comparison against ERA5 in #25: both the model field and any derived
+precipitation diagnostics were computed from a state whose density was drifting
+by ~1%/h. #25 cannot be answered until item 30 is fixed, and prior FSS numbers
+from this deck should be treated as unscored, not as a baseline to re-use.
+
+### 30d. Metric excluded; band-density overwrite is a PARTIAL carrier (~58%)
+
+Grid discriminator (800 steps, same window, baseline +2.374 %/h):
+
+| config | drift | verdict |
+|--------|-------|---------|
+| `grid_stretching_ratio=1.0` (uniform dz) | +2.371 %/h | stretching excluded |
+| `terrain_type=None` | +2.332 %/h | terrain excluded |
+
+The drift survives an unstretched grid AND terrain removal, so `detJ` / `ax,ay,az`
+inconsistency is NOT the mechanism. It is the update, not the metric. This also
+retires the analogy to the estTimeStep and Omega-vs-rho*w bugs -- both were metric
+classes, this is not.
+
+**Blind spot in 30a's instrument.** `erf_bdy_mass_flux_diag` integrates advective
+flux `rho*u*A` through the domain faces. The relaxation zone does not add mass by
+flux -- it **overwrites rho directly in the band cells**. A direct overwrite is
+invisible to a flux integral by construction. So "boundary flux carries 0.26%" and
+"the boundary is a source" were never in conflict; the wrong channel was measured.
+
+**Measured:** `hindcast_blend_band_density = true` -> **+1.003 %/h**, vs +2.374
+baseline. **The band density overwrite carries ~58% of the drift.** Band is ~29% of
+cells; acoustic equilibration crosses 576 km in ~28 min, so a band overwrite
+spreads uniformly within the hour -- which is why the signature looked volumetric.
+
+**NOT THE WHOLE STORY: +1.003 %/h survives with the blend on.** A second carrier
+of comparable size remains unidentified. The cell-local mass budget is still the
+next instrument, now with the band source separable as a known term.
+
+**Do not simply ship `blend_band_density=true`.** Item #12 holds it false
+deliberately: it perturbs momenta implicitly via `rho_old/rho_new`, and EVERY
+scored run including the baseline was made with it false. Turning it on trades a
+mass bug for a momentum bug unless #12's objection is addressed first, and it
+would invalidate the existing baseline comparison on top of 30c.

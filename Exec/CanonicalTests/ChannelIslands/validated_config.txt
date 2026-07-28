@@ -39,15 +39,47 @@
 # LOCAL SUBMODULE PATCHES -- state required for a shippable run:
 #   Submodules/RRTMGP  MUST be patched (apply_rrtmgp_patch.sh, applied by the
 #                      build script). Correctness fix, keep.
-#   Submodules/AMReX   MUST be CLEAN. TWO diagnostic patches exist, both
-#                      reverted, both re-appliable from their hash-gated scripts:
+#   Submodules/AMReX   MUST be CLEAN for any scored or production run. FIVE
+#                      diagnostic patches exist, all re-appliable from their
+#                      hash-gated scripts:
+#                        apply_amrex_clear_sync_patch.sh (29j-bis, device sync at
+#                          the top of FabArray::clear(). Ran as the step-1
+#                          verification of the 29j mechanism and FALSIFIED it --
+#                          the fault survived. Item 29 turned out to be an
+#                          out-of-bounds WRITE, not a lifetime bug at all (29m).
+#                          REVERTED. Do not ship: it stalls the device
+#                          on every MultiFab destruction. Keep the script; the
+#                          clear()-frees-before-sync defect it targets is real and
+#                          upstream-worthy, just not this bug.)
+#                        apply_amrex_fbi_tagcheck_patch.sh (29k, cached-tag
+#                          validator -- proved the FillBoundary tag buffer is
+#                          SCRIBBLED with ~288 K float data, not stale. Costs a
+#                          dtoh copy + tag rebuild per cache hit. REVERTED. Reading it: byte 68 of the 176-byte tag is
+#                          a padding hole, so first_diff_byte=68 is noise; the
+#                          real hit reports first_diff_byte=0.)
 #                        apply_amrex_fbcache_patch.sh  (29e, BDKey -- falsified)
 #                        apply_amrex_arena_patch.sh    (29i, arena hunk size --
 #                          adds amrex.the_arena_hunk_size; default 0 is stock
 #                          behaviour, and hunk=64 + init_size=0 MAKES THE ITEM-29
-#                          FAULT DISAPPEAR by eliminating block reuse. That is a
-#                          DIAGNOSTIC, NOT A CONFIGURATION -- do not ship it as a
-#                          workaround; it masks a live use-after-free.) apply_amrex_fbcache_patch.sh exposes
+#                          FAULT DISAPPEAR -- but NOT by eliminating a use-after-
+#                          free, which is what we concluded at the time and what
+#                          cost 29i-29l. It relocates every allocation, moving the
+#                          cached tag vectors out of the blast radius of the
+#                          out-of-bounds write that was the real cause (29m). A
+#                          DIAGNOSTIC, NOT A CONFIGURATION, and a cautionary one:
+#                          an instrument that PERTURBS layout constrains a
+#                          mechanism far less than one that OBSERVES it.)
+#                        apply_amrex_carena_trace_patch.sh (29j, alloc/free trace
+#                          -- logs ARENATRACE {ALLOC|FREE} <ptr> <size> <callers>
+#                          to stderr for the size window AMREX_ARENA_TRACE_LO..HI.
+#                          Inert unless those env vars are set, but it serialises
+#                          allocation behind an fprintf and emits enormous stderr,
+#                          so it MUST NOT SHIP. REVERTED (item 29 is closed, 29m).
+#                          Reading it: alloc logs the REQUESTED size, free logs
+#                          the ALIGNED block size, so ALLOC/FREE counts do not
+#                          balance and unmatched frees are an artifact, not a
+#                          double free.)
+#                      apply_amrex_fbcache_patch.sh exposes
 #                      private flushFBCache/flushCPCache for the UPSTREAM_ISSUES
 #                      29e BDKey diagnostic. That diagnostic is DONE (it
 #                      falsified the hypothesis) and the patch is unwired from

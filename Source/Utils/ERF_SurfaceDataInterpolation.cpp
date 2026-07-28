@@ -336,7 +336,24 @@ ERF::SurfaceDataInterpolation(const int lev,
             }
 
             // comp 0 = land-sea mask (1 = land), comp 1 = SST
-            MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, surf_mf.nGrowVect());
+            // UPSTREAM_ISSUES 29m. Copy only as many ghost cells as the
+            // DESTINATION actually owns. A fresh start allocates sst_lev here
+            // with surf_mf's full ghost vector (4,4,4), but the restart path
+            // allocates it with ng[2]=0 (ERF_Checkpoint.cpp: "ng =
+            // vars_new[lev][Vars::cons].nGrowVect(); ng[2]=0;") and this branch
+            // is skipped because sst_lev[lev] is then non-empty. Copying with
+            // (4,4,4) into a (4,4,0) destination addresses k=-4..4 on a fab that
+            // owns one k-plane, so k<0 indexes 4*kstride = 82944 bytes BELOW the
+            // fab and k>0 the same above -- straight through whatever the arena
+            // put there. AMReX guards this with
+            //   BL_ASSERT(dst.nGrowVect().allGE(nghost) && ...)   [MultiFab.cpp]
+            // which is compiled out in Release, so it corrupts silently. It
+            // killed five 24-h runs by overwriting the CACHED FillBoundary tag
+            // vector of vars_new[0][cons] with SST values (~288 K), after which
+            // FB_local_copy_gpu dereferenced a float as a fab pointer.
+            IntVect ng_sst_copy = surf_mf.nGrowVect();
+            ng_sst_copy.min(sst_lev[lev][0]->nGrowVect());
+            MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, ng_sst_copy);
 
             // comp 2 = surface albedo (ERA5 fal). Register only when the
             // frames carry it (comp 2 >= 0); radiation falls back to its
@@ -461,15 +478,17 @@ ERF::SurfaceDataInterpolation(const int lev,
             // worse, allocating `nxt` inside the 12-sweep loop -- meant 12 GPU
             // MultiFab allocations every timestep, which segfaulted a 24-h run at
             // ~27.5k steps (SIGSEGV, no NaN, no assert).
-            static std::unique_ptr<MultiFab> s_sf, s_nxt;
-            if (!s_sf || !s_sf->boxArray().CellEqual(surface_state_interp[lev].boxArray())) {
-                s_sf  = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
-                                                   surface_state_interp[lev].DistributionMap(), 2, 1);
-                s_nxt = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
-                                                   surface_state_interp[lev].DistributionMap(), 2, 1);
+            // ERF MEMBERS, not function-local statics -- see ERF.H. Statics
+            // outlive amrex::Finalize() and abort at exit with CUDA 709.
+            if (!m_sst_fill_sf ||
+                !m_sst_fill_sf->boxArray().CellEqual(surface_state_interp[lev].boxArray())) {
+                m_sst_fill_sf  = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
+                                                            surface_state_interp[lev].DistributionMap(), 2, 1);
+                m_sst_fill_nxt = std::make_unique<MultiFab>(surface_state_interp[lev].boxArray(),
+                                                            surface_state_interp[lev].DistributionMap(), 2, 1);
             }
-            MultiFab& sf  = *s_sf;
-            MultiFab& nxt = *s_nxt;
+            MultiFab& sf  = *m_sst_fill_sf;
+            MultiFab& nxt = *m_sst_fill_nxt;
             sf.setVal(0.0);
             for (MFIter mfi(sf); mfi.isValid(); ++mfi) {
                 const Box& bx = mfi.growntilebox();

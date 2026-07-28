@@ -959,6 +959,15 @@ private:
     // radiation. Null when the frames predate the forecast-albedo field.
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::MultiFab>>>  alb_lev;
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::iMultiFab>>> lmask_lev;
+    // Scratch for the coastal SST nearest-valid fill (SurfaceDataInterpolation).
+    // Allocated once and reused: allocating per call meant 12 GPU MultiFab
+    // allocations every timestep and segfaulted a 24-h run at ~27.5k steps.
+    // MEMBERS, not function-local statics: statics are destroyed by libc AFTER
+    // amrex::Finalize(), so ~FabArray -> clear() -> streamSynchronize() aborted
+    // with CUDA 709 and every run exited nonzero, making a completed segment
+    // indistinguishable from a crashed one. main.cpp destroys the ERF object
+    // before amrex::Finalize(), so members tear down while AMReX is still up.
+    std::unique_ptr<amrex::MultiFab> m_sst_fill_sf, m_sst_fill_nxt;
 
     // Land grid types and urban fraction
     amrex::Vector<amrex::Vector<std::unique_ptr<amrex::iMultiFab>>> land_type_lev;

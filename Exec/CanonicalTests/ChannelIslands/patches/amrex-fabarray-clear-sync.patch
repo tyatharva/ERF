@@ -1,0 +1,25 @@
+diff --git a/Src/Base/AMReX_FabArray.H b/Src/Base/AMReX_FabArray.H
+index 196a1616..2b09c787 100644
+--- a/Src/Base/AMReX_FabArray.H
++++ b/Src/Base/AMReX_FabArray.H
+@@ -1947,6 +1947,20 @@ FabArray<FAB>::clear ()
+         clearThisBD();  //!< addThisBD is called in define
+     }
+ 
++#ifdef AMREX_USE_GPU
++    // ERF DIAGNOSTIC (UPSTREAM_ISSUES 29j) -- VERIFICATION ONLY, DO NOT SHIP.
++    // The fab loop below returns fab storage to the arena with no stream
++    // ordering, and the only sync in this function is m_fb_local_copy_handler
++    // .clear() ~25 lines further down. FillBoundary's local-copy path is
++    // fire-and-forget (FB_local_copy_gpu is not inside an MFIter, so it gets
++    // none of ~MFIter's all-stream sync), so a short-lived MultiFab whose last
++    // operation is a FillBoundary frees memory a live kernel is still writing.
++    // Hoisting a device-wide sync here must make the item-29 fault disappear.
++    // It also stalls the device on EVERY MultiFab destruction, which is why the
++    // shipping fix is ERF-side buffer persistence instead.
++    Gpu::Device::synchronize();
++#endif
++
+     Long nbytes = 0L;
+     for (auto *x : m_fabs_v) {
+         if (x) {

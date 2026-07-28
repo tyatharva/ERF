@@ -1,0 +1,83 @@
+diff --git a/Src/Base/AMReX_FBI.H b/Src/Base/AMReX_FBI.H
+index eb7e191c..52b3f51c 100644
+--- a/Src/Base/AMReX_FBI.H
++++ b/Src/Base/AMReX_FBI.H
+@@ -1,6 +1,9 @@
+ #ifndef AMREX_FBI_H_
+ #define AMREX_FBI_H_
+ 
++#include <cstdlib>   // ERF diagnostic 29k
++#include <cstring>   // ERF diagnostic 29k
++
+ namespace amrex {
+ 
+ template <class FAB>
+@@ -496,9 +499,20 @@ auto FabArray<FAB>::FB_get_local_copy_tag_vector (const FB& TheFB)
+ 
+     using TagType = Array4CopyTag<value_type>;
+ 
++    // ERF DIAGNOSTIC (UPSTREAM_ISSUES 29k). This cache stores raw fab pointers for
++    // the lifetime of the FabArray. On a cache HIT, rebuild the tags from the
++    // CURRENT fabs and compare against what the device buffer actually holds. The
++    // two failure modes item 29 has to distinguish are:
++    //   device == cached but != fresh  -> cached tags are STALE (fabs moved)
++    //   device != cached               -> the device buffer was SCRIBBLED by
++    //                                     someone who was handed its arena block
++    // Enabled by AMREX_ERF_TAGCHECK; prints only on mismatch, so output is sparse.
++    static const bool erf_tagcheck = (std::getenv("AMREX_ERF_TAGCHECK") != nullptr);
++
+     TagVector<TagType>* tv;
+-    if (auto it = m_fb_local_copy_handler.find(TheFB.m_id);
+-        it != m_fb_local_copy_handler.end())
++    auto it = m_fb_local_copy_handler.find(TheFB.m_id);
++    const bool erf_hit = (it != m_fb_local_copy_handler.end());
++    if (erf_hit && !erf_tagcheck)
+     {
+         tv = it->second.get();
+     } else {
+@@ -521,9 +535,42 @@ auto FabArray<FAB>::FB_get_local_copy_tag_vector (const FB& TheFB)
+                          .offset = (tag.sbox.smallEnd()-tag.dbox.smallEnd()).dim3()});
+         }
+ 
+-        auto utv = std::make_unique<TagVector<TagType>>(loc_copy_tags);
+-        tv = utv.get();
+-        m_fb_local_copy_handler[TheFB.m_id] = std::move(utv);
++        if (erf_hit) {
++            tv = it->second.get();
++            const std::size_t nb = std::size_t(tv->ntags)*sizeof(TagType);
++            Vector<char> dev(nb);
++            Gpu::dtoh_memcpy(dev.data(), tv->d_tags, nb);
++            if (int(loc_copy_tags.size()) != tv->ntags ||
++                std::memcmp(dev.data(), loc_copy_tags.data(), nb) != 0)
++            {
++                auto const* dv = reinterpret_cast<TagType const*>(dev.data());
++                for (int i = 0; i < tv->ntags && i < int(loc_copy_tags.size()); ++i) {
++                    if (std::memcmp(dv+i, loc_copy_tags.data()+i, sizeof(TagType)) != 0) {
++                        auto const* db = reinterpret_cast<unsigned char const*>(dv+i);
++                        auto const* fb = reinterpret_cast<unsigned char const*>(loc_copy_tags.data()+i);
++                        std::size_t off = 0;
++                        while (off < sizeof(TagType) && db[off] == fb[off]) { ++off; }
++                        char line[512];
++                        std::snprintf(line, sizeof(line),
++                            "ERFTAGCHECK fb_id=%llu ntags=%d tag=%d sizeof_tag=%zu first_diff_byte=%zu\n"
++                            "  d_tags=%p fabarray=%p nbytes=%zu\n"
++                            "  device dfab.p=%p sfab.p=%p dindex=%d\n"
++                            "  fresh  dfab.p=%p sfab.p=%p dindex=%d",
++                            (unsigned long long)TheFB.m_id, tv->ntags, i, sizeof(TagType), off,
++                            (void*)tv->d_tags, (void*)this, nb,
++                            (void*)dv[i].dfab.p, (void*)dv[i].sfab.p, dv[i].dindex,
++                            (void*)loc_copy_tags[i].dfab.p, (void*)loc_copy_tags[i].sfab.p,
++                            loc_copy_tags[i].dindex);
++                        amrex::AllPrint() << line << std::endl;
++                        break;
++                    }
++                }
++            }
++        } else {
++            auto utv = std::make_unique<TagVector<TagType>>(loc_copy_tags);
++            tv = utv.get();
++            m_fb_local_copy_handler[TheFB.m_id] = std::move(utv);
++        }
+     }
+ 
+     return tv;
