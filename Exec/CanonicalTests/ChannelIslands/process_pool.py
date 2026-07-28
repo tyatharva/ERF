@@ -70,6 +70,22 @@ def main():
         sys.exit("no 'area:' line in " + input_file)
     lcc = lcc_from_area(area)
 
+    # PROJECTION PIN (mirrors WriteICFromERA5Data.py's PINNED_LCC guard).
+    # The DOWNLOAD area in era5_input.txt is allowed to be wider than the
+    # projection area, and it was widened on 2026-07-28 -- which silently
+    # shifted lon_0 by 0.875 deg here and produced frames 55 km off the
+    # baseline (ERF aborts with "The xlo value of the domain has to be
+    # greater than ..."). The mapping must come from the PINNED projection
+    # area, never the download area. Pass an input file whose area: line is
+    # the projection area (era5_input_pinnedproj.txt), or fix the mismatch.
+    PINNED_LCC = ("+proj=lcc +lat_1=32.041667 +lat_2=35.208333 "
+                  "+lat_0=33.625000 +lon_0=-119.250000 +datum=WGS84 +units=m +no_defs")
+    if lcc != PINNED_LCC:
+        sys.exit("FATAL: projection drift.\n"
+                 f"  emitted: {lcc}\n"
+                 f"  pinned : {PINNED_LCC}\n"
+                 "Refusing to write frames on a projection the baseline was not run on.")
+
     streams = [("era5_3d_*.grib", "ERA5Data_3D", ReadERA5_3DData),
                ("era5_surf_*.grib", "ERA5Data_Surface", ReadERA5_SurfaceData)]
 
