@@ -4103,3 +4103,27 @@ rare race (consistent with item 13 non-reproducibility and with take 2's FPE at
 an unrelated time under NSCBC). Gate relaunched as-is: a second death at exactly
 18.0003 h would argue cold-init x rotation-7 interaction over a race; a pass is
 a legitimate continuous 24 h. Take-3 evidence moved to run_a3/gate3_evidence/.
+
+30p final: gate take 4 (identical config, independent fresh run) died at
+TIME = 64801.07 s, step 46617 -- within 0.02 model-seconds of take 3's death
+(64801.05, step 46632), with MASS values matching take 3 digit-for-digit at
+every 4 h checkpoint. Same resolved FPE site (fill_from_realbdy <-
+FillIntermediatePatch <- substep apply_bcs). The surviving 12 h restart
+executed the IDENTICAL "Reading weather/surface data 6 7 9" rotation
+(ERF_WeatherDataInterpolation.cpp:1492 / ERF_SurfaceDataInterpolation.cpp:293)
+at t=64800.18 and ran on cleanly.
+
+**VERDICT: deterministic cold-init x rotation-7 interaction. Not a race, not
+mass, not data.** Two fresh runs die at the same model event; two restarts
+(12 h and death-step) cross it cleanly. The discriminating variable is the
+INIT PATH: some object touched by the [6,7] rotation is initialized/sized
+differently at cold init than on restart -- the mirror image of 29m (which was
+restart-path-only). Hunt lead for whoever picks this up: enumerate frame-
+indexed allocations in ERF_WeatherDataInterpolation.cpp /
+ERF_SurfaceDataInterpolation.cpp whose init-path sizing differs from the
+restart path, and what the 7th entry first touches. HELD pending sign-off (new
+mechanism rule).
+
+Production impact tonight: 0-18 h runs continuously with bounded mass; a
+restart bracketing the 18 h rotation completes the remainder. The mass fix
+(hindcast_global_mass_tau=60) is independent of this bug and stands.
