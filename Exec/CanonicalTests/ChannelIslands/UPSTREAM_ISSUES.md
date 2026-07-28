@@ -4133,3 +4133,59 @@ exit 0, zero FPE, crossing the 21 h rotation cleanly on the restart path as
 predicted. Full Jan-9 day mass excursion, 24 storm hours: -0.032% (unfixed:
 ~+9%/day). Day artifacts in run_a3: hourly plots 0-24 h, chk at 6/12/18 h +
 final. The restart-bracketed day is production-viable pending the 30p hunt.
+
+### 25 SCORED 2026-07-28: first mass-bounded, verified-IC day. The interior is precipitation-STARVED; the band eats the storm at the walls
+
+**Every prior FSS/precip number in this file (item 25 tables, 24a, the NSCBC
+wet-test comparison) was measured on runs inflating ~9-20%/day and is hereby
+UNSCORED -- historical context only.**
+
+Scored: run_a3 Jan-9 2023 day (0-18 h continuous + 18-24 h restart leg,
+rain_accum continuous through the checkpoint), Davies + global_mass_tau=60,
+mass -0.032%/24 h. MRMS Pass2 24-h QPE regridded nearest onto the ERF grid
+(18432/18432 valid cells); ERA5 tp summed from 24 hourly fields, bilinear,
+scored IDENTICALLY. Controls: self-FSS == 1 asserted; ERA5 domain mean
+13.45 mm vs the documented 13.46 grib-footprint value. FSS windows are odd
+cell counts: nominal 3/9/15/30/60 km = actual 3/9/15/33/63 km.
+
+**FSS vs MRMS (d>=20 interior, the science cells):**
+
+| thr | scale | ERF | ERA5 (driver) | useful |
+|---|---|---|---|---|
+| 1 mm | 3 km  | +0.608 | +0.737 | 0.814 |
+| 1 mm | 63 km | +0.685 | +0.796 | 0.814 |
+| 5 mm | 3 km  | +0.403 | +0.777 | 0.737 |
+| 5 mm | 33 km | +0.469 | +0.837 | 0.737 |
+| 5 mm | 63 km | +0.527 | +0.874 | 0.737 |
+
+ERA5 exceeds the useful threshold at 5 mm from 9 km up; ERF reaches it at NO
+threshold and NO scale. Full-domain (d>=0) numbers flatter the model (1 mm ERF
++0.738 vs ERA5 +0.729) only because the band's spurious rain inflates 1-mm
+coverage -- band-contaminated, do not score.
+
+**The spatial story is one artifact + its shadow:**
+- d=0 mean 210.4 mm/day (MRMS 22.6), max 2404.7 mm at d=0 on the 1471 m east
+  wall (MRMS there: 1.8 mm). Decays inward through d=15.
+- Interior d>=20: ERF 3.24 mm vs MRMS 7.24 (bias 0.45x DRY); p90 9.7 vs 19.7.
+- South interior third: ERF 0.14 mm vs MRMS 6.35 -- precipitation-dead. N/S
+  ratio ERF 66.6 vs MRMS 1.72 (ERA5 4.70).
+- Channel Islands: ERF 0.9-5.1 mm where MRMS has 10-28 mm (3-8x dry).
+- Interior power spectrum, 8-19 km: ERF/MRMS = 0.024 (ERA5/MRMS = 0.604). The
+  interior field is near-featureless at storm scales.
+- Categorical, interior 5 mm: ERF POD/FAR/CSI 0.274/0.239/0.253 vs ERA5
+  0.821/0.261/0.636.
+
+**Reading:** the Davies band wrings the inflowing moisture out at the walls
+(210 mm/day at d=0 vs 22.6 observed) and the interior downstream starves --
+dry, southern half dead, no fine-scale variance. This is the record's earlier
+hypothesis ("the band's spurious ascent wrings moisture out at the inflow
+edge") now QUANTIFIED on the production deck with bounded mass and a verified
+IC. Mass control did not fix the hydrologic artifact: the drift and the band
+rain were two symptoms of the same wall treatment, and the controller bounds
+the first only. The skill blocker is the band, not the physics options --
+consistent with every physics toggle scoring null.
+
+Artifacts: /home/atyagi/ERF/scoring_jan9/*.npy (fields, spectra, N-S
+profiles), scripts in the session scratchpad (score_foundation.py,
+score_metrics.py, score_islands.py -- foundation gates: self-FSS, ERA5-mean
+control, last-finite-rain_accum plotfile rule).
