@@ -4200,3 +4200,31 @@ the DOWNLOAD area; the widened area shifted lon_0 0.875 deg and put frames
 Jan-9 control bit-identical.) The cold-init reading holds at scale: ONE
 bracketing restart per segment is a legitimate production pattern pending the
 root-cause fix.
+
+### Performance pins re-tested (2026-07-28, post-#25 scoring, user-directed)
+
+- **rad_freq_in_time: CONFIRMED still broken.** Measured from the 48-h leg-2
+  log: 423 "Radiation advancing" calls over 108031 model-s = **255.4 s
+  effective** against the 180 s request -- item 26's float32-epoch
+  quantisation is still live at ERF_Radiation.cpp:209-211 (m_time is absolute
+  epoch). Fix is the item-28 pattern (model-relative clock, run-constant
+  offset formed once in double). NOT yet applied.
+- **max_gpu_streams: the pin CANNOT be lifted, and the reason rewrites the
+  story.** amrex.max_gpu_streams=4 on the current binary SEGFAULTS AT STEP 0,
+  resolved stack identical to the 30p site: fill_from_realbdy <-
+  FillIntermediatePatch <- substep apply_bcs. The pin was never a 1.21x
+  luxury; it suppresses a live unsynchronised access in the boundary-fill
+  path. UNIFYING HYPOTHESIS for 30p: at 1 stream the only remaining
+  host/device overlap window is the frame ROTATION (host rebuilds the pinned
+  bdy/forecast buffers while asynchronously-launched substep kernels still
+  read them) -- which would explain the deterministic 18.0003 h cold-init
+  death, the restart survival (different launch timing), the deck's "one
+  event in ~390 cold-start steps at 4 streams", and item 13's
+  non-reproducibility. 4-stream step-0 death = a 2-second reproducer;
+  compute-sanitizer run launched.
+- **cfl probes (4000 steps each, cold start through t~2.5-2.8 model-h):**
+  cfl=0.3 clean (dt -> 2.43 s, +61% model-time/step vs 0.2); cfl=0.5 clean
+  (dt rides the max_dt=2.5 cap, +77%). Wall/step within 5% of baseline. The
+  old cfl pin premises are gone with the fixed IC, but the storm-peak window
+  (12-21 h) is untested: full bracketed-day validation required before
+  production adoption.
