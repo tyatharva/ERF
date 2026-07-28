@@ -3628,3 +3628,392 @@ deliberately: it perturbs momenta implicitly via `rho_old/rho_new`, and EVERY
 scored run including the baseline was made with it false. Turning it on trades a
 mass bug for a momentum bug unless #12's objection is addressed first, and it
 would invalidate the existing baseline comparison on top of 30c.
+
+### 30e. LOCALISED: mass is created inside `advance_dycore`. Fill and microphysics are exactly zero
+
+Mass ledger (`erf_mass_ledger`, gated by `ERF_MASS_LEDGER`) sums rho*dV at tagged
+points in a step; deltas attribute mass change to a code region. Run on the FLAT
+UNSTRETCHED grid (`grid_stretching_ratio=1.0`, `terrain_type=None`) where the
+metric is already excluded and dV is uniform, 60 steps, `sum_interval=1`.
+
+| transition | region | delta mass |
+|------------|--------|-----------|
+| `Z->D` | FillPatchCrseLevel / boundary + relaxation FILL | **0.000e0** |
+| `D->A` | old/new swap | -2.68e8 (buffer relabel) |
+| `A->B` | **`advance_dycore`** | **+2.68e8**, then **+9.40e8** |
+| `B->C` | `advance_microphysics` | **0.000e0** |
+
+**Instrument validated before use:** `B->C` is exactly zero, independently
+matching the Morrison toggle null; `D->A` is exactly minus the prior `A->B`,
+which is `std::swap(vars_old,vars_new)` relabelling buffers; per-step relative
+gain 1.68e-7 -> 5.9e-7 as dt ramps from 0.2 s, extrapolating to ~1e-6 at
+dt~1.6 s as predicted.
+
+**The direct-write channel at FillPatch level is CLEAN** -- zero to twelve digits.
+That does not contradict 30d: `realbdy_compute_interior_ghost_rhs` runs as part of
+the SLOW RHS *inside* `advance_dycore`, so the band relaxation source and the
+advection/acoustic update are both inside the single `A->B` interval. The band's
+58% and the remaining 42% are both in there.
+
+**Next split (not yet done):** instrument inside `advance_dycore` -- slow RHS
+(with the relaxation source separable) vs the acoustic substep loop. The substeps
+advance only rho and rho*theta, so a residual there indicts the acoustic solve;
+one in the slow path indicts advection or the relaxation source.
+
+### 30f. RETRACTION of 30e, and the ledger's precision floor
+
+**30e is WITHDRAWN as a firm result.** Both ledgers accumulated in `amrex::Real`
+= float32. A float32 sum of ~1.6e15 has a **1.34e8 ULP**; the per-step mass change
+is ~2.7e8, i.e. **two ULP**. The MRI stage sums were worse: ~4.5e5 with a 0.0625
+ULP against a ~0.075 change, so every stage delta printed was 0.5-1 ULP of
+quantisation noise -- and the two ledgers disagreed in SIGN, which is what two
+independent noise floors look like.
+
+So 30e's "boundary/relaxation fill and microphysics are exactly zero" was
+RESOLUTION, not measurement: zero to twelve printed digits was zero to ~2 ULP, and
+any contribution below ~1e-8 relative was invisible. The localisation of the gain
+to `advance_dycore` rested on the same 2-ULP delta and must also be re-measured.
+
+**What survives:** every AGGREGATE comparison. The toggle matrix (wall-flux,
+sponges, w_damping, Morrison, theta blend, blend_band_density, stretching,
+terrain), the cfl dt-scaling test, and the +0.73%/800-step and +20%/18h drifts are
+differences of ~1e-2 relative -- seven orders above the noise floor. Those stand.
+
+Both ledgers now force `ReduceData<double>` regardless of build precision.
+
+**Caution recorded:** a `cmake` exit of 0 confirms nothing about whether an
+intended edit landed. A patch script threw `substring not found`, no edit was
+applied, and the rebuild still reported `exit=0 errors=0` because it compiled
+unchanged source. Verify the EDIT (grep the new symbol), not the build status.
+
+### 30g. Stage ledger still does not close -- buffer mismatch, attribution BLOCKED
+
+With double accumulation:
+
+| quantity | value | relative |
+|----------|-------|----------|
+| `A->B` (whole `advance_dycore`) | +3.523e8 | +2.2e-7 |
+| MRI stages `R0(nrk=0) -> R3(nrk=2)` | -0.01155 | -2.6e-8 |
+| MRI sum x dV at `R0` | 1.60805e15 | -- |
+| `MASSLEDGER` at `A` | 1.59634e15 | -- |
+
+**The absolute values differ by 0.73%, so the two ledgers are measuring different
+arrays.** `MASSLEDGER` sums `vars_new[lev][Vars::cons]`; the MRI ledger sums
+`S_new[0]`, the integrator's **IntVars** state (`state_new`, `ERF_Advance.cpp:466`)
+-- separate storage that `advance_dycore` fills from vars, integrates, and copies
+back. Their deltas are not comparable and the sub-tags do not sum to `A->B`.
+
+**Attribution is blocked until this closes.** The suggestive reading -- MRI
+integration LOSES mass while `advance_dycore` GAINS it, putting the source in the
+vars<->IntVars conversion or the pre/post code rather than in the RK stages or
+acoustic substeps -- is NOT claimed. With a 0.73% buffer mismatch it could be two
+unrelated quantities being differenced.
+
+**Next:** tag the SAME array on both sides. Either ledger `vars_new[lev][cons]`
+inside `advance_dycore` around the `integrator.advance()` call, or ledger the
+IntVars `state_new[IntVars::cons]` at the `A`/`B` points too. Then confirm the
+sub-tags sum to `A->B` before reading anything from the split.
+
+### 30h. VALIDATION CLOSED: mass is created inside `mri_integrator.advance()`
+
+Validation chain completed in order, double accumulation, flat unstretched grid.
+
+**1. Step stamps agree.** `erf_ledger_step` is stamped by `Evolve`; every tag
+reports the same step. The 0.73% gap is NOT a one-step offset.
+
+**2. Positive control PASSES EXACTLY.** Step 1 `D->A` = -352313405.0, which is
+bit-exactly -(step 0 `A->B` = +352313405.0). The swap is a relabel and the ledger
+reproduces it to full double precision -- so it tracks real state changes, not
+merely failing to invent them. (`B->C = 0` alone could not have shown this.)
+
+**3. Closure holds, and is sharper than expected:**
+
+| interval | step 0 | step 1 |
+|----------|--------|--------|
+| `Z->D` boundary/relaxation FILL | **0** | **0** |
+| `D->A` swap | 0 | -3.523e8 (relabel) |
+| `A->M0` pre-integrator | **0** | **0** |
+| **`M0->M1` `mri_integrator.advance()`** | **+3.523e8** | **+7.744e8** |
+| `M1->B` post-integrator | **0** | -- |
+| `B->C` microphysics | **0** | -- |
+
+`A->B` equals `M0->M1` exactly; every other interval is identically zero.
+
+**4. `Z->D` re-tested at full resolution: EXACTLY ZERO**, bit-identical at 17
+significant digits. 30e's retracted claim is now CONFIRMED properly rather than by
+artifact. The direct-write channel is clean; the fill adds no mass.
+
+**5. The unclaimed 30g finding is REVERSED.** The gain is entirely INSIDE
+`mri_integrator.advance()`, so it is in the RK stages / acoustic substeps, NOT in
+the vars<->IntVars conversion or the pre/post code. The earlier "MRI loses mass"
+reading came from the offset ledger and was correctly not asserted.
+
+### 30i. STILL BLOCKED: the substep-vs-slow-path split
+
+The MRI stage ledger sums `S_new[0]` (integrator IntVars state); the MASSLEDGER
+sums `vars_new[level][Vars::cons]`. They remain 0.73% apart in absolute value
+(MRI 451309.6998 x dV 3.56306e9 = 1.60803e15 vs MASSLEDGER 1.59634e15), and their
+deltas disagree in sign: MRI net over step 0 is **-0.01155** against `M0->M1` =
+**+0.09888** in the same units. **They are not the same array**, so the stage split
+(`R1->R2` acoustic substeps vs `R2->R3` slow path) cannot be interpreted.
+
+**Next:** print a double-precision sum of `state_new[IntVars::cons]` at the M0/M1
+points as well. That establishes the relationship between the two arrays directly
+-- if it matches MRI `R0`/`R3`, the stage deltas are real and simply describe a
+different (IntVars) representation, and the conversion between them is where the
+sign flips. Only then split substeps vs slow path, and difference blend-on against
+blend-off to separate the known 58% band term.
+
+### 30j. 0.73% offset EXPLAINED; sign lead is DEAD; and a question that threatens #30 itself
+
+**The two ledgers were always the same array.** `ERF_Advance.cpp:397`:
+`state_new.push_back(MultiFab(S_new, amrex::make_alias, 0, nvars))` -- `state_new
+[IntVars::cons]` is an ALIAS of `vars_new[lev][Vars::cons]`. No second array, no
+ghost mismatch, no different BoxArray. The gap is only that `erf_mass_ledger`
+weights by `detJ` and the MRI ledger does not.
+
+**Measured:** `meanJ = 0.99272` (= rho-weighted mean of detJ) = the whole 0.73%.
+
+**The sign-disagreement lead (30g/30i) is DEAD.** Sigma(rho) and Sigma(rho*detJ)
+are not two representations of one conserved quantity, so their disagreeing is
+expected. Nothing indicts the vars<->IntVars map. Correctly never asserted.
+
+**But the decomposition is alarming:**
+
+```
+M0: mass= 1596340559782521.8  rawsum= 451309.69977148622  meanJ= 0.99272150294
+M1: mass= 1596340912095926.8  rawsum= 451309.68822192401  meanJ= 0.99272174744
+```
+
+Self-consistent: dmass/mass = drawsum/rawsum + dmeanJ/meanJ
+= -2.56e-8 + 2.46e-7 = **+2.21e-7**.
+
+**Raw Sigma(rho) DECREASES (-2.6e-8/step, essentially conserved). The entire
+"+2.2e-7 mass gain" is meanJ rising** -- i.e. rho redistributing toward
+larger-detJ cells, NOT rho being created.
+
+**OPEN AND CRITICAL: which quantity is the mass?** If `Rho_comp` is physical
+density and cell volume is `detJ*dV`, mass = Sigma(rho*detJ*dV) and it grows. If
+`Rho_comp` is already a computational density (rho*detJ), mass = Sigma(rho)*dV --
+the rawsum -- and it is NEARLY CONSERVED. I assumed the former when writing the
+ledger and did NOT verify it. **If the latter is true, the ~20%/day "mass gain"
+of item 30 may be a diagnostic artifact of detJ weighting rather than a defect.**
+ERF's own `sum_integrated_quantities` MASS is the authority -- read what IT
+weights by before anything else in #30 is trusted.
+
+**ALSO: `detJ_null = 0` and `meanJ = 0.9927` with `terrain_type = None`.** detJ is
+neither absent nor unity on runs treated as FLAT. The "metric excluded"
+discriminator (30d) was measured on runs that were not unit-Jacobian and must be
+revisited.
+
+**Next, in order:** (1) read `sum_integrated_quantities` to establish ERF's mass
+definition; (2) if it is detJ-weighted, confirm the conserved variable's identity
+in the continuity update; (3) only then resume the substep/slow split.
+
+### 30k. #30 SURVIVES: ERF's MASS is detJ-weighted and IS the conserved quantity
+
+**(1) ERF's own definition.** `ERF::volWgtSumMF` (`Source/Utils/ERF_VolWgtSum.cpp:20`):
+
+```cpp
+if (SolverChoice::mesh_type == MeshType::ConstantDz) {
+    dst_arr(i,j,k,0) = src_arr(i,j,k,comp) / (mfx_arr*mfy_arr);
+} else {
+    dst_arr(i,j,k,0) = src_arr(i,j,k,comp) * dJ_arr(i,j,k) / (mfx_arr*mfy_arr);
+}
+```
+
+MASS **is** detJ-weighted, and also divided by m^2 -- the source comment states
+"The quantity that is conserved is not (rho S), but rather (rho S / m^2)".
+
+**(2) Rho_comp is PHYSICAL density.** From the continuity form
+`rho_t = -(m^2/detJ)*[Dx(ax*rho u/m_u)/dx + ...]`, multiply by `detJ/m^2` (both
+static): `d/dt[rho*detJ/m^2] = -div(flux)`. Summed over cells the divergence
+telescopes to boundary fluxes, so **Sigma(rho*detJ/m^2) is the conserved
+quantity** -- precisely what volWgtSumMF computes. detJ is the volume factor; it
+is NOT already absorbed into Rho_comp.
+
+**Therefore #30 DOES NOT DISSOLVE.** The rawsum being nearly conserved
+(-2.6e-8/step) is incidental -- it is not the conserved quantity. The conserved
+quantity grows at +2.2e-7/step, and pure flux form should hold it to round-off.
+The defect is real and remains localised to `mri_integrator.advance()` (30h).
+
+My ledger omitted the 1/m^2 factor. Map factors are static, so this cannot create
+drift, but the ledger should carry it for exact agreement with ERF's MASS.
+
+**(3) The detJ anomaly is explained, and 30d is INVALID.** The `ConstantDz` branch
+is selected by **`mesh_type`**, not by `terrain_type`. detJ is populated from the
+VERTICAL MESH independently of terrain, so `erf.terrain_type = None` never made
+the grid unit-Jacobian (measured: `detJ_null=0`, `meanJ=0.9927`). **30d's "metric
+excluded" toggled the wrong knob** and must be re-run against `mesh_type` /
+`MeshType::ConstantDz`, not `terrain_type`.
+
+**Next:** (a) re-run the metric discriminator on a genuine `MeshType::ConstantDz`
+configuration; (b) resume the substep-vs-slow-path split inside
+`mri_integrator.advance()` using a detJ- and m^2-weighted stage ledger, with
+blend-on/blend-off differencing for the known 58% band term.
+
+### 30l. The metric discriminator was never valid, and a genuine ConstantDz run is blocked
+
+**Why 30d was wrong.** `ERF_DataStruct.H:370-376`:
+
+```cpp
+if (grid_stretching_ratio >= 1) {
+    if (terrain_type == TerrainType::None) {
+        terrain_type = TerrainType::StaticFittedMesh;   // silently re-enables terrain
+    }
+    if (mesh_type == MeshType::ConstantDz) {
+        mesh_type = MeshType::StretchedDz;
+    }
+}
+```
+
+Setting `grid_stretching_ratio = 1.0` to mean "no stretching" satisfies `>= 1`, so
+it **re-enabled terrain and forced StretchedDz**, overriding the
+`terrain_type = None` set in the same deck. The unstretched value is **0**, not 1.
+Both the "nostretch" and "flat" runs in 30d were therefore neither, which is why
+`detJ_null=0` and `meanJ=0.9927`. **30d's "metric excluded" is withdrawn.**
+
+**A correct ConstantDz run is blocked.** With `grid_stretching_ratio = 0` and
+`terrain_type = None`, uniform `dz = 395.9 m` puts the first cell centre at
+197.95 m and MOST aborts:
+
+```
+Assertion `zref_tmp >= m_zlo + myhalf * m_dz' failed
+  ERF_MOSTAverage.cpp:430  Msg: Query point must be past first z-cell!
+```
+
+The stretched mesh exists to give 25 m near the surface, which is what MOST
+requires; removing stretching removes it. The two are incompatible at 48 levels
+over 19 km. Options for whoever resumes: raise `erf.most.zref` above ~198 m (
+changes surface physics -- acceptable for a conservation discriminator if noted),
+or raise nz enough to keep dz small (expensive), or disable the surface layer.
+
+**The metric is now the LEADING candidate, not an excluded one.** Sigma(rho*detJ)
+growing while Sigma(rho) is flat to 2.6e-8 is the signature of an inconsistent
+Jacobian between where flux is constructed and where divergence is taken -- the
+same class as the estTimeStep bug and the Omega-vs-rho*w scalar advection bug,
+both of which were exactly zero on uniform grids and nonzero on this one.
+
+**Targeted read available without any run:** compare the detJ and a-factors used
+in `AdvectionSrcForRho`'s FLUX construction against the detJ used in the
+DIVERGENCE and in the update. A factor applied in one place and not the other, or
+applied at cell centres where the flux needs faces, produces exactly this
+signature.
+
+### 30m. METRIC EXCLUDED (for real this time): drift survives a genuine unit-Jacobian grid, the interior algebra telescopes in M, and no volumetric rho source is active
+
+Three parallel probes (2026-07-28), all on the production deck in `run_a3`
+(192x96x48, cfl 0.2). Production dispatch is `StaticFittedMesh` ->
+**`VariableDz`** (`ERF_DataStruct.H:352-355` forces it; the deck's explicit
+`terrain_type = StaticFittedMesh` means the StretchedDz variants never run) ->
+`erf_substep_T`.
+
+**A. Jacobian consistency audit (6-lens code trace, adversarial verify pass
+lost to session limits -- key claims re-verified by hand below).** For the
+VariableDz path, BOTH rho updates telescope EXACTLY in ERF's own
+M = Sigma rho*detJ/(mfx*mfy):
+
+- slow: `advectionSrc = -mfsq/detJ * div(ax*rho_u/mf_uy, ay*rho_v/mf_vx,
+  az*Omega/mfsq)` (`ERF_AdvectionSrcForState.cpp:85-88`), applied unweighted;
+  weighting a cell by `detJ/mfsq` cancels the prefactor and leaves shared face
+  fluxes.
+- fast: `Substep_T` horizontal perturbation fluxes carry the identical
+  h_zeta/mf weighting (`ERF_Substep_T.cpp:467-476`), the update divides by detJ
+  (`:708`); same cancellation. Vertical telescopes within columns (Omega
+  hard-zeroed at k=klo, zero at the SlipWall lid).
+
+So the interior advection CANNOT change M: every unit of M change is either a
+domain-wall face flux or a volumetric source. Raw Sigma(rho) is NOT an
+invariant of the scheme at all -- its flatness on the production grid (30k) was
+flow coincidence, not algebra.
+
+**Volumetric rho sources: none active.** `cc_src` zeroes Rho
+(`ERF_MakeSources.cpp:69`), nothing writes it back; band rho relaxation is
+gated by `erf.hindcast_mass_consistent_bdy` (default FALSE, not in the deck,
+and rejected in item 25's attempt (a) on w_rms + characteristic grounds);
+`fill_from_realbdy` leaves rho zero-gradient (ghost only, not valid cells).
+
+**C. Unit-Jacobian control RAN (50 steps, clean).** The MOST block in 30l was
+cleared with `erf.most.zref=250` (first cell centre 197.95 m < 250 m < lid).
+`meanW = 1` to 17 digits: detJ AND map-factor weights are exactly unity, so M
+and raw Sigma(rho) are the same quantity. **The drift SURVIVES: ~+9.9e-5 over
+50 steps, ~2.9e-6/step late (dt ramping toward 2.5 s). The metric is OUT.**
+(30l's "leading candidate" framing is withdrawn in turn. The signature
+argument was wrong because raw-Sigma flatness was never protected.)
+
+**B. detJ/m^2-weighted stage ledger (shared reduction with MASSLEDGER,
+`erf_weighted_mass_sum`).** Closure is bit-exact: R3@nrk2 == M1 == B == C ==
+Z(next) == D(next) == R0(next), every step. The step>=1 M0/A anomalies are the
+known buffer-cycle artifact (vars_new holds stale data between the swap and the
+MRI's internal init) -- budget on R0->R3 and the Z/D/B/C chain only. 100% of
+the M gain sits in the R1->R2 windows of the three RK stages. Crucially the
+substep loop applies `dtau*(slow_rhs - fast_div)` per substep
+(`ERF_Substep_T.cpp:710`), so the R1->R2 window contains the SLOW RHS
+application too -- substep-locality never distinguished acoustic fluxes from
+slow sources. Blend on/off (`hindcast_blend_band_density`): per-stage deltas
+differ <0.3% at 6 steps -- not the carrier of the substep-window gain.
+
+**Consequence.** M gain == net discretized domain-wall flux, integrated over
+the substeps. The 30-era "boundary flux excluded (0.26%)" null came from
+`erf_bdy_mass_flux_diag` -- a ONCE-PER-STEP SNAPSHOT of post-step face fluxes,
+not the substep-integrated fluxes the update actually applied. That null is
+withdrawn as instrument-weak. The 58%-band/42%-interior split from the per-cell
+budget instrument is likewise suspect (its flux reconstruction is not the
+model's own).
+
+**Next split (30i tap, zero derivation risk):** the slow rho RHS is constant
+within a stage, so its M contribution is exactly `stagedt * W(F_slow[cons])`,
+logged at R1. fast-wall = measured (R1->R2) - slow part. This names which path
+carries the wall imbalance: the WENOZ5 slow fluxes or the acoustic substep
+fluxes.
+
+### 30n. MECHANISM NAMED: net wall inflow in the SLOW rho advection -- a 3.6% in/out asymmetry of the x-throughflow
+
+Two taps, both validated against a known-nonzero control before reading.
+
+**30i (slow-vs-fast split).** The slow rho RHS is constant across a stage's
+substeps, so its M contribution is exactly `stagedt * W(F_slow[cons])`. Logged
+at R1 with the shared weighted reduction. Per stage, per step (production deck,
+6 steps): `stagedt*W_rhs` reproduces the measured stage M gain (referenced to
+S_old -- each RK stage restarts from S_old) to 91-99%; the acoustic remainder
+is +1-9% and shrinking. **The slow WENOZ5 rho advection carries the drift; the
+acoustic substeps are a minor positive correction.**
+
+**30j (per-wall decomposition).** The slow wall fluxes summed per wall
+(`ax*xmom/mf_uy` at the x-faces, `ay*ymom/mf_vx` at the y-faces, in double):
+`net = xlo - xhi + ylo - yhi` equals `W_rhs` to ~1e-7 RELATIVE at every stage
+of every step. The four lateral walls are the ENTIRE slow rho RHS integral --
+no lid leak, no interior residual. Numbers (step 0, M-units/s):
+
+| wall | flux | meaning |
+|---|---|---|
+| xlo | +6.05e10 | west wall, inflow (AR westerlies) |
+| xhi | +5.83e10 | east wall, outflow |
+| ylo | -3.4e8  | south wall, net outflow |
+| yhi | +0.8e8  | north wall, net outflow |
+| net | +1.7e9  | = W_rhs exactly |
+
+The drift is a **3.6% imbalance between gross x-inflow and gross x-outflow**
+(net = 1/37th of gross). Real synoptic mass convergence is an order of
+magnitude smaller than this. The rate grew 1.7e9 -> 3.0e9/s over the first six
+steps (cold-start adjustment transient); settled rate measured separately.
+
+**Attribution boundary (open, non-blocking).** Which side of the interface owns
+the 3.6% -- the interpolated driver data as discretized on these faces
+(erftools ~300 m offset, terrain-following areas, map factors) or the model
+state's deviation from the driver at the walls -- is NOT settled. It does not
+block the fix: both validated remedies (below) drive M toward the ERA5 target
+through the wall flux regardless of which side the imbalance enters from.
+
+**Fix candidates, both already implemented and validated in this fork, neither
+in the production deck:**
+- `erf.hindcast_wall_flux_correction=true` (+`_tau=3600`): per-wall-column
+  barotropic dvel, flux-form, dynamically invisible, stable at tau=3600.
+  Historically halved drift (item 25 attempt b; float32-era numbers).
+- NSCBC combo `nscbc_lateral=1 nscbc_outflow=0 nscbc_parts=31 nscbc_mass_tau=60`:
+  validated on a 24-h Jan-9 wet run -- settled drift -0.098%/day, band-w
+  artifact 15.5% -> 0.5%, spurious wall precipitation eliminated, clean exit.
+  Caveat: interior d>=20 precip 7.18x vs Davies 4.29x on that comparison.
+
+Settled-drift A/B on the current production deck (2000 steps each: base / wfc /
+nscbc, double ledger) decides which ships for the gate.

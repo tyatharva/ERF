@@ -610,94 +610,6 @@ ERF::ERF_shared ()
 ERF::~ERF () = default;
 
 // advance solution to final time
-
-// ERF DIAGNOSTIC (UPSTREAM_ISSUES 30) -- boundary flux budget, gated by
-// ERF_MASSFLUX_DIAG. Logs BOTH the volume flux (the model's own
-// compute_influx_outflux definition, which carries NO density and is the
-// anelastic projection constraint) and the rho-weighted MASS flux, which is the
-// quantity that must balance dM/dt in a compressible run. Integrating net mass
-// flux over the run and comparing against the measured mass gain is what decides
-// whether the unenforced boundary imbalance actually carries item 30.
-static void
-erf_bdy_mass_flux_diag (amrex::Real time,
-                        const amrex::MultiFab& cons,
-                        const amrex::MultiFab& xvel,
-                        const amrex::MultiFab& yvel,
-                        const amrex::MultiFab* a_x,
-                        const amrex::MultiFab* a_y,
-                        const amrex::Geometry& geom)
-{
-    using namespace amrex;
-    static const bool on = (std::getenv("ERF_MASSFLUX_DIAG") != nullptr);
-    if (!on) { return; }
-
-    const Box domain = geom.Domain();
-    const auto domlo = lbound(domain);
-    const auto domhi = ubound(domain);
-    const Real* a_dx = geom.CellSize();
-    const Real ds_x = a_dx[1];   // same convention as compute_influx_outflux
-    const Real ds_y = a_dx[0];
-
-    Real vin=0, vout=0, min_=0, mout=0;
-
-    for (MFIter mfi(xvel); mfi.isValid(); ++mfi) {
-        const Box& bx = mfi.validbox();
-        if (bx.smallEnd(0) != domlo.x && bx.bigEnd(0) != domhi.x+1) { continue; }
-        auto const& u  = xvel.const_array(mfi);
-        auto const& r  = cons.const_array(mfi);
-        auto const& ar = a_x ? a_x->const_array(mfi) : Array4<const Real>{};
-        const bool have_a = (a_x != nullptr);
-        ReduceOps<ReduceOpSum,ReduceOpSum,ReduceOpSum,ReduceOpSum> rop;
-        ReduceData<Real,Real,Real,Real> rdat(rop);
-        using RT = typename decltype(rdat)::Type;
-        rop.eval(bx, rdat, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT {
-            if (i != domlo.x && i != domhi.x+1) { return {0.,0.,0.,0.}; }
-            const Real uu = u(i,j,k);
-            const Real A  = have_a ? ar(i,j,k) : Real(1.0);
-            const int  ic = (i == domlo.x) ? i : i-1;      // adjacent interior cell
-            const Real rho = r(ic,j,k,Rho_comp);
-            const bool inflow = (i == domlo.x) ? (uu > 0) : (uu < 0);
-            const Real vf = std::abs(uu)*A;
-            return { inflow? vf:0., inflow? 0.:vf,
-                     inflow? vf*rho:0., inflow? 0.:vf*rho };
-        });
-        auto h = rdat.value();
-        vin  += ds_x*amrex::get<0>(h); vout += ds_x*amrex::get<1>(h);
-        min_ += ds_x*amrex::get<2>(h); mout += ds_x*amrex::get<3>(h);
-    }
-    for (MFIter mfi(yvel); mfi.isValid(); ++mfi) {
-        const Box& bx = mfi.validbox();
-        if (bx.smallEnd(1) != domlo.y && bx.bigEnd(1) != domhi.y+1) { continue; }
-        auto const& v  = yvel.const_array(mfi);
-        auto const& r  = cons.const_array(mfi);
-        auto const& ar = a_y ? a_y->const_array(mfi) : Array4<const Real>{};
-        const bool have_a = (a_y != nullptr);
-        ReduceOps<ReduceOpSum,ReduceOpSum,ReduceOpSum,ReduceOpSum> rop;
-        ReduceData<Real,Real,Real,Real> rdat(rop);
-        using RT = typename decltype(rdat)::Type;
-        rop.eval(bx, rdat, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT {
-            if (j != domlo.y && j != domhi.y+1) { return {0.,0.,0.,0.}; }
-            const Real vv = v(i,j,k);
-            const Real A  = have_a ? ar(i,j,k) : Real(1.0);
-            const int  jc = (j == domlo.y) ? j : j-1;
-            const Real rho = r(i,jc,k,Rho_comp);
-            const bool inflow = (j == domlo.y) ? (vv > 0) : (vv < 0);
-            const Real vf = std::abs(vv)*A;
-            return { inflow? vf:0., inflow? 0.:vf,
-                     inflow? vf*rho:0., inflow? 0.:vf*rho };
-        });
-        auto h = rdat.value();
-        vin  += ds_y*amrex::get<0>(h); vout += ds_y*amrex::get<1>(h);
-        min_ += ds_y*amrex::get<2>(h); mout += ds_y*amrex::get<3>(h);
-    }
-    ParallelDescriptor::ReduceRealSum(vin);  ParallelDescriptor::ReduceRealSum(vout);
-    ParallelDescriptor::ReduceRealSum(min_); ParallelDescriptor::ReduceRealSum(mout);
-    Print() << "MASSFLUXDIAG t= " << time
-            << " vol_in= "  << vin  << " vol_out= "  << vout
-            << " mass_in= " << min_ << " mass_out= " << mout
-            << " net_mass= " << (min_-mout) << std::endl;
-}
-
 void
 ERF::Evolve ()
 {
@@ -764,9 +676,6 @@ ERF::Evolve ()
 
         int iteration = 1;
         timeStep(0, cur_time, iteration);
-        erf_bdy_mass_flux_diag(static_cast<Real>(cur_time), vars_new[0][Vars::cons],
-                               vars_new[0][Vars::xvel], vars_new[0][Vars::yvel],
-                               ax[0].get(), ay[0].get(), geom[0]);   // DIAGNOSTIC 30
 
         cur_time += static_cast<double>(dt[0]);
         // Sync t_new[0] from accurate double to prevent float32 accumulation drift in SP builds.
