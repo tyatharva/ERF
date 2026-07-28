@@ -4189,3 +4189,14 @@ Artifacts: /home/atyagi/ERF/scoring_jan9/*.npy (fields, spectra, N-S
 profiles), scripts in the session scratchpad (score_foundation.py,
 score_metrics.py, score_islands.py -- foundation gates: self-FSS, ERA5-mean
 control, last-finite-rain_accum plotfile rule).
+
+30p segment gate (2026-07-28): 48-h bracketed run PASSES. Leg 1 fresh 0-18 h
+clean (stop before the fatal rotation, chk46614); leg 2 restart 18-48 h ran to
+TIME=172800 exactly, exit 0, zero FPE, TWELVE weather-frame rotations crossed
+on the restart path, mass +0.077% over the 30 h. (Data prep exposed a separate
+pipeline defect, fixed+committed: process_pool.py derived the LCC mapping from
+the DOWNLOAD area; the widened area shifted lon_0 0.875 deg and put frames
+55 km off baseline -> ERF init abort. Now pinned like the stock driver;
+Jan-9 control bit-identical.) The cold-init reading holds at scale: ONE
+bracketing restart per segment is a legitimate production pattern pending the
+root-cause fix.
