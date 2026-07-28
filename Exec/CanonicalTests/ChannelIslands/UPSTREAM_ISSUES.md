@@ -4017,3 +4017,36 @@ in the production deck:**
 
 Settled-drift A/B on the current production deck (2000 steps each: base / wfc /
 nscbc, double ledger) decides which ships for the gate.
+
+### 30o. Gate take 2 (NSCBC): mass BOUNDED for 4.7 h, then a dt-collapse FPE -- the NSCBC 24-h validation does not transfer to this deck
+
+Gate take 1 was invalid (silent deck-copy failure: run_a3 is root-owned from
+Docker, the host-side `cp` hit Permission denied, and the script did not check
+it -- the run executed plain Davies and climbed +2.1% by 2 h. Lesson repeated:
+verify the ARTIFACT, not the exit code. Take 2 verified the deck by grep
+before launch.)
+
+**Take 2 (deck-verified NSCBC combo):**
+- Mass: bounded the entire run. +0.011% at t=1241 s (bit-matching the A/B
+  signature), +0.0033% at 2 h, -0.0054% at 4 h, -0.007% at death. The
+  constraint works.
+- Death: dt collapsed 1.57 -> 0.77 (t=11.7 ks) -> 0.79 (16.0 ks) -> 0.19 s
+  (17.07 ks) and the run died with "Erroneous arithmetic operation" (FPE) in
+  the fast integration at model t=17073 s (4.74 h), step 16630. NO warning
+  storm preceded it (zero w-damping / low-T / negative-theta lines). Evidence:
+  run_a3/gate_nscbc_fail/ (log, Backtrace.0, plt at 0/3534/6143/8824/12459 s).
+- The 24-h NSCBC validation (item 25 era) was on the 128x64x32 deck. On the
+  production 192x96x48 deck the scheme is unstable by ~4.7 h into Jan-9.
+  Davies on THIS deck ran 18 h before dying of the (now-fixed) 29m UAF -- the
+  4.7 h collapse is NSCBC-specific or NSCBC-x-storm, not the deck itself.
+
+**Decision: decouple the global mass constraint from the BC scheme.** The
+nscbc_mass_tau block is scheme-agnostic (measures M vs the ERA5 target, adds a
+clamped uniform additive du on outflow faces, runs last). New knob
+`erf.hindcast_global_mass_tau` enables the same block under Davies; the NSCBC
+knobs and semantics are untouched. Deck switched to Davies +
+`hindcast_global_mass_tau = 60`. Validation: 2000-step A/B expecting the
+bounded signature with Davies' dt; then gate take 3.
+
+Open (parked): why NSCBC collapses on this deck; the 3.6% attribution
+(driver-data-side vs model-side) from 30n.

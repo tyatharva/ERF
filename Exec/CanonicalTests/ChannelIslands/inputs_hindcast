@@ -107,23 +107,24 @@ erf.real_width   = 10                             # cells (30 km at 3 km)
 # not momentum-consistent and is the dominant band-updraft source.
 erf.hindcast_blend_band_density = false
 
-# [MASS FIX 2026-07-28, UPSTREAM_ISSUES #30m/#30n] NSCBC lateral treatment +
-# global mass constraint. The Davies specified/relax path creates mass with no
-# feedback path to shed it: a validated double-precision ledger showed the
-# ENTIRE +9.1%/day settled drift (this deck, Jan-9) enters as a 3.6% in/out
-# asymmetry of the slow-advection x-throughflow at the walls; the interior
-# update telescopes exactly in ERF's conserved M = rho*detJ/m^2. The per-column
+# [MASS FIX 2026-07-28, UPSTREAM_ISSUES #30m/#30n/#30o] Davies + global mass
+# constraint. The Davies specified/relax path creates mass with no feedback
+# path to shed it: a validated double-precision ledger showed the ENTIRE
+# +9.1%/day settled drift (this deck, Jan-9) enters as a 3.6% in/out asymmetry
+# of the slow-advection x-throughflow at the walls; the interior update
+# telescopes exactly in ERF's conserved M = rho*detJ/m^2. The per-column
 # wall_flux_correction is structurally blind to it (wall columns are pinned by
-# the specified fill; the drift accumulates in the interior). This combo, the
-# configuration validated on the 24-h Jan-9 wet run (settled -0.098%/day, band
-# w artifact 15.5% -> 0.5%), bounds M at +0.0097% after the cold-start
-# transient and then tracks the ERA5 target mass (A/B, 2000 steps, ledger).
-# Known cost: interior d>=20 precip ran 7.18x vs Davies 4.29x in the wet-test
-# comparison, and dt runs smaller (more steps per model day).
-erf.nscbc_lateral  = 1
-erf.nscbc_outflow  = 0
-erf.nscbc_parts    = 31
-erf.nscbc_mass_tau = 60
+# the specified fill; the drift accumulates in the interior).
+# The NSCBC combo (nscbc_lateral=1 outflow=0 parts=31 mass_tau=60) bounded
+# mass (+0.01% after the cold-start transient) but develops a dt-collapse
+# instability on THIS deck: dt 1.57 -> 0.19 s ending in an FPE at model
+# t=17073 s (~4.7 h), evidence in run_a3/gate_nscbc_fail/. Its 24-h validation
+# was on the older 128x64x32 deck and does not transfer.
+# So the global constraint is applied under Davies dynamics instead (the
+# validated baseline on this deck): the SAME additive, clamped, outflow-only
+# du (ERF_BoundaryConditionsRealbdy.cpp), decoupled from the BC scheme behind
+# its own knob. tau=60 s matches the NSCBC-validated value.
+erf.hindcast_global_mass_tau = 60
 
 # Top sponge: absorb upward mountain/gravity waves (San Gabriels, Santa Ynez).
 erf.hindcast_zhi_sponge_damping  = true

@@ -876,8 +876,19 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     // ***********************************************************************************
     static const Real l_mass_tau = [] {
         Real t=Real(-1.0); ParmParse pp("erf"); pp.query("nscbc_mass_tau", t); return t; }();
+    // [UPSTREAM_ISSUES 30o] The same global constraint under the Davies
+    // specified/relax path (erf.hindcast_global_mass_tau).  The block below is
+    // scheme-agnostic -- it measures M against the ERA5 target and adds a
+    // clamped uniform du on outflow faces -- and the mechanism it closes (30n:
+    // net wall inflow, +9.1%/day settled) is a Davies failure mode.  The NSCBC
+    // path bounded mass but develops a dt-collapse instability on the
+    // 192x96x48 deck at ~4.7 h (30o); Davies dynamics are the validated
+    // baseline there, so the constraint is decoupled from the BC scheme.
+    static const Real l_mass_tau_dav = [] {
+        Real t=Real(-1.0); ParmParse pp("erf"); pp.query("hindcast_global_mass_tau", t); return t; }();
+    const Real mass_tau = nscbc_lateral() ? l_mass_tau : l_mass_tau_dav;
 
-    if (nscbc_lateral() && (l_mass_tau > Real(0.0)) && !cons_only &&
+    if ((mass_tau > Real(0.0)) && !cons_only &&
         solverChoice.init_type == InitType::HindCast &&
         !forecast_state_interp[lev].empty())
     {
@@ -956,7 +967,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         // Mass-flux capacity of the outflow faces: sum of rho*A over faces currently
         // carrying mass out.  This converts a flux deficit into a velocity increment.
         Real cap = wf.sum(2);
-        Real Phi_des = (M - Mt) / l_mass_tau;
+        Real Phi_des = (M - Mt) / mass_tau;
         Real du = Real(0.0);
         if (cap > Real(0.0)) { du = (Phi_des - (Phi_in + Phi_out)) / cap; }
         du = amrex::min(amrex::max(du, Real(-2.0)), Real(2.0));
