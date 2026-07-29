@@ -4738,3 +4738,141 @@ amplitude domain-wide and 2.5x at the wall itself. So the structure belongs to
 the outflow condition (the Riemann variant), and the controller's outflow-only du
 inflates its wall-adjacent part. That is a cost of the du_max=8 setting that the
 mass numbers alone do not show.
+
+## 32. CONSOLIDATED: the float32-absolute-time class -- four instances, one root
+
+Every one of these is the same mistake: an ABSOLUTE epoch instant (~1.673e9 s for
+a 2023 case) held or differenced in single precision, where the float32 ULP is
+**128 s**. Recorded here in one place because it has now been rediscovered four
+times from four different symptoms, each time costing a hunt.
+
+| # | where | symptom | status |
+|---|---|---|---|
+| 28 | `fill_from_realbdy` boundary interpolation | `time - start_bdy_time` quantised alpha to 128/10800; 675 impulsive boundary kicks per day | FIXED -- run-constant offset formed once in double |
+| 26 | `Radiation::set_grids` cadence | `t_old + start_time` differenced; 180 s request fired at a measured **255.4 s** | FIXED -- `set_model_time()`, model-relative clock |
+| -- | `ERF.cpp:626` evolve stop condition | `start_time + cur_time` vs `stop_time` did not change for ~100 consecutive steps | FIXED -- `stop_elapsed` formed once in double |
+| **31** | **`ERF::stop_time` itself** | **the requested stop instant is silently displaced by up to +-64 s** | **LIVE** |
+
+**The fourth is new and is the root of item 31.** `stop_time` is declared
+`amrex::Real` (ERF.cpp:45) and holds `getEpochTime(stop_datetime)` -- an absolute
+epoch, in float32. So the stop instant a deck asks for is not the stop instant
+the run uses. Predicted and then measured:
+
+| stop_datetime | exact elapsed | what ERF uses | error |
+|---|---|---|---|
+| 2023-01-09 18:00:00 | 64800 s | **64768 s** | **-32 s** |
+| 2023-01-09 21:00:00 | 75600 s | 75648 s | +48 s |
+| 2023-01-10 00:00:00 | 86400 s | 86400 s | 0 |
+
+Both observed cases confirm it. Every leg-1 of every bracketed run in this
+campaign stopped at TIME = 64768, which was read as "before the fatal rotation,
+by design" -- it is actually 18:00:00 rounded down by float32. The full-day runs
+end at exactly 86400 because that instant happens to be representable. The same
+rounding is visible in the log timestamps: at elapsed 64799.24 s the run prints
+`2023-01-09 17:59:28`, 31 s early, because the printer forms `start_time +
+cur_time` in float32 too.
+
+`ERF_ComputeTimestep.cpp:46-47` then still forms `stop_time - start_time` as a
+float32 difference before casting to double, and the final truncated dt is
+rounded to float32, which leaves `cur_time` a hair short of the target and
+spawns the extra ~3e-08 s step that item 31 documents.
+
+**Fix for the class:** `start_time` and `stop_time` must be `double`, and every
+elapsed span formed from them in double. 98 references to `start_time` alone, so
+it is a contained but non-trivial change -- and it is the only change that
+retires the class instead of patching its next symptom. Until then, a deck's
+stop_datetime is accurate only to +-64 s, which matters for segment boundaries
+that must align with a frame instant.
+
+### 31a. Guard shipped
+
+Two layers, because the failure is silent and a remembered rule fails at
+segment 7:
+
+1. **In ERF** (`ERF_ComputeTimestep.cpp`): on the first `ComputeDt` of a
+   restarted run, if the dt carried in from the checkpoint is more than 1000x
+   below the CFL timestep for the restored state, abort with the measured ratio
+   and the reason. The check sits where the CFL estimate is already in hand, so
+   the comparison needs no notion of a "typical" dt, and it fires before any
+   physics runs rather than five steps into a NaN.
+2. **In the harness** (`pick_restart_chk.sh`): reads the fixed-layout checkpoint
+   Header (line 7 istep, line 8 dt, line 9 time) and returns the LATEST-IN-TIME
+   checkpoint whose dt is within 1e-3 of the largest dt across the run's
+   checkpoints.
+
+Validated against both controls before use. On the known-poisoned directory it
+rejects exactly the two bad checkpoints and nothing else:
+
+    chk31396  t=64800.8  dt=1.804          OK
+    chk31415  t=64768    dt=2.98e-08       REJECT: 83886080x below the run maximum
+    chk31416  t=64768    dt=3.28e-08       REJECT: 76260071x below the run maximum
+    chk42597  t=86400    dt=1.034          OK
+
+and on three known-healthy directories (run_ab_dav, run_ab_nsc, run_48h) it
+rejects nothing. A first version of the script read dt from Header line 7 and
+passed the poisoned checkpoints; the control caught it. Selection is by TIME,
+not step number -- a run directory accumulates checkpoints from several legs and
+after a restart the step count for a given model time differs between them
+(run_ab_cfl03 holds chk31396 at t=64800.8 from leg 2 and chk31415 at t=64768
+from leg 1, so step order is not time order).
+
+Not applied, but the one-line source fix that would retire the hazard rather
+than guard it: stop the evolve loop when the remaining span is a negligible
+fraction of the CFL dt, so the degenerate step is never taken and no checkpoint
+can be written from it.
+
+## 33. NSCBC outflow variant unconfounded: the LATCH buys survival, the RIEMANN solve buys the outflow excess, and NEITHER variant fixes placement
+
+Third full day, same binary, same bracketing recipe, identical knobs to the
+Riemann arm except `nscbc_outflow=0`. Completed TIME = 86400, exit 0, zero FPE,
+zero NaN, mass **-0.032%**.
+
+**Survival is the latch, not the Riemann solve.** Gate take 2 was extrapolation
+WITHOUT the regime latch and died at 4.7 h by dt collapse. This run is
+extrapolation WITH the latch and completes the day. The two were confounded in
+the first NSCBC result; they are not any more.
+
+| | Davies | NSCBC Riemann | NSCBC extrapolation | MRMS |
+|---|---|---|---|---|
+| **PM-FSS 1 mm, 3 km** | **0.822** | 0.649 | **0.586** | useful 0.792 |
+| **PM-FSS 5 mm, 3 km** | **0.743** | 0.604 | **0.478** | useful 0.713 |
+| PM-FSS 5 mm, 60 km | 0.841 | 0.684 | 0.589 | useful 0.713 |
+| matched-rate POD (1 mm) | 0.822 | 0.649 | 0.586 | -- |
+| fixed-thr FSS 1 mm 3 km | 0.645 | 0.696 | 0.374 | 0.792 |
+| interior bias | 0.38x dry | 2.63x wet | **0.19x dry** | 8.48 mm |
+| domain mean (mm) | 34.14 | 45.48 | 12.83 | 14.84 |
+| band d=0 (mm/day) | 210.3 | 91.9 | 12.5 | 18.6 |
+| inflow-wall ratio | 7.21 | 0.00 | 0.08 | 1.0 |
+| outflow-wall peak ratio | -- | **6.35** (at the wall) | **1.85** (10-14 cells in) | 1.0 |
+| interior 8-19 km spectrum | 0.003 | 2.297 | 0.002 | 1.0 |
+| N/S ratio | 67.1 | 29.0 | 4.72 | 9.70 |
+| islands, three western (mm) | 5.0/3.0/3.0 | 91.3/93.6/111.2 | 3.5/2.3/3.2 | 57.6/56.2/59.7 |
+| steps for the day | 62602 | 56095 | **79560** | -- |
+| dt at day end (s) | 0.99 | 1.30 | **0.167** | -- |
+
+**FAILS the pass condition.** Placement had to reach Davies' 0.822 / 0.743 with
+the inflow band gone. The band IS gone -- 0.64 mm/day at the inflow wall against
+8.25 observed, ratio 0.08, so band elimination belongs to NSCBC generally and not
+to either outflow variant. But placement is 0.586 / 0.478: **worse than the
+Riemann arm and far below Davies.** Percentile-matched FSS ranks the three
+Davies > Riemann > extrapolation at every base rate and every scale, and
+matched-rate POD ranks them identically.
+
+**What the contrast does establish, cleanly:**
+- The **outflow-wall excess is a Riemann artifact**. Its peak ratio drops 6.35 ->
+  1.85 and moves off the wall to 10-14 cells inboard when the Riemann solve is
+  replaced by extrapolation. Task 2's localisation is confirmed by substitution.
+- The **outflow variant sets the interior amount**, and it swings hugely: 2.63x
+  WET under Riemann, 0.19x DRY under extrapolation -- drier even than Davies.
+  Both are wrong, from opposite sides, with the same latch and the same mass
+  controller.
+- Extrapolation costs **27% more steps than Davies and 42% more than Riemann**,
+  with dt degrading to 0.167 s by day end against ~1.0-1.3 s for the others. It
+  completes, but it is a marginal boundary, not a comfortable one.
+
+**Verdict: neither NSCBC outflow variant is usable as-is.** Davies remains the
+best placement by a wide margin and the only arm clearing the believable
+threshold; its defect is amplitude (0.38x dry) and a 210 mm/day wall band. The
+untried lever is the Riemann sigma relaxation coefficient, which has never been
+tuned -- the Riemann arm is the better of the two NSCBC starting points on both
+placement and cost.
