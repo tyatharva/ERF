@@ -4616,3 +4616,125 @@ structural measure, and it is now mass-bounded and stable for a full day. The
 remaining error changes character -- from "the boundary eats the storm" to "the
 interior rains too much" -- which is a tractable physics problem rather than a
 boundary artifact.
+
+## 31. A checkpoint written on the stop_datetime truncation step POISONS every restart from it
+
+Found while validating cfl 0.3. Leg 1 stopped at `stop_datetime = 18:00:00`:
+
+    Coarse STEP 31413 ends. TIME = 64767.19909 DT = 1.816368222
+    Coarse STEP 31414 ends. TIME = 64768        DT = 0.8009066582
+    Coarse STEP 31415 ends. TIME = 64768        DT = 2.980232239e-08   <- extra step
+    Writing native checkpoint chk31415
+
+ERF lands on the stop instant with a truncated step (31414), then takes ONE MORE
+step of ~3e-08 s to close a float32 residual, and the end-of-run checkpoint is
+written from that step. Restarting from it:
+
+    31416 DT = 3.278255534e-08
+    31417 DT = 3.606081123e-08     each exactly 1.1x the previous --
+    31418 DT = 3.966689377e-08     the dt growth limiter
+    31419 DT = 4.363358386e-08
+    31420 DT = 4.799694153e-08  -> all 15 conserved components NaN
+
+dt recovery is rate-limited to 1.1x per step, so from 3e-08 it needs ~180 steps
+to return to O(1) -- and the run goes non-finite after five. Whatever breaks at
+sub-microsecond dt (not chased here), the operational consequence is what
+matters: **a segment that ends on stop_datetime can write a final checkpoint
+that no restart can use.** Whether it happens depends on whether the truncated
+step lands exactly on the stop instant: the cfl 0.2 Davies arm's final step hit
+64768 exactly with dt = 0.917 and its checkpoint restarts fine, the cfl 0.3 arm's
+did not and its checkpoint is poison.
+
+This is directly in the path of the year-scale segment recipe, which chains
+stop_datetime-bounded segments through restarts. **Rule: never restart from the
+checkpoint written on a run's final step without checking its dt; use the
+previous periodic checkpoint.** A cheap structural guard would be to skip the
+end-of-run checkpoint when the final dt is a small fraction of the previous one.
+
+### The NSCBC FSS gain was bias, not placement. Percentile-matched scoring REVERSES it
+
+Fixed-threshold FSS credited NSCBC with +0.05 to +0.13 over Davies at every
+threshold and scale. With each field thresholded at its OWN quantile so all
+binary fields carry the SAME base rate as the observations, the sign flips:
+
+Base rate 0.5834 (= MRMS exceedance of 1 mm), believable >= 0.792:
+
+| scale | Davies | NSCBC | ERA5 | NSCBC - Davies |
+|---|---|---|---|---|
+| 3 km  | **0.822** | 0.649 | 0.938 | **-0.173** |
+| 15 km | **0.849** | 0.676 | 0.962 | -0.174 |
+| 60 km | **0.895** | 0.712 | 0.986 | -0.182 |
+
+Base rate 0.4250 (= MRMS exceedance of 5 mm), believable >= 0.713:
+
+| scale | Davies | NSCBC | ERA5 | NSCBC - Davies |
+|---|---|---|---|---|
+| 3 km  | **0.743** | 0.604 | 0.890 | -0.139 |
+| 15 km | **0.778** | 0.638 | 0.928 | -0.140 |
+| 60 km | **0.841** | 0.684 | 0.973 | -0.157 |
+
+Matched thresholds (mm) at the 1 mm base rate: MRMS 0.96, Davies 0.23, NSCBC
+3.56, ERA5 5.40 -- Davies must be cut at 0.23 mm to reach the observed coverage,
+which is the dry bias stated as a threshold.
+
+**Davies CLEARS the believable threshold on placement at every scale and both
+base rates. NSCBC clears it nowhere.** The fixed-threshold result was the wet
+bias earning coverage, exactly the confound it was suspected of being.
+
+Independent confirmation on a statistic sharing no machinery with the
+neighbourhood score -- with base rates matched, n_forecast == n_obs so FAR =
+1 - POD and POD carries the comparison:
+
+| base rate | Davies POD/CSI | NSCBC POD/CSI | ERA5 POD/CSI |
+|---|---|---|---|
+| 0.5834 | 0.822 / 0.698 | 0.649 / 0.481 | 0.938 / 0.882 |
+| 0.4250 | 0.743 / 0.591 | 0.604 / 0.433 | 0.890 / 0.802 |
+
+Instrument controls, all asserted in the script: self-FSS == 1; bias invariance
+verified directly (multiplying a forecast by 2.63 leaves the score
+bit-identical); displacement response on a known-nonzero case (MRMS shifted
+5 cells scores 0.908 at 3 km, recovering to 0.992 at 63 km).
+
+**Corrected verdict.** Davies places precipitation better and gets the amount
+badly wrong (0.38x dry). NSCBC gets closer on amount and structure -- the dead
+southern third, the missing islands, the flat spectrum all improve -- but places
+it worse. Neither is preferable outright, and the earlier "NSCBC wins on every
+structural measure" reading must not be carried forward as a skill claim.
+
+### Where the NSCBC excess sits: the OUTFLOW walls, not a residual inflow band
+
+Interior precipitation binned by distance from the inflow walls (xlo, ylo --
+face-mean u_n negative there all day) and separately from the outflow walls
+(xhi, yhi), as ERF/MRMS ratio so the observed field's own gradient divides out:
+
+| distance (cells) | Davies, from INFLOW | NSCBC, from INFLOW | NSCBC, from OUTFLOW |
+|---|---|---|---|
+| 0 | 7.21 | **0.00** | **6.35** |
+| 1-2 | 9.84 | 0.00 | 3.55 |
+| 6-9 | 4.66 | 0.08 | 3.59 |
+| 15-19 | 1.10 | 0.34 | 3.78 |
+| 30-44 | 2.56 | 2.86 | 2.07 |
+| 45-95 | 1.91 | 3.68 | 0.34 |
+
+The Davies control behaves exactly as its known band should: 7-10x within 6 km
+of the inflow walls, decaying to 1.1 by 45-57 km.
+
+**Neither of the two hypotheses is right.** NSCBC has no residual inflow band --
+0.03 mm/day against 8.25 observed at the inflow wall, ratio 0.00, the band is
+genuinely gone. Nor is the over-delivery uniform: the ratio spans 0.00 to 6.35.
+It is a NEW structure concentrated toward the OUTFLOW walls.
+
+**The mass controller amplifies it but does not create it.** The controller adds
+its uniform du on outflow faces ONLY, and raising `hindcast_mass_du_max` from 2
+to 8 is what made NSCBC mass-bounded -- so it is the first suspect. Comparison at
+matched model time (t = 6.00 h), mean rain_accum by distance from the outflow
+walls, cells 0 / 1-2 / 6-9 / 10-14 / 30-95:
+
+    du_max = 2 (saturated, mass +2.2%):  3.0  2.0  6.1   8.9  0.7   domain 2.71
+    du_max = 8 (bounded,   mass -0.03%): 7.5  5.3  8.6  10.6  1.0   domain 3.67
+
+Same shape -- both peak 10-14 cells inboard of the outflow walls -- at 1.35x the
+amplitude domain-wide and 2.5x at the wall itself. So the structure belongs to
+the outflow condition (the Riemann variant), and the controller's outflow-only du
+inflates its wall-adjacent part. That is a cost of the du_max=8 setting that the
+mass numbers alone do not show.
