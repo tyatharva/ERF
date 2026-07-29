@@ -5078,3 +5078,80 @@ The driver outscores every model arm on placement at every scale, which is the
 same statement from the other side: the boundary formulation controls how much of
 the driver's placement the interior inherits, and the driver sets the ceiling.
 Better driving data, not better BC formulation, is the lever on the ceiling.
+
+### 36a. Spectral nudging: scope (NOT built)
+
+**Integration point -- already exists.** ERF has a post-step Marchuk-split
+relaxation path, `erf.realbdy_relax_split` (ERF_AdvanceDycore.cpp:371-436): it
+assembles a tendency, applies it to the completed state with `MultiFab::Saxpy`,
+then calls `MomentumToVelocity` to push the momentum increment back into
+xvel/yvel -- the prognostic carrier between steps is the VELOCITY, so an
+increment left only in momentum is silently discarded. That subtlety is already
+solved there. Spectral nudging should reuse this hook verbatim, which also puts
+it in the COSMO/TRAM ordering (relaxation excluded from the slow-mode forcing,
+applied once per big step) rather than in the slow RHS where it would be held
+fixed across every acoustic substep.
+
+**Target field -- already exists.** `forecast_state_interp[lev][Vars::cons]` is
+the ERA5 state already interpolated onto the ERF grid and already time-blended
+between frames; the Davies relaxation consumes it today. No new I/O.
+
+**FFT -- reusable, and non-periodic is supported.** `ERF_USE_FFT` is on in the
+current build (FFT::PoissonHybrid symbols are in the shipped binary).
+`amrex::FFT::R2X` (Submodules/AMReX/Src/FFT/AMReX_FFT_R2X.H) provides real
+transforms with per-direction `FFT::Boundary::{periodic,even,odd}`, i.e.
+cosine/sine series for a non-periodic limited-area domain -- which is what this
+case needs and what WRF's own spectral nudging uses. ERF already has
+`get_fft_bc()` (ERF_SolverUtils.H:56) mapping domain BC types onto those
+boundary kinds. `R2X::forwardThenBackward(in, out, post_forward)` is exactly the
+required primitive: transform, zero the modes above cutoff inside the callback,
+transform back. Only constraint found: `domain.smallEnd() == 0`, which ERF
+satisfies.
+
+**Separability removes the per-level plumbing.** A horizontal-only filter does
+not need per-slab 2-D transforms: the transform is separable, so a single 3-D
+R2X that zeroes only (kx, ky) above cutoff and retains every kz is mathematically
+identical to filtering each level in 2-D. The "above the boundary layer only"
+requirement is then applied as a vertical taper on the resulting tendency in
+PHYSICAL space, after the inverse transform, where it costs nothing and
+introduces no horizontal gradient.
+
+**Wavenumber cutoff -- and this is the finding that matters.** Lx = 576 km,
+Ly = 288 km:
+
+| k | lambda_x | lambda_y |
+|---|---|---|
+| 1 | 576 km | 288 km |
+| 2 | 288 km | 144 km |
+| 3 | 192 km | 96 km |
+
+Conventional practice retains only scales the driver credibly resolves --
+typically lambda > 600-1000 km, i.e. 3-5 modes on domains of several thousand km.
+**On this domain the LARGEST available wavelength is 576 km, already below that
+cutoff: by the standard criterion there are ZERO modes to nudge.** To nudge
+anything the cutoff must be relaxed to lambda >= ~150-200 km -- defensible
+against ERA5's ~110-170 km effective resolution (0.25 deg, ~4-6 dx) -- which
+retains kx <= 3 and ky <= 2, six modes plus the mean.
+
+So at 576x288 km spectral nudging degenerates to nudging the domain mean plus a
+few tilts. The scale separation the technique exists to exploit -- driver-credible
+large scales cleanly distinguished from model-generated small scales -- barely
+exists at this domain size. That is a science risk, not an implementation risk,
+and it should be weighed before any code is written.
+
+**Variables:** u, v, theta. NOT moisture -- nudging qv would reimpose direct
+moisture control, which is the lever this whole line of work is trying to avoid,
+and standard practice excludes it.
+
+**Vertical:** taper to zero below ~1 km and full above ~2 km. Prefer a fixed
+height over a diagnosed PBL depth: a time-varying diagnosed depth introduces its
+own moving gradient, which is the failure mode this construction exists to avoid.
+
+**Effort:** ~300-400 lines (tendency assembly, cached R2X plan, spectral mask,
+vertical taper, wiring into the split path) plus validation, call it 2-3 days.
+Validation must include: round-trip identity with no modes filtered (to
+round-off); a known-nonzero control nudging toward a synthetic field of known
+spectrum, verifying only retained modes move; and tau -> infinity reproducing the
+un-nudged run bit-for-bit. Main implementation risk is the R2X redistribution
+cost per step on GPU -- the Poisson preconditioner already pays this, so it is
+measurable rather than unknown.
