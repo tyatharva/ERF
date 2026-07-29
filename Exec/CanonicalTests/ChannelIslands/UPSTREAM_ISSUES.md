@@ -4495,3 +4495,57 @@ Next discriminator on the list: vary `amrex.the_arena_init_size` on a cold run -
 in the failure step would confirm it here.
 
 Production is unaffected: one bracketing restart per segment, validated to 48 h.
+
+### 19d validated, and a second blocker found and fixed: the mass controller SATURATES under NSCBC
+
+**Survival: the fix works.** NSCBC with the regime latch and the Riemann outflow
+variant ran 16000 steps to TIME = 24373.9 s = **6.77 h**, exit 0, no NaN, dt
+1.571 at the end. Gate take 2, same deck and knobs but with the driver-driven
+sigma and `nscbc_outflow=0`, died at TIME = 17073 with dt collapsing to 0.158.
+Cleared by 2.0 h of model time.
+
+**Mechanism confirmed at the wall.** Face-mean outward-positive u_n at xhi:
+
+| t (h) | broken NSCBC | fixed NSCBC | Davies |
+|---|---|---|---|
+| 1 | +8.14 (129/384 in) | +3.42 (60/384 in) | +2.83 (0/384 in) |
+| 3 | **-3.85** (355/384 in) | +2.71 (83/384 in) | +2.74 (0/384 in) |
+| 5 | — (dead) | +2.72 (69/384 in) | — |
+| 6.77 | — | +2.82 (61/384 in) | — |
+
+The fixed run allows *local* reversal -- 60-83 of 384 columns inflow at any
+time, which is physical -- while the face mean stays outflowing and bounded, and
+it now tracks the Davies control. The broken run reversed wholesale and died.
+This is the condition-count property the latch was built to give.
+
+**Second blocker: the global mass constraint saturates under NSCBC.** The 6.77 h
+probe ran mass +2.217%, i.e. ~8%/day -- unscoreable by the #30 rule. Gain sweep
+over 3000 steps, matched model time:
+
+| `nscbc_mass_tau` | mass @ 3000 steps | peak abs(dM) |
+|---|---|---|
+| 60 | +0.834% | 1.671% |
+| 10 | +0.832% | 1.673% |
+| 5  | +0.830% | 1.672% |
+
+A 12x change in gain with no effect at three decimal places. That is a pinned
+clamp, not a slow controller -- confirmed against the null: with the controller
+OFF, +2.215% / peak 2.714%, so it is acting, just railed. The clamp was the
+hardcoded `du = min(max(du,-2),2)`. Under Davies the demanded du is ~0.6 m/s and
+never binds; under a characteristic boundary the correction is partly re-derived
+away by the next call's Riemann solve, so more headroom is needed.
+
+Exposed as `erf.hindcast_mass_du_max` (default 2.0 -- the long-validated Davies
+behaviour is bit-unchanged). Sweep:
+
+| `hindcast_mass_du_max` | mass @ 3000 steps | peak abs(dM) | min dt |
+|---|---|---|---|
+| off (no controller) | +2.215% | 2.714% | — |
+| 2 (default) | +0.834% | 1.671% | 1.142 |
+| **8** | **+0.012%** | **0.048%** | 1.116 |
+| 25 | +0.012% | 0.020% | 1.113 |
+
+8 and 25 agree to three decimals, so the true demanded du is under 8 and the
+clamp no longer binds there; dt is unaffected. NSCBC now holds mass to Davies
+quality (Davies: +-0.02% over 18 h). Production NSCBC setting:
+`erf.nscbc_mass_tau=60 erf.hindcast_mass_du_max=8`.

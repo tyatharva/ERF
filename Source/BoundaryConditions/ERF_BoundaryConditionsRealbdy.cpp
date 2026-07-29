@@ -1007,7 +1007,17 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         Real Phi_des = (M - Mt) / mass_tau;
         Real du = Real(0.0);
         if (cap > Real(0.0)) { du = (Phi_des - (Phi_in + Phi_out)) / cap; }
-        du = amrex::min(amrex::max(du, Real(-2.0)), Real(2.0));
+        // Clamp on the velocity increment. Under Davies the demanded du is ~0.6 m/s
+        // for a +9%/day drift, so 2 m/s is generous and the timescale is what sets
+        // the response. Under NSCBC it SATURATES: measured over 3000 steps, mass
+        // lands at +0.834% / +0.832% / +0.830% for mass_tau = 60 / 10 / 5 -- a 12x
+        // gain change with no effect, which is the signature of a pinned clamp
+        // (controller off: +2.215%, so it is acting, just railed). Exposed as a knob
+        // so the ceiling can be calibrated per scheme; default preserves the
+        // long-validated Davies behaviour exactly.
+        static const Real l_du_max = [] {
+            Real d=Real(2.0); ParmParse pp("erf"); pp.query("hindcast_mass_du_max", d); return d; }();
+        du = amrex::min(amrex::max(du, -l_du_max), l_du_max);
 
         for (int vdir = 0; vdir < 2; ++vdir)
         {
