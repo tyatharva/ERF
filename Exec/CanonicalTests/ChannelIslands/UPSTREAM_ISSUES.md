@@ -4876,3 +4876,83 @@ threshold; its defect is amplitude (0.38x dry) and a 210 mm/day wall band. The
 untried lever is the Riemann sigma relaxation coefficient, which has never been
 tuned -- the Riemann arm is the better of the two NSCBC starting points on both
 placement and cost.
+
+## 34. NSCBC CLOSED: sigma tuning does not reach Davies placement, and intermediate sigma is unstable
+
+`erf.nscbc_sigma` added: the LODI relaxation coefficient on the incoming
+characteristic, blending J- between the far-field value (sigma=1, the shipped
+Riemann behaviour) and the interior-extrapolated value (sigma=0, which reduces
+ALGEBRAICALLY to variant 0 -- un_s = un_i, c_s = c_i, hence rho_s = rho_i and
+p_s = p_i). Both endpoints were already measured over a full day, so the sweep
+interpolates between known points. Default 1.0, so nothing else changes.
+
+Endpoint controls before use: sigma=1 reproduced the Riemann arm's dt
+BIT-IDENTICALLY at steps 1/2/5/20/100, drifting only by step 400 (round-off under
+fast-math reassociation of the blend); sigma=0 matched the extrapolation arm to
+the EOS round-trip the sigma path takes and variant 0 does not.
+
+**Stability: both endpoints are stable, every intermediate value is not.**
+
+| sigma | outcome | dt at death / day end |
+|---|---|---|
+| 0 (extrapolation) | completes 24 h | 0.167 |
+| 0.03 | completes 24 h | 1.111 |
+| 0.1 | **FPE at 7.9 h** | 1.656 (healthy to the last step) |
+| 0.3 | **FPE at 1.9 h** | 1.643 (healthy to the last step) |
+| 1 (Riemann) | completes 24 h | 1.303 |
+
+Neither failure is a dt collapse -- both trap with a perfectly healthy timestep,
+and time-to-death lengthens as sigma falls. That is the signature of the blend
+itself being ill-posed: a mixture of the far-field and interior incoming
+invariants is neither properly non-reflecting nor properly clamped.
+
+**Placement is monotone in sigma and bounded by the endpoints, as predicted.**
+Percentile-matched FSS, interior d >= 20:
+
+| arm | 1 mm, 3 km | 5 mm, 3 km | 5 mm, 60 km |
+|---|---|---|---|
+| **Davies** | **0.822** | **0.743** | **0.841** |
+| sigma=1 Riemann | 0.649 | 0.604 | 0.684 |
+| sigma=0.03 | 0.628 | 0.547 | 0.634 |
+| sigma=0 extrapolation | 0.586 | 0.478 | 0.589 |
+| useful | 0.792 | 0.713 | 0.713 |
+
+No NSCBC arm comes within 0.17 of Davies at any base rate or scale, and the
+sigma arm sits BETWEEN its two endpoints -- the bounding argument holds. Since
+percentile matching divides out exactly the bias that sigma tunes, this is the
+expected result and it is now measured rather than argued.
+
+**sigma = 0.03 is nonetheless the best NSCBC arm ever run on amplitude and
+structure**, and by a wide margin:
+
+| | Davies | sigma=0 | **sigma=0.03** | sigma=1 | MRMS |
+|---|---|---|---|---|---|
+| interior bias | 0.38x | 0.19x | **1.42x** | 2.63x | 1.0 |
+| interior 8-19 km spectrum | 0.003 | 0.002 | **0.493** | 2.297 | 1.0 |
+| islands, three western (mm) | 5.0/3.0/3.0 | 3.5/2.3/3.2 | **36.2/46.3/55.5** | 91.3/93.6/111.2 | 57.6/56.2/59.7 |
+| inflow-wall ratio | 7.21 | 0.08 | **0.01** | 0.00 | 1.0 |
+| N/S ratio | 67.1 | 4.7 | 60.5 | 29.0 | 9.70 |
+| steps for the day | 62602 | 79560 | **55965** | 56095 | -- |
+
+It is the only arm with a near-unity interior amount, the only one with
+storm-scale variance within a factor of two of observed, and the only one that
+puts realistic rain on the Channel Islands (36-56 mm against 58/56/60 observed,
+where Davies has 3-5 and Riemann 91-111). It is also the cheapest day run. And
+its placement is still 0.19 below Davies.
+
+**Verdict, and the reason to stop.** Every structural deficiency #25 identified
+in the Davies configuration -- starved interior, dead islands, featureless
+spectrum, 210 mm/day wall band -- is fixed by NSCBC at sigma = 0.03. None of that
+buys placement skill. Davies puts its (far too little) rain in the right places;
+NSCBC puts a realistic amount in the wrong ones. These are independent failures
+and the boundary condition addresses only the second.
+
+Retained results, independent of how sigma landed:
+1. The regime latch buys survival on its own -- extrapolation dies at 4.7 h
+   without it, completes the day with it.
+2. The outflow-wall excess is specifically a Riemann artifact -- peak ratio
+   6.35 at the wall becomes 1.85 at 10-14 cells inboard on substitution.
+3. The outflow condition sets the interior AMOUNT, swinging it 0.19x to 2.63x
+   with the latch and the mass controller held fixed.
+4. The LODI blend is unstable at intermediate sigma while both endpoints are
+   stable, with time-to-death lengthening as sigma falls.

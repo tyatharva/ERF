@@ -502,6 +502,11 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         int v=1; ParmParse pp("erf"); pp.query("nscbc_outflow", v); return v; }();
     static const Real l_nscbc_eps = [] {
         Real e=Real(0.5); ParmParse pp("erf"); pp.query("nscbc_eps", e); return e; }();
+    // LODI relaxation coefficient on the incoming characteristic; see the derivation
+    // at its use site. 1 = the far-field invariant imposed outright (previous and
+    // default behaviour, bit-unchanged); 0 = variant 0 exactly.
+    static const Real l_nscbc_sigma = [] {
+        Real s=Real(1.0); ParmParse pp("erf"); pp.query("nscbc_sigma", s); return s; }();
     // Bisection bitmask: 1=cons pass, 2=velocity pass, 4=specify KE/scalar at
     // inflow, 8=specify w=0 at inflow, 16=characteristic inflow density.
     // Default 31 = the full formulation.
@@ -551,6 +556,7 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         const int  icmp = icomp_cons;
         const int  ovar = l_nscbc_outflow;
         const Real eps  = l_nscbc_eps;
+        const Real nsig = l_nscbc_sigma;
         const int  prt  = l_nscbc_parts;
         const Real tke_in = l_nscbc_tke;
 
@@ -628,10 +634,22 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
                         if (c_i > Real(0.0) && std::abs(un_i) < c_i) {
                             // Outgoing invariant, carried out of the domain by lambda = u_n + c
                             Real Jout = un_i + Real(2.0)*c_i/gm1;
-                            // The ONE incoming condition: J- from the far field.  p_inf and
-                            // rho_inf are the hydrostatic base state; u_n,inf is the driver.
+                            // The ONE incoming condition: J- relaxed toward the far field.
+                            // p_inf and rho_inf are the hydrostatic base state; u_n,inf is
+                            // the driver.
+                            //
+                            // sigma is the LODI relaxation coefficient (Poinsot & Lele).
+                            // sigma = 1 imposes the far-field invariant outright -- what this
+                            // branch did before, and the fully-clamped limit. sigma = 0 takes
+                            // J- from the interior, which reduces ALGEBRAICALLY to variant 0:
+                            // un_s = un_i, c_s = c_i, hence rho_s = rho_i and p_s = p_i. So
+                            // the coefficient interpolates between the two variants already
+                            // measured on a full day, and both endpoints are known.
+                            // Lower sigma = more non-reflecting = drains more freely.
                             Real c_inf = std::sqrt(Gamma * ph(i,j,k) / rh(i,j,k));
-                            Real Jin   = un_w - Real(2.0)*c_inf/gm1;
+                            Real Jin_far = un_w - Real(2.0)*c_inf/gm1;
+                            Real Jin_int = un_i - Real(2.0)*c_i/gm1;
+                            Real Jin     = nsig*Jin_far + (Real(1.0)-nsig)*Jin_int;
 
                             Real un_s = Real(0.5)*(Jout + Jin);
                             Real c_s  = Real(0.25)*gm1*(Jout - Jin);

@@ -19,6 +19,29 @@ ERF::ComputeDt (int step, double cur_time_d)
 
     ParallelDescriptor::ReduceRealMin(&dt_tmp[0], dt_tmp.size());
 
+    // UPSTREAM_ISSUES 31. A run that ends on stop_datetime can take one final
+    // degenerate step -- the residual of the stop instant, measured at 3e-08 s --
+    // and the end-of-run checkpoint is written from it, storing that dt. A restart
+    // from such a checkpoint cannot recover: the change_max limiter below lets dt
+    // grow by a fixed factor per step, so ~180 steps are needed to climb back to
+    // O(1) and the solution goes non-finite in about five. Refuse it here, where
+    // the CFL timestep for the restored state is in hand and the comparison is
+    // unambiguous, rather than emit a NaN five steps later. Checked once, on the
+    // first ComputeDt of a restarted run.
+    static bool s_restart_dt_checked = false;
+    if (!s_restart_dt_checked && !restart_chkfile.empty()) {
+        s_restart_dt_checked = true;
+        if (dt[0] > Real(0.0) && dt[0] < Real(1.e-3)*dt_tmp[0]) {
+            amrex::Abort("ERF::ComputeDt: refusing to restart from '" + restart_chkfile +
+                "'. Its stored dt is " + std::to_string(dt[0]) + " s, which is " +
+                std::to_string(dt_tmp[0]/dt[0]) + "x below the CFL timestep for this state ("
+                + std::to_string(dt_tmp[0]) + " s) -- the signature of a checkpoint written on "
+                "a stop-time truncation step (UPSTREAM_ISSUES 31). dt cannot recover through "
+                "the change_max limiter before the solution goes non-finite. Restart from the "
+                "previous periodic checkpoint; pick_restart_chk.sh selects one.");
+        }
+    }
+
     Real dt_0 = dt_tmp[0];
     int n_factor = 1;
     for (int lev = 0; lev <= finest_level; ++lev) {
