@@ -4549,3 +4549,70 @@ behaviour is bit-unchanged). Sweep:
 clamp no longer binds there; dt is unaffected. NSCBC now holds mass to Davies
 quality (Davies: +-0.02% over 18 h). Production NSCBC setting:
 `erf.nscbc_mass_tau=60 erf.hindcast_mass_du_max=8`.
+
+## NSCBC vs Davies, scored on the corrected deck (2026-07-28)
+
+Both arms: same binary (post-#26 rad clock, post-#19d regime latch), same
+bracketing recipe (cold 0-18 h, restart 18-24 h), Jan-9 2023, cfl 0.2.
+Davies = `hindcast_global_mass_tau=60`. NSCBC = `nscbc_lateral=1
+nscbc_outflow=1 nscbc_parts=31 nscbc_mass_tau=60 hindcast_mass_du_max=8`.
+Both reached TIME = 86400 exactly, exit 0, zero FPE, zero NaN.
+**Mass: Davies -0.032%, NSCBC -0.030%** -- both scoreable, for the first time.
+Control: the Davies arm reproduces the re-scored #25 baseline to within 0.001
+FSS on a different binary, so the rad-clock fix is precipitation-neutral and the
+pipeline is reproducible.
+
+**Interior FSS (d >= 20), the science cells:**
+
+| thr | scale | Davies | NSCBC | ERA5 | useful |
+|---|---|---|---|---|---|
+| 1 mm | 3 km  | +0.645 | **+0.696** | +0.773 | 0.792 |
+| 1 mm | 63 km | +0.741 | **+0.751** | +0.822 | 0.792 |
+| 5 mm | 3 km  | +0.465 | **+0.595** | +0.829 | 0.713 |
+| 5 mm | 33 km | +0.546 | **+0.650** | +0.890 | 0.713 |
+| 5 mm | 63 km | +0.617 | **+0.677** | +0.926 | 0.713 |
+
+NSCBC improves interior FSS at **every threshold and every scale**, most at
+5 mm / 3 km (+0.130). Neither arm reaches the believable threshold, and ERA5
+still beats both everywhere.
+
+**What changed, and it is not subtle:**
+
+| quantity | Davies | NSCBC | MRMS |
+|---|---|---|---|
+| band d=0 mean (mm/day) | 210.3 | 91.9 | 18.6 |
+| band d=0 max | 2402.0 | 774.3 | 239.9 |
+| interior d>=20 mean | 3.25 (0.38x DRY) | 22.34 (2.63x WET) | 8.48 |
+| south interior third | 0.14 | 2.01 | 2.20 |
+| N/S ratio | 67.1 | 29.0 | 9.70 |
+| interior 8-19 km spectral power vs MRMS | 0.003 | 2.297 | 1.0 |
+| islands, three western (mm) | 5.0 / 3.0 / 3.0 | 91.3 / 93.6 / 111.2 | 57.6 / 56.2 / 59.7 |
+| interior 5 mm POD/FAR/CSI | 0.326/0.189/0.303 | 0.670/0.464/0.424 | -- |
+| steps for the day | 62602 | 56095 | -- |
+
+The wall-normal decay profile inverts. Davies falls monotonically inward
+(210 -> 125 -> 92 -> 63 -> 40 -> 21 -> 4.4 at d = 0,1,2,5,10,15,25): the band
+wrings the inflow out and the interior starves. NSCBC is 92 -> 57 -> 54 -> 61
+-> 72 -> 62 -> 33: the precipitation is *in the domain* instead of on its edge.
+
+**The hypothesis behind re-opening NSCBC is confirmed -- and it overshoots.**
+The dead southern third comes back to life (0.14 -> 2.01 against 2.20 observed,
+essentially exact). The featureless interior gains storm-scale structure
+(spectral ratio 0.003 -> 2.297). The islands go from 10-20x DRY to ~1.7x wet.
+Interior POD doubles. But the interior bias swings from 0.38x dry to **2.63x
+wet**, FAR rises 0.189 -> 0.464, and the band is reduced 2.3x rather than
+removed -- 91.9 mm/day at d=0 is still 5x observed.
+
+**Read the FSS gain with that bias in mind.** A 2.6x wet field is rewarded by
+FSS at a fixed low threshold simply through coverage. Three things argue the
+gain is not only that: it is larger at 5 mm than at 1 mm, the spectrum and the
+north-south gradient both move *toward* observations rather than merely up, and
+the island pattern goes from absent to present. A percentile-matched-threshold
+FSS would separate placement skill from bias cleanly and is the obvious next
+measurement; it has not been made.
+
+Verdict: NSCBC is the better lateral treatment for this configuration on every
+structural measure, and it is now mass-bounded and stable for a full day. The
+remaining error changes character -- from "the boundary eats the storm" to "the
+interior rains too much" -- which is a tractable physics problem rather than a
+boundary artifact.
