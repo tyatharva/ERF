@@ -5235,3 +5235,116 @@ metric rewarding smoothness rather than skill. Percentile matching removes
 amplitude bias; it does not remove variance bias. Any future use of these
 numbers should carry that qualification, and a variance-matched or
 object-oriented score would be the way to settle it.
+
+### 36d. The smoothness caveat is FALSIFIED. Davies' placement advantage is real -- and it is an advantage over an envelope, not over a storm
+
+Three tests, all post-processing, against the three scored arms plus ERA5.
+
+**1. Variance-matched scoring -- caveat withdrawn.** Each field was Gaussian-
+smoothed until its 8-19 km spectral ratio matched Davies' 0.0031 (NSCBC no-band
+needed sigma = 1.94 cells, ERA5 sigma = 0.71, the two already-smooth arms needed
+none), then re-scored. Controls: sigma = 0 reproduces the native score exactly.
+
+| arm | native | variance-matched | change |
+|---|---|---|---|
+| Davies | 0.822 | 0.822 | +0.000 |
+| NSCBC no band | 0.628 | 0.624 | **-0.003** |
+| NSCBC width 2 | 0.803 | 0.803 | +0.000 |
+| ERA5 | 0.938 | 0.937 | -0.000 |
+
+Smoothing NSCBC to Davies' variance moves its score by three thousandths. **The
+sub-200 km advantage is not a smoothness artifact.** Percentile matching at a
+fixed base rate turns out to be robust to this: the quantile adapts, so the
+retained set moves very little under smoothing. The caveat raised in 36c is
+withdrawn -- it was a real risk, it was tested, and it does not hold.
+
+**2. MODE-style object verification -- confirms the placement ranking, and adds
+the finding that matters.** Convolve (sigma 1 cell), threshold, label, discard
+specks under 10 cells, match on centroid distance + area similarity. Control: a
+field matched against itself gives 100% matched at 0 km.
+
+| threshold | arm | n_obj | matched | median displacement | area bias | intensity bias |
+|---|---|---|---|---|---|---|
+| 5 mm | ERA5 | 1 | 1/1 | **25.6 km** | 1.40 | 0.78 |
+| 5 mm | NSCBC width 2 | 3 | 1/1 | 42.2 km | 0.20 | 0.36 |
+| 5 mm | Davies | 2 | 1/1 | 42.7 km | 0.25 | 0.41 |
+| 5 mm | NSCBC no band | 1 | 1/1 | **139.9 km** | **0.80** | **1.57** |
+| 15 mm | Davies | 2 | **0/2** | -- | -- | -- |
+| 15 mm | NSCBC width 2 | 2 | **0/2** | -- | -- | -- |
+| 15 mm | NSCBC no band | 1 | 1/2 | 70.8 km | 1.17 | 1.84 |
+| 30 mm | Davies | 1 | **0/1** | -- | -- | -- |
+| 30 mm | NSCBC no band | 1 | 1/1 | 72.1 km | 1.60 | 2.02 |
+
+An independent method, sharing no machinery with FSS, reproduces the placement
+ranking at 5 mm: Davies and width-2 put the storm envelope ~42 km from observed,
+NSCBC no-band ~140 km. So the placement advantage is real.
+
+**But the same table shows what that advantage is over.** At 5 mm Davies'
+matched object is **25% of the observed area and 41% of its intensity**; at 15 mm
+and 30 mm Davies and width-2 produce **no matchable objects at all** -- they have
+no heavy-rain systems where MRMS has them. NSCBC no-band is the only model arm
+that produces heavy-rain objects, at 0.80-1.60 area bias and ~70 km displacement.
+
+**3. ERA5 control.** Variance matching moves ERA5 by -0.000, and ERA5 has both
+the smallest displacement (25.6 km) and the most realistic object area (1.40).
+The metric is not implicated: a field that is smooth relative to MRMS can still
+score well or badly on its merits. ERA5 outscoring every model arm on placement
+AND object attributes is unchanged and remains the campaign's least comfortable
+result.
+
+**Limitation, stated plainly:** MRMS forms only 1-2 objects in the interior at
+these thresholds, so each displacement figure is a single realisation, not a
+distribution. The agreement with the independent FSS ranking is what gives it
+weight, not its own sample size.
+
+## 37. Which configuration is the better forecast, and the headline restated
+
+**Restated headline.** The earlier form -- "Davies places precipitation better;
+NSCBC gets the amount and structure right" -- survives, with the smoothness
+caveat withdrawn (36d) and one clause added that changes what it means:
+
+> Davies places the light-rain ENVELOPE better, and produces no storm inside it.
+> NSCBC produces a storm of nearly the right size and intensity, ~100 km from
+> where it belongs. Neither beats the 25 km driver at either job.
+
+The added clause is the object result: at 5 mm Davies' storm is a quarter of the
+observed area and 41% of its intensity, and at 15 mm and 30 mm it has no
+matchable objects at all. Its placement advantage is an advantage over an
+envelope, not over a system. That was invisible to FSS, which scores a binary
+coverage pattern and therefore cannot distinguish "right place, no storm" from
+"right place, right storm".
+
+**Which is the better precipitation forecast -- it depends on the use, and this
+should not be collapsed into one number:**
+
+- For **where it rained at all** (light-rain footprint, flood-watch framing):
+  Davies, or equivalently NSCBC + a 2-cell band. 42 km envelope displacement,
+  percentile-matched placement 0.822/0.743, clearing the believability threshold.
+- For **how hard it rained and over what area** (QPF, hydrology, anything driven
+  by intensity): NSCBC no-band, sigma = 0.03. Interior bias 1.42x against
+  Davies' 0.38x, spectral variance 0.493 against 0.003, islands 36-56 mm against
+  Davies' 3-5 (observed 58/56/60), and the only arm producing heavy-rain objects
+  at all.
+- For **either purpose on this domain and day: ERA5**, the 25 km driver, beats
+  every model arm on placement (0.938/0.890), on envelope displacement (25.6 km)
+  and on object area (1.40). The 3 km hindcast does not add value over its own
+  driver at any scored quantity.
+
+**What the campaign established, independent of which arm is preferred:**
+1. The relaxation ramp's grad(F) is simultaneously the anchoring and the artifact;
+   width is not the operative variable, the existence of a gradient is (36, 36b).
+2. Interior placement is inherited advectively from the inflow, saturating at one
+   domain transit (35).
+3. Above ~200 km the placement ranking inverts and NSCBC is within 0.06 of the
+   driver, so spectral nudging would act where nothing needs fixing (36c).
+4. The NSCBC regime latch buys survival; the Riemann solve buys the outflow-wall
+   excess; the outflow condition sets interior amount (33, 34).
+
+**The lever these four point at is not the boundary condition.** Placement is
+inherited from what arrives at the wall and is capped by the driver; amount and
+structure are set by the interior scheme and are the one thing the 3 km run does
+better than ERA5. A configuration that had NSCBC's amplitude and structure with
+Davies' envelope placement would beat both -- and 36/36b say no boundary
+formulation with a spatial gradient can deliver it. Driving data at higher
+resolution is the lever on placement; the interior physics is the lever on
+amount.
