@@ -5476,3 +5476,62 @@ server-side subsetting exists. Without it, full-CONUS fields are ~27 GB/hour.
 **Recommendation: do not start phase 1 until phase 0 produces a real 3-D file.**
 Every other cost here is contingent on it, and the accessible store has been
 verified not to contain what the campaign needs.
+
+### 38a. Phase 0 RESOLVED: the 3-D distribution exists and is subsettable -- but it ends 2022-09-30
+
+**1. NCAR GDEX d559000 -- the 3-D archive, confirmed.** DOI 10.5065/ZYY0-Y036,
+815.67 TB total, 43 water-year products at ~18.9 TB each, netCDF4. Both `wrf2d`
+and `wrf3d` files, **744 of each per month = hourly**. OPeNDAP DDS of
+`wrf3d_d01_2021-10-01_00:00:00.nc` gives the full 3-D atmospheric state:
+
+    U[50][1015][1368]   V[50][1016][1367]   W[51][1015][1367]
+    TK[50]  P[50]  P_HYD[50]  Z[51]
+    QVAPOR QCLOUD QRAIN QICE QSNOW QGRAUP  (all [50])
+    QNICE QNRAIN CLDFRA REFL_10CM O3RAD
+    XLAT/XLONG (+ _U/_V staggered)  lev[50]  ilev[51]
+
+Better than the scope assumed on two counts: **Z is supplied directly** as
+geopotential height on staggered levels, so no PH/PHB reconstruction and exact
+per-column level heights; and **TK is diagnosed temperature**, so theta comes from
+TK and P offline in the converter -- where it can be verified -- instead of inside
+ERF at runtime.
+
+**2. Subsetting: YES.** The THREDDS catalog for d559000 advertises
+`OpenDAP`, `NetcdfSubset` (ncssGrid), `CdmRemote` and `cdmrFeatureGrid`.
+
+**3. Volume: comfortably viable, and my scope figure was pessimistic.** Our
+footprint is 144 x 72 CONUS404 cells; 50 levels x 4 bytes = 2.07 MB per 3-D
+field, so the ~10 fields we need are **20.7 MB/hour**, i.e. **187 MB for a
+9-frame 3-hourly day**. (Correcting 38: full-CONUS is ~4.4 GB/hour for 16 3-D
+fields uncompressed, not 27 GB/hour -- I over-counted the field list.)
+
+**4. THE BLOCKER, verified from the dataset page:**
+
+    Temporal Range: 1979-10-01 00:00 +0000 to 2022-09-30 23:00 +0000 (Entire dataset)
+
+Last product is `202110-202209` (WY2022). **Jan 9 2023 -- the day every arm in
+this campaign is scored on -- is outside the 3-D archive.** Meanwhile the HyTEST
+2-D hydro subset runs to 2024-09-30, which implies the simulation WAS extended
+past WY2022 and the 3-D output exists but is not published on GDEX.
+
+**So all three prior avenues are settled:** GDEX has 3-D and subsetting but stops
+at Sep 2022; the USGS/HyTEST products past that date are the 2-D hydro subset
+only (38); ScienceBase lists the same release lineage. No accessible 3-D
+distribution covers Jan 2023.
+
+**Two ways forward, both needing a decision:**
+
+- **(a) Move the scored day inside the archive.** MRMS Pass-2 QPE starts ~2014
+  and the 3-D archive ends Sep 2022, giving an **8-year window (2014 - Sep 2022)**
+  of MRMS-verifiable SoCal AR events. Cost: the comparison must be internally
+  consistent, so it needs ERA5-driven Davies + NSCBC no-band on the NEW day as
+  the control, plus the two CONUS404-driven arms -- 4 full days of GPU (~6 h) plus
+  MRMS and frame prep. The Jan-9-2023 absolute numbers would not transfer, but
+  every within-day conclusion in this file would still stand as its own result.
+- **(b) Ask the producers** (Rasmussen / Gutmann at NCAR, or the USGS stewards)
+  whether post-WY2022 3-D wrfout is retrievable. The 2-D extension to 2024 is
+  direct evidence it was produced.
+
+Not proceeding to the converter: the precondition -- 3-D data for the scored day
+-- is not met, and building a converter before knowing which day it targets would
+be work at risk.
