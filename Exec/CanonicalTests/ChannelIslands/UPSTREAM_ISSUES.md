@@ -5348,3 +5348,37 @@ Davies' envelope placement would beat both -- and 36/36b say no boundary
 formulation with a spatial gradient can deliver it. Driving data at higher
 resolution is the lever on placement; the interior physics is the lever on
 amount.
+
+### 36e. Width sweep completed: pathology is monotone in width, placement is a STEP then flat with scatter
+
+`real_width=5` completed the day, mass -0.032%, no FPE/NaN. Full series, all same
+binary, same bracketing, same scoring:
+
+| width | PM-FSS 1mm/3km | PM-FSS 5mm/3km | inflow-wall ratio | interior bias | spectrum | islands (3 W, mm) |
+|---|---|---|---|---|---|---|
+| 0 (no band) | 0.628 | 0.547 | **0.01** | **1.42x** | **0.493** | **36/46/56** |
+| 2 | 0.803 | 0.741 | 4.95 | 0.31x | 0.002 | 4.3/3.4/3.8 |
+| 3 | **0.819** | **0.747** | 5.50 | 0.31x | 0.002 | 4.3/3.3/3.3 |
+| 5 | 0.784 | 0.713 | 6.53 | 0.33x | 0.003 | 4.2/3.0/3.0 |
+| 10 (Davies) | 0.822 | 0.743 | 7.21 | 0.38x | 0.003 | 5.0/3.0/3.0 |
+
+**The pathology is monotone in width** -- the inflow-wall ratio climbs 0.01 ->
+4.95 -> 5.50 -> 6.53 -> 7.21 without exception, so a wider band always costs more
+wall artifact.
+
+**Placement is not monotone.** It steps from 0.628 to 0.803 between width 0 and
+width 2, then wanders inside 0.784-0.822 across widths 2, 3, 5 and 10 with no
+ordering: width 5 (0.784) scores BELOW width 3 (0.819) and below Davies (0.822),
+and width 3 scores above width 5 and width 2. The spread across the plateau
+(0.038 at 1 mm, 0.034 at 5 mm) is the same size as the differences between
+adjacent widths, so those differences are not systematic.
+
+This strengthens 36b rather than complicating it: once any relaxation gradient
+exists, placement is set and width does not tune it, while width continues to buy
+wall artifact monotonically. **Width is strictly a cost knob with no placement
+benefit beyond its existence.** There is no optimum to find, and width 5 -- the
+one point that could have shown a mid-range peak -- shows the opposite.
+
+Interior structure is unchanged across every non-zero width: bias 0.31-0.33x,
+spectrum 0.002-0.003, islands 3.0-4.3 mm against 58/56/60 observed. All of it is
+lost at width 2 and none of it returns.
