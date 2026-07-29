@@ -5155,3 +5155,38 @@ spectrum, verifying only retained modes move; and tau -> infinity reproducing th
 un-nudged run bit-for-bit. Main implementation risk is the R2X redistribution
 cost per step on GPU -- the Poisson preconditioner already pays this, so it is
 measurable rather than unknown.
+
+### 36b. Width 2 confirms it: the transition is a STEP, not a trade-off curve
+
+`real_width=2` -- one nudged cell behind the specified cell, the narrowest ramp
+the scheme admits. Completed the day, mass -0.032%, no FPE/NaN.
+
+| width | PM-FSS 1mm/3km | PM-FSS 5mm/3km | inflow ratio | interior bias | spectrum | islands (3 W, mm) |
+|---|---|---|---|---|---|---|
+| 0 (no band) | 0.628 | 0.547 | **0.01** | **1.42x** | **0.493** | **36/46/56** |
+| **2** | **0.803** | **0.741** | 4.95 | 0.31x | 0.002 | 4.3/3.4/3.8 |
+| 3 | 0.819 | 0.747 | 5.50 | 0.31x | 0.002 | 4.3/3.3/3.3 |
+| 10 (Davies) | 0.822 | 0.743 | 7.21 | 0.38x | 0.003 | 5.0/3.0/3.0 |
+| MRMS | -- | -- | 1.0 | 1.0 | 1.0 | 58/56/60 |
+
+**Going from no band to the narrowest possible band recovers 89% of the placement
+deficit and destroys essentially all of the structure gain, in one step.**
+Spectrum collapses 0.493 -> 0.002, islands 36-56 mm -> 3-4 mm, interior bias
+1.42x -> 0.31x, inflow-wall ratio 0.01 -> 4.95 (69% of Davies' 7.21). Widening
+from 2 to 3 to 10 then changes little on either axis: +0.019 of placement and a
+further 1.5x of wall band.
+
+So this is not a trade-off curve with an optimum somewhere in the middle -- it is
+a switch. Any spatial gradient of the relaxation coefficient, however narrow,
+delivers the driver's placement AND the wall artifact together. Width is not the
+operative variable; the existence of a gradient is. That is the sharpest possible
+statement of 36's mechanism, and it closes the narrow-band line: there is no
+width to find.
+
+Note width 2 is still USABLE on its own terms -- 0.803 and 0.741 both clear the
+believability thresholds (0.792, 0.713) -- it is simply Davies with extra steps.
+
+Operational note: leg 1 of both the width-2 and width-3 runs ended on a
+degenerate stop-truncation step (DT = 1.49e-08), and `pick_restart_chk.sh`
+rejected that checkpoint and fell back to the previous periodic one. The item-31
+guard fired in production, twice, as designed.
