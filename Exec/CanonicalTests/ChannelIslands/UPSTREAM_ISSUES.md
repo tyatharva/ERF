@@ -5190,3 +5190,48 @@ Operational note: leg 1 of both the width-2 and width-3 runs ended on a
 degenerate stop-truncation step (DT = 1.49e-08), and `pick_restart_chk.sh`
 rejected that checkpoint and fell back to the previous periodic one. The item-31
 guard fired in production, twice, as designed.
+
+### 36c. Scale-filtered placement: DO NOT BUILD 2b. The advantage lives below the reachable scales, and inverts above them
+
+Both model and observation fields low-passed with a 2-D DCT-II/III (a cosine
+series on a non-periodic domain -- the same transform `amrex::FFT::R2X` with
+`Boundary::even` performs, so the retained modes are exactly what a spectral
+nudging implementation here could act on), then scored percentile-matched on the
+interior. Controls: DCT round-trip exact to 1e-9, identity filter is the
+identity, self-FSS == 1 at every cutoff.
+
+Percentile-matched FSS at 3 km, interior d >= 20:
+
+| cutoff | modes kx,ky | Davies | NSCBC no band | NSCBC width 2 | ERA5 |
+|---|---|---|---|---|---|
+| unfiltered | 191,95 | **0.822** | 0.628 | 0.803 | 0.938 |
+| lambda >= 200 km | 5,2 | 0.720 | **0.891** | 0.824 | 0.952 |
+| lambda >= 576 km | 2,1 | 0.680 | **0.802** | 0.787 | 0.902 |
+
+At the 5 mm base rate the same reversal, more strongly: unfiltered Davies 0.743
+vs NSCBC 0.547; at lambda >= 576 km, Davies 0.519 vs NSCBC 0.726.
+
+**Davies' placement advantage does not merely vanish under filtering -- it
+INVERTS.** Filtered to the scales spectral nudging could touch, the band-free
+NSCBC arm is the BETTER placed field by +0.17 (1 mm) and +0.21 (5 mm), and it
+sits within 0.06 of ERA5's own filtered score (0.891 vs 0.952). At those scales
+NSCBC is already 94% of the way to the driver.
+
+**So spectral nudging would act precisely where NSCBC needs no help.** The whole
+of Davies' unfiltered advantage (0.822 vs 0.628) lives at wavelengths BELOW
+200 km, which a nudging cutoff excludes by construction -- that is what the
+cutoff is for. Building it would spend 2-3 days to improve a quantity already
+near its ceiling, and would leave the deficit that matters untouched. **Do not
+build.** This is the decision rule the test was set up to answer, answered
+against the build.
+
+**A caveat this raises about the campaign's central number.** Davies wins
+unfiltered and loses filtered, and Davies has almost no small-scale variance
+(interior spectral ratio 0.003 against NSCBC's 0.493). Binarising a nearly smooth
+field at its own quantile produces large contiguous blobs, which overlap a
+smoothed observation field more readily than a structured field does even when
+bias is matched. So part of Davies' sub-200 km "placement advantage" may be the
+metric rewarding smoothness rather than skill. Percentile matching removes
+amplitude bias; it does not remove variance bias. Any future use of these
+numbers should carry that qualification, and a variance-matched or
+object-oriented score would be the way to settle it.
