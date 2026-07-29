@@ -5022,3 +5022,59 @@ d = min(i, j, NX-1-i, NY-1-j) maxes at **47**. Distance-binned diagnostics
 therefore reach only 141 km from the wall, a "60+ cells" bin is empty, and
 "45-60" holds three rows. Any distance-resolved boundary diagnostic on this
 domain is limited to that range; a wider domain would be needed to extend it.
+
+## 36. THE RESULT: the relaxation ramp's grad(F) is simultaneously the anchoring mechanism and the artifact source
+
+NSCBC (sigma=0.03) with `nscbc_keep_ramp=1` and `real_width=3` -- a 3-cell Davies
+band behind the characteristic wall. Completed the day, mass -0.032%, dt healthy
+(min 0.83), no FPE/NaN.
+
+| | Davies | NSCBC no band | **NSCBC + 3-cell band** | MRMS |
+|---|---|---|---|---|
+| PM-FSS 1 mm 3 km | 0.822 | 0.628 | **0.819** | useful 0.792 |
+| PM-FSS 5 mm 3 km | 0.743 | 0.547 | **0.747** | useful 0.713 |
+| interior bias | 0.38x | 1.42x | **0.31x** | 1.0 |
+| interior spectrum | 0.003 | 0.493 | **0.002** | 1.0 |
+| islands, three western (mm) | 5.0/3.0/3.0 | 36/46/56 | **4.3/3.3/3.3** | 58/56/60 |
+| inflow-wall ratio | 7.21 | 0.01 | **5.50** | 1.0 |
+| d=0 band (mm/day) | 210.3 | 28.4 | **87.2** | 18.6 |
+
+**A three-cell band buys 100% of the placement and 76% of the pathology.**
+Placement matches Davies at both base rates and all five scales (5 mm is +0.004
+to +0.014 ABOVE Davies). Every property NSCBC bought is simultaneously lost.
+
+The hourly curve confirms the mechanism is inflow conditioning: against Davies
+the no-band arm's gap grows to +0.258 by hour 7 and plateaus at +0.19, while the
+3-cell arm's gap never exceeds +0.06 and closes to +0.003 by hour 17 -- it opens
+and shuts inside the same hours 4-7 window in which the no-band gap opened.
+
+**The mechanism, stated once.** The relaxation ramp's grad(F) is BOTH the
+anchoring and the artifact. The spatial gradient of the relaxation coefficient is
+what transmits the driver's placement into the interior; that same gradient is
+what drives the spurious wall ascent that wrings the inflowing moisture out and
+starves the interior downstream. They are not two effects to be traded against
+each other -- they are one mechanism observed twice, which is why no band WIDTH
+separates them and why width 3, already near the minimum, gives essentially all
+of both.
+
+This is also why the field's convention is to tolerate the relaxation zone's
+noise and DISCARD the zone in analysis rather than try to remove it: the noise is
+not a defect of the implementation, it is the anchoring being paid for. And it
+makes spectral nudging the indicated construction rather than one option among
+several -- it is the only formulation that anchors with NO spatial gradient.
+
+Full-day arms scored to date, all same binary, same bracketing, all mass-bounded:
+
+| arm | PM-FSS 1mm/3km | interior bias | spectrum | islands | inflow ratio |
+|---|---|---|---|---|---|
+| Davies | 0.822 | 0.38x | 0.003 | 5/3/3 | 7.21 |
+| NSCBC sigma=1 (Riemann) | 0.649 | 2.63x | 2.297 | 91/94/111 | 0.00 |
+| NSCBC sigma=0.03 | 0.628 | 1.42x | 0.493 | 36/46/56 | 0.01 |
+| NSCBC sigma=0 (extrap) | 0.586 | 0.19x | 0.002 | 3.5/2.3/3.2 | 0.08 |
+| NSCBC sigma=0.03 + width 3 | 0.819 | 0.31x | 0.002 | 4.3/3.3/3.3 | 5.50 |
+| ERA5 (driver) | 0.938 | 1.50x | 0.008 | 24/22/32 | -- |
+
+The driver outscores every model arm on placement at every scale, which is the
+same statement from the other side: the boundary formulation controls how much of
+the driver's placement the interior inherits, and the driver sets the ceiling.
+Better driving data, not better BC formulation, is the lever on the ceiling.
