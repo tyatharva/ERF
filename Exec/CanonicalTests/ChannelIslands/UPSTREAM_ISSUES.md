@@ -5382,3 +5382,97 @@ one point that could have shown a mid-range peak -- shows the opposite.
 Interior structure is unchanged across every non-zero width: bias 0.31-0.33x,
 spectrum 0.002-0.003, islands 3.0-4.3 mm against 58/56/60 observed. All of it is
 lost at width 2 and none of it returns.
+
+## 38. CONUS404 driving data: SCOPE (not built). One verified blocker
+
+### Verified from store metadata
+
+Store: `s3://hytest/conus404/conus404_hourly.zarr` via
+`https://usgs.osn.mghpcc.org/` (anonymous, no egress fees), HyTEST catalog
+`conus404-catalog.yml`. Read `.zmetadata` directly; lat/lon chunks decoded
+locally (zstd level 9, 175x175 chunks).
+
+- **Native hybrid model levels: YES for the simulation.** The store carries the
+  full WRF hybrid vertical machinery -- `ZNU(50)`, `ZNW(51)`, hybrid coefficients
+  `C1H..C4H(50)` and `C1F..C4F(51)`, plus `MUB(y,x)`, `PB(50,y,x)`,
+  `PHB(51,y,x)`. Those arrays exist only for a run on hybrid sigma-pressure
+  model levels, not pressure levels. Verified, not inferred.
+- **Time: 394488 hourly steps, 1979-10-01 00Z -> 2024-09-30 23Z.** 2023-01-09 00Z
+  is index 379344, in range. Our scored day IS covered.
+- **Grid: Lambert Conformal, DX=DY=4000 m, TRUELAT1/2 = 30/50,
+  STAND_LON = -97.9, 1367 x 1015.** `TITLE = OUTPUT FROM WRF V3.9.1.1 MODEL`.
+- **Domain coverage including the offshore western edge: CONFIRMED.** Decoded
+  chunk (2,0) spans lon -129.00..-119.57, lat 29.36..37.23 and contains **5429
+  cells inside our footprint** (-123.47..-117.22, 32.06..34.70). ~5.5 deg of
+  margin west of our -123.5 edge.
+
+### The blocker: the accessible store has NO 3-D atmospheric state
+
+Every atmospheric field in it is single-level despite carrying WRF names:
+`U['time','y','x_stag']`, `V['time','y_stag','x']`,
+`QVAPOR/TK/T2/Q2/PSFC/TSK['time','y','x']`. **Absent entirely: W, T (theta), P,
+PH, QCLOUD, QRAIN, QICE, QSNOW, QGRAUP.** The only time-varying 3-D variables are
+soil (`SMOIS`, `SH2O`, `TSLB`, 4 layers). `bottom_top` exists solely to carry the
+time-invariant coordinate arrays. The catalog says so in words -- "CONUS404 Hydro
+Variable subset" -- and the metadata confirms it.
+
+So the premise is true of the SIMULATION and false of the PRODUCT: the
+hydrometeors that motivate the move are exactly what this store omits. Obtaining
+full 3-D wrfout (NCAR RDA/GDEX, the ScienceBase release, or a request to the
+producers) is UNRESOLVED and is the gate on everything else.
+
+### What our pipeline needs -- cheaper than expected
+
+ERF reads only the custom `.bin` frame format (ERF_ReadCustomBinaryIC.H): 4 int32
+`(nx, ny, nz, ndata)`, then `lat[nx*ny]`, `lon[nx*ny]`, `x[nx]`, `y[ny]`,
+`z[nz]`, then `ndata` blocks of `nx*ny*nz`. **So the work is a new CONVERTER, not
+a new ERF reader path -- ERF needs zero changes** (with one exception below).
+That turns a C++ project into a Python one.
+
+Which fixes survive:
+
+| fix | fate under CONUS404 |
+|---|---|
+| LCC pinning + frame-coordinate residual gate (32) | SURVIVES, and matters more: this becomes Lambert->Lambert reprojection, not lat/lon->Lambert. Reuse the residual check as the acceptance test. |
+| `hindcast_frame_from_T` | UNNECESSARY. It exists because ERA5 gives T and we need theta/rho; WRF gives perturbation theta plus P/PB directly. Emit theta/rho in the converter, leave the knob off. |
+| `hindcast_sfc_anchor_file` surface anchor | UNNECESSARY. It exists because ERA5's lowest data level is 150.19 m (measured from our own frames: z = [0, 150.19, 364.42, 583.47]); WRF model level 1 is ~10-30 m. |
+| masked SST interpolation | REWORK, not delete. `TSK` and `LANDMASK` are present; `SST` is not. TSK-over-water substitutes for SST and the fallback-to-nearest-valid logic still applies. |
+| erftools ~300 m level displacement (19f/21) and the fabricated duplicate bottom level | BYPASSED. Both are erftools artifacts; our own converter never creates them. |
+
+**The one place ERF source MUST change.** `ndata` is hard-capped at 8
+(ERF_ReadCustomBinaryIC.H:70) and our frames already use all 8 -- verified,
+header reads `40 22 38 8` for rho,u,v,w,theta,qv,qc,qr. So qc/qr come free, but
+**adding qi/qs requires raising the cap and extending the reader and its
+consumers**. "Resolved hydrometeors" beyond cloud+rain is not a data-only change.
+
+### What we gain, and what caps it
+
+- Hydrometeors: our ERA5 hydrometeor test failed only because ERA5 carries
+  essentially none (measured 4.0e-4 against 4.8e-3 the model generates).
+  Contingent on 3-D access.
+- No sub-150 m extrapolation: removes the whole surface-anchor class.
+- Effective driver resolution goes from ~110-170 km (ERA5, 4-6 dx at 0.25 deg) to
+  ~16-24 km. **This is the right lever by our own measurement**: the scale-filtered
+  test (36c) put the model within 0.06 of ERA5 above 200 km and located the entire
+  placement deficit BELOW 200 km -- where a 4 km driver has information and ERA5
+  has none.
+- Cap on the upside: CONUS404 is itself ERA5-driven, so at scales ERA5 resolves it
+  inherits ERA5's placement. The gain is confined to roughly 4-200 km.
+
+### Effort
+
+| phase | days | note |
+|---|---|---|
+| 0. Resolve 3-D access | 0.5-1 | GATING. Deliverable: one hour of 3-D wrfout over our footprint on disk + variable inventory. |
+| 1. Converter -> .bin | 3-5 | 3-D read, theta/rho, Lambert->Lambert reprojection, native levels, exact frame layout, residual gate |
+| 2. Surface frames | 1-2 | 6-field frame from TSK/LANDMASK/T2/Q2/PSFC/albedo; masked fill reworked |
+| 3. Validation + the two scored days | 2-3 | init sanity, 6-h run, then Davies and NSCBC no-band, identical scoring |
+| **total** | **8-13** | if phase 0 resolves; **unbounded if it does not** |
+
+Volume estimate: our footprint is 144 x 72 CONUS404 cells, so 50 levels x ~10
+fields is ~207 MB/hour, 1.9 GB for 9 three-hourly frames or 5 GB hourly -- IF
+server-side subsetting exists. Without it, full-CONUS fields are ~27 GB/hour.
+
+**Recommendation: do not start phase 1 until phase 0 produces a real 3-D file.**
+Every other cost here is contingent on it, and the accessible store has been
+verified not to contain what the campaign needs.
