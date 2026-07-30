@@ -6167,90 +6167,96 @@ rather than another parameter sweep.
 Not committed to the deck or manifest: `erf.les_type` remains `"None"` and the
 manifest MUST line is unchanged, since nothing here validates a new value.
 
-## 46. MECHANISM: the terrain ghost `z_nd(-1)` is never filled at a non-periodic, non-symmetry wall, and horizontal LES is the first consumer
+## 46. FALSIFIED: the terrain ghost IS filled. The mechanism claimed here was wrong; the test-coverage gap is real
 
-Source-only diagnosis of 45. The chain is complete and every link is in the tree.
+**This item previously claimed that `z_nd(-1)` is never filled at a non-periodic,
+non-symmetry wall, and that horizontal LES is its first consumer. That is wrong.
+The instrumented probe run killed it before the "fix" was applied.**
 
-**1. The terrain array's exterior ghost is filled for exactly two cases, neither
-of which is ours.**
-- `ERF_MakeNewArrays.cpp:747`: `z_phys_nd[lev]->FillBoundary(geom[lev].periodicity())`
-  -- fills from neighbouring boxes and PERIODIC images only. Our x and y are
-  non-periodic, so it does not touch the exterior ghost at a physical wall.
-- `ERF_TerrainMetrics.cpp:104-125`: the only explicit physical-boundary fill is
-  guarded on `phys_bc_type[...] == ERF_BC::symmetry`:
+**The measurement.** A temporary reduction was added at the end of
+`make_terrain_fitted_coords`, comparing the exterior ghost plane against the first
+interior plane of `z_phys_nd`, over the FULL column, on all four lateral walls,
+on the production CONUS404 deck (`xlo/xhi/ylo/yhi.type = "Outflow"`,
+`use_real_bcs = true`, i.e. exactly the configuration the claim was about):
 
-      if (phys_bc_type[Orientation(0,Orientation::low)] == ERF_BC::symmetry && ...)
-          z_nd_arr(dom_lo.x-1,j,k) = z_nd_arr(dom_lo.x+1,j,k);
+    [ghost46] FULL COLUMN (k=0..48) terrain z_nd, ghost vs first interior, lev 0:
+      xlo  GHOST[0,19003.00977]  INTERIOR[0,19003.00977]  max|g-v| 0
+      xhi  GHOST[0,19003.00977]  INTERIOR[0,19003.00977]  max|g-v| 0
+      ylo  GHOST[0,19003.00977]  INTERIOR[0,19003.00977]  max|g-v| 0
+      yhi  GHOST[0,19003.00977]  INTERIOR[0,19003.00977]  max|g-v| 0
 
-  Our lateral BCs are the real-BC ingested/Dirichlet type, not `symmetry`.
+`max|ghost - interior| = 0` at every k on every wall. The ghost already holds
+exactly `z_nd(-1) = z_nd(0)` -- bit-for-bit the value the proposed fix would have
+written. **The fix was a no-op.**
 
-**So `z_nd(-1,j,k)` at the xlo wall (and `z_nd(i,-1,k)` at ylo, and the hi
-equivalents) is never written in this configuration.**
+**What actually fills it.** `ERF_TerrainMetrics.cpp:367-370`, inside
+`init_which_terrain_grid`, in the same kernel that computes the max terrain
+height:
 
-**2. The strain routine reads exactly that cell.** `ComputeStrain_T`'s boundary
-branch runs on the i=0 edge plane (`if (xl_v_dir) { Box planexy = tbxxy;
-planexy.setBig(0, planexy.smallEnd(0)); ... }`) and calls
-`Compute_h_xi_AtEdgeCenterK(i,j,k,...)`, which is (ERF_TerrainMetrics.H:243-251):
+    int ii = amrex::max(amrex::min(i,imax),imin);
+    int jj = amrex::max(amrex::min(j,jmax),jmin);
+    // Fill the lateral boundaries
+    z_arr(i,j,k0) = z_arr(ii,jj,k0);
 
-      met_h_xi = 0.25 * dxInv * ( z_nd(i+1,j,k) + z_nd(i+1,j,k+1)
-                                 -z_nd(i-1,j,k) - z_nd(i-1,j,k+1) );
+An unconditional clamp-to-domain index -- zero-gradient surface terrain into every
+lateral ghost, for every BC type, no `phys_bc_type` guard. The 3-D coordinate is
+then built from it on grown boxes, which is why the equality holds at all k, not
+just at k0.
 
-At i = 0 that reads `z_nd(-1,...)`. The resulting `met_h_xi` is a FABRICATED
-terrain slope at the wall, and it enters `tau12` directly through the
-`met_h_eta * GradUz` and `met_h_xi` metric terms.
+**Why the original diagnosis was wrong.** It surveyed the two places that look
+like ghost fills -- `FillBoundary(periodicity())` and the symmetry block at
+`ERF_TerrainMetrics.cpp:98-134` -- and never looked inside
+`init_which_terrain_grid`. The `setDomainBndry(Real(1.234e20),...)` poison at
+line 58 made the wrong conclusion look confirmed: it reads exactly like a
+deliberate tripwire that only the symmetry block ever clears. It is cleared, just
+somewhere the survey did not cover.
 
-**3. Why it is latent today and fatal with LES.** `l_use_diff` is true whenever a
-PBL model is on, so `ComputeStrain_T` already runs in production and the corrupt
-`met_h_xi` is already being computed. But with `les_type = "None"` the HORIZONTAL
-eddy viscosity is zero -- MYNNEDMF supplies vertical mixing only -- so the bad
-tau12 is multiplied by zero and never reaches the momentum tendency. Turning on
-Smagorinsky2D makes `nu_h = Cs^2 * DeltaH^2 * |S|` the first consumer of that
-corrupted strain.
+**The trap this avoided.** With `les_type = "None"` the planned validation would
+have returned a near-identity result, and that identity would have been read as
+"the fix is correct and inert as predicted". It would have been identity because
+the fix changes nothing at all. Instrumenting the ghost before fixing it, rather
+than after, is the only reason that did not happen.
 
-**4. Every observation follows.**
-- *Scales with Cs^2* -> the observed monotone time-to-death (0.25/7 steps,
-  0.20/10, 0.15/30, 0.10/140, 0.05/150), and growth rather than instant NaN,
-  because the fabricated slope is large but finite.
-- *Only at lateral walls* -> first-NaN cells at i=0 (NSCBC) and j=95 (Davies).
-- *Independent of boundary scheme* -> Davies and NSCBC are both non-symmetry and
-  non-periodic, so both leave the ghost unfilled. This is the "what is common"
-  the diagnosis asked for: not the velocity ghosts, the TERRAIN ghost.
-- *Not a diffusion CFL* -> nothing here depends on dt.
+**45 still stands -- re-confirmed on the current binary.** Smagorinsky2D,
+Cs = 0.25, production CONUS404 deck, clean HEAD build: SIGFPE ("Erroneous
+arithmetic operation") at coarse step 16. Per the FPE-trap signature the SIGFPE is
+the NaN alarm, not the fault. A 12-step run completes cleanly, which is only
+because 12 < 16 -- short runs do not clear this.
 
-**5. It has never been tested. Measured over the whole Exec tree:**
+**Ruled out by this pass (three candidates, all clean):**
+1. *Terrain ghost* -- measured above, exactly zero-gradient.
+2. *Strain-rate boundary handling* -- `ERF_ComputeStrain_T.cpp:61-130` handles
+   lateral Dirichlet explicitly and includes `ext_dir_ingested`, which is the
+   real-BC type this deck uses. It is not BC-blind.
+3. *Eddy-viscosity exterior ghost* -- `mu_turb` is computed only on
+   `growntilebox(1) & domain`, so it is genuinely never computed outside the
+   domain; but `ComputeTurbulentViscosity` sets `impose_phys_bcs = true` whenever
+   `les_type != None` and then does `FillBoundary` plus a masked physical-boundary
+   extrapolation into those planes. Handled.
+
+**The durable finding: no test in the tree exercises this combination.** Strict
+census of `Exec/**/inputs*` that SET a real `erf.les_type`:
 
 | | count |
 |---|---|
-| inputs with an ACTIVE LES closure | 52 |
-| of those, doubly periodic in x and y | **46** |
-| of those, using `Smagorinsky2D` | **0** |
-| of those, using `erf.use_real_bcs=true` | **0** |
+| inputs setting a real les_type | 52 |
+| of those, doubly periodic in x and y | 46 |
+| of those, NOT doubly periodic | 6 |
+| using `Smagorinsky2D` | **0** |
+| using `use_real_bcs` | **0** |
 
-The 46 periodic ones have `z_nd(-1)` filled by the periodic wrap, so the defect is
-invisible there. Of the six non-periodic ones, only two combine Smagorinsky with
-`StaticFittedMesh` terrain -- `RegTests/MetGrid` and `RegTests/WPS_Test` -- and
-both run **3-D** Smagorinsky with a heavily reduced coefficient: **Cs = 0.1** and
-**Cs = 0.005**, against WRF's default 0.25 that both our reference models use.
-A 50x reduction below default is itself consistent with someone having hit this
-and turned the coefficient down until it ran.
+So `Smagorinsky2D` has no test at all, and no LES test anywhere in the tree runs
+against ingested real lateral boundaries. In the 46 doubly-periodic cases the
+lateral ghost is filled by wrap, so nothing there can expose a lateral-wall LES
+defect even in principle. That gap is real regardless of this item's dead
+mechanism, and it is the reason a lateral-wall LES failure can sit in the tree
+unnoticed.
 
-**Confidence and what is NOT proven.** The read establishes that the ghost is
-unwritten and that the strain reads it; it does not establish what value it holds
-(unallocated arena content vs incidentally zero). Either way `met_h_xi` at the
-wall is wrong: if the ghost is zero, `met_h_xi = 0.25*dxInv*(z_nd(1,j,k)+
-z_nd(1,j,k+1))`, i.e. a fictitious slope of half the local terrain height per dx.
-Confirming the value needs instrumentation, which was out of scope here.
-
-**Fix shape (not attempted).** Extend the `symmetry` block in
-`ERF_TerrainMetrics.cpp:104-125` to fill the terrain ghost for ALL non-periodic
-physical boundaries -- zero-gradient (`z_nd(-1) = z_nd(0)`) is the natural choice
-for an ingested/Dirichlet wall and makes `met_h_xi` a one-sided slope instead of a
-fabricated one. That is a small, local change, but it alters the terrain metric at
-every lateral wall for every terrain run, so it needs its own validation against
-the existing scored arms before it could be trusted -- it is not a free fix.
-
-Until then the horizontal-mixing lever stays closed and the orographic bias of 44
-(2.22x above 500 m, 6x at the domain max) remains documented and unaddressed.
+**Status: the Smagorinsky2D mechanism is NOT localized.** Three candidates
+eliminated, no remaining hypothesis from source reading alone. Per the standing
+rule for this diagnosis, we stop here rather than continue guessing. The
+horizontal-mixing lever stays blocked and the orographic over-intensification
+(44) passes to the microphysics path (WSM6) instead.
 
 ## 47. TERRAIN EXONERATED: ours is comparable in height and 8-10% SMOOTHER than d02 over the over-producing cells
 
