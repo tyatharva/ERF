@@ -6166,3 +6166,88 @@ rather than another parameter sweep.
 
 Not committed to the deck or manifest: `erf.les_type` remains `"None"` and the
 manifest MUST line is unchanged, since nothing here validates a new value.
+
+## 46. MECHANISM: the terrain ghost `z_nd(-1)` is never filled at a non-periodic, non-symmetry wall, and horizontal LES is the first consumer
+
+Source-only diagnosis of 45. The chain is complete and every link is in the tree.
+
+**1. The terrain array's exterior ghost is filled for exactly two cases, neither
+of which is ours.**
+- `ERF_MakeNewArrays.cpp:747`: `z_phys_nd[lev]->FillBoundary(geom[lev].periodicity())`
+  -- fills from neighbouring boxes and PERIODIC images only. Our x and y are
+  non-periodic, so it does not touch the exterior ghost at a physical wall.
+- `ERF_TerrainMetrics.cpp:104-125`: the only explicit physical-boundary fill is
+  guarded on `phys_bc_type[...] == ERF_BC::symmetry`:
+
+      if (phys_bc_type[Orientation(0,Orientation::low)] == ERF_BC::symmetry && ...)
+          z_nd_arr(dom_lo.x-1,j,k) = z_nd_arr(dom_lo.x+1,j,k);
+
+  Our lateral BCs are the real-BC ingested/Dirichlet type, not `symmetry`.
+
+**So `z_nd(-1,j,k)` at the xlo wall (and `z_nd(i,-1,k)` at ylo, and the hi
+equivalents) is never written in this configuration.**
+
+**2. The strain routine reads exactly that cell.** `ComputeStrain_T`'s boundary
+branch runs on the i=0 edge plane (`if (xl_v_dir) { Box planexy = tbxxy;
+planexy.setBig(0, planexy.smallEnd(0)); ... }`) and calls
+`Compute_h_xi_AtEdgeCenterK(i,j,k,...)`, which is (ERF_TerrainMetrics.H:243-251):
+
+      met_h_xi = 0.25 * dxInv * ( z_nd(i+1,j,k) + z_nd(i+1,j,k+1)
+                                 -z_nd(i-1,j,k) - z_nd(i-1,j,k+1) );
+
+At i = 0 that reads `z_nd(-1,...)`. The resulting `met_h_xi` is a FABRICATED
+terrain slope at the wall, and it enters `tau12` directly through the
+`met_h_eta * GradUz` and `met_h_xi` metric terms.
+
+**3. Why it is latent today and fatal with LES.** `l_use_diff` is true whenever a
+PBL model is on, so `ComputeStrain_T` already runs in production and the corrupt
+`met_h_xi` is already being computed. But with `les_type = "None"` the HORIZONTAL
+eddy viscosity is zero -- MYNNEDMF supplies vertical mixing only -- so the bad
+tau12 is multiplied by zero and never reaches the momentum tendency. Turning on
+Smagorinsky2D makes `nu_h = Cs^2 * DeltaH^2 * |S|` the first consumer of that
+corrupted strain.
+
+**4. Every observation follows.**
+- *Scales with Cs^2* -> the observed monotone time-to-death (0.25/7 steps,
+  0.20/10, 0.15/30, 0.10/140, 0.05/150), and growth rather than instant NaN,
+  because the fabricated slope is large but finite.
+- *Only at lateral walls* -> first-NaN cells at i=0 (NSCBC) and j=95 (Davies).
+- *Independent of boundary scheme* -> Davies and NSCBC are both non-symmetry and
+  non-periodic, so both leave the ghost unfilled. This is the "what is common"
+  the diagnosis asked for: not the velocity ghosts, the TERRAIN ghost.
+- *Not a diffusion CFL* -> nothing here depends on dt.
+
+**5. It has never been tested. Measured over the whole Exec tree:**
+
+| | count |
+|---|---|
+| inputs with an ACTIVE LES closure | 52 |
+| of those, doubly periodic in x and y | **46** |
+| of those, using `Smagorinsky2D` | **0** |
+| of those, using `erf.use_real_bcs=true` | **0** |
+
+The 46 periodic ones have `z_nd(-1)` filled by the periodic wrap, so the defect is
+invisible there. Of the six non-periodic ones, only two combine Smagorinsky with
+`StaticFittedMesh` terrain -- `RegTests/MetGrid` and `RegTests/WPS_Test` -- and
+both run **3-D** Smagorinsky with a heavily reduced coefficient: **Cs = 0.1** and
+**Cs = 0.005**, against WRF's default 0.25 that both our reference models use.
+A 50x reduction below default is itself consistent with someone having hit this
+and turned the coefficient down until it ran.
+
+**Confidence and what is NOT proven.** The read establishes that the ghost is
+unwritten and that the strain reads it; it does not establish what value it holds
+(unallocated arena content vs incidentally zero). Either way `met_h_xi` at the
+wall is wrong: if the ghost is zero, `met_h_xi = 0.25*dxInv*(z_nd(1,j,k)+
+z_nd(1,j,k+1))`, i.e. a fictitious slope of half the local terrain height per dx.
+Confirming the value needs instrumentation, which was out of scope here.
+
+**Fix shape (not attempted).** Extend the `symmetry` block in
+`ERF_TerrainMetrics.cpp:104-125` to fill the terrain ghost for ALL non-periodic
+physical boundaries -- zero-gradient (`z_nd(-1) = z_nd(0)`) is the natural choice
+for an ingested/Dirichlet wall and makes `met_h_xi` a one-sided slope instead of a
+fabricated one. That is a small, local change, but it alters the terrain metric at
+every lateral wall for every terrain run, so it needs its own validation against
+the existing scored arms before it could be trusted -- it is not a free fix.
+
+Until then the horizontal-mixing lever stays closed and the orographic bias of 44
+(2.22x above 500 m, 6x at the domain max) remains documented and unaddressed.
