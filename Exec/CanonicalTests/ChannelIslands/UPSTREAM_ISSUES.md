@@ -6032,3 +6032,76 @@ Figures: `c404_18h_fields_0-12in.png`, `c404_18h_fields_0-3in.png`,
 `c404_hourly_rate.png`. Full tables (FSS fixed + percentile-matched on three masks,
 quantiles, wet-area fractions, fetch bins from both wall pairs, all eight islands,
 hourly series): `figs/tables_18h.txt`.
+
+## 44. du_max is NOT the lever: the CONUS404 excess is OROGRAPHIC, not boundary-adjacent
+
+### Pre-run diagnostic (free, on existing output): the excess separates cleanly
+
+du_max=8 NSCBC 23 h vs d02, stratified:
+
+| terrain bin | n | NSCBC | d02 | bias |
+|---|---|---|---|---|
+| flat <100 m, LAND ONLY | 408 | 14.56 | 19.41 | **0.75 (DRY)** |
+| 100-500 m | 1101 | 38.72 | 25.49 | 1.52 |
+| >500 m | 1322 | 55.04 | 24.82 | **2.22** |
+
+By distance from the inflow walls: 1.82 (0-6 km), 1.54 (9-27), 0.88 (30-57),
+1.10 (60-117), 1.56 (120-285 km). **The cross-tab settles which is which: every
+cell above 100 m lies in the 40-95 band, so the far-field 1.56 IS the orography.**
+Within flat terrain alone the inflow profile is 1.82 / 1.54 / 0.88 / 1.10 / 1.26.
+
+So the domain-mean 1.44x wet bias is not uniform over-production at all: it is
+**mountains too wet (2.22x) and flat land too dry (0.75x)**, averaging to
+something that looks uniform and is not. The boundary-adjacent part is 855 cells
+(4.6% of the domain); the orographic part is 2423 cells sitting 120-285 km from
+any inflow wall -- which a wall-normal velocity clamp cannot plausibly reach.
+
+Prediction registered before the run: du_max=2 trims the near-wall excess, leaves
+the orographic excess intact, and costs mass.
+
+### The run: du_max=2, 23 h, everything else identical
+
+Completed TIME=82816, 72236 steps, zero NaN/FPE, 10 rotations.
+
+**Mass: +0.0440% final, peak +0.044%, min -0.199% -- IDENTICAL to du_max=8's
++0.044%.** The Jan-9 railing (+2.2% at du_max=2) does NOT transfer: on this case
+the demanded du rarely reaches 2 m/s, so the clamp costs nothing. That half of the
+prediction was wrong.
+
+**And it buys nothing.** Fields are 98.4% correlated (r=0.9842); domain mean 14.01
+vs 13.78 mm -- du_max=2 is marginally WETTER.
+
+| metric vs d02 | du_max=8 | du_max=2 |
+|---|---|---|
+| full-domain bias / PCC | 1.44 / 0.616 | **1.47** / 0.626 |
+| interior bias / PCC | 1.03 / 0.269 | 1.01 / 0.325 |
+| LAND bias / PCC | 1.76 / 0.551 | **1.83** / 0.544 |
+| LAND vs MRMS bias | 1.92 | **2.00** |
+| bias >500 m | 2.22 | **2.34** |
+| bias 0-6 km from inflow | 1.82 | **1.93** |
+| spectrum 8-19 km | **0.957** | **0.641** |
+| FSS 15 mm 3 km (fixed) | 0.505 | 0.534 |
+| PM-FSS 30 mm 3 km | 0.511 | 0.531 |
+
+**The near-wall excess got WORSE, not better** (1.82 -> 1.93 at 0-6 km), so the
+prediction failed in direction as well. The only clear degradation is the
+spectrum, which falls from 0.957 to 0.641 of d02 -- du_max=2 loses a third of the
+small-scale variance that made du_max=8 match the 4 km driver. Against that,
+heavy-threshold FSS improves slightly (15 mm 3 km 0.505 -> 0.534).
+
+**Verdict: du_max=8 stays.** It is not carrying the excess, it costs nothing in
+mass on this case, and it holds the small-scale variance that du_max=2 loses.
+
+### What the excess actually is
+
+Wall-normal profile (inches): NSCBC peaks at **1.22 at d=5** against d02's 0.41 --
+a 3x bump 15 km inboard, not at the wall -- then falls to 0.34 by d=20 while d02
+holds 0.42. Santa Ynez point (MRMS max, 34.486N -119.802W): du8 **6.07 in**,
+du2 6.28, d02 1.89, MRMS **2.61**. Domain max: du8 **17.47 in**, du2 17.33,
+d02 3.03, MRMS 2.61 -- a **6x over-production at the peak**.
+
+So the outstanding NSCBC defect is orographic over-intensification, worst above
+500 m and at the domain maximum, with a secondary bump ~15 km inboard of the
+walls. Neither is a mass-controller artifact. Figures:
+`c404_dumax_fields_0-3in.png`, `c404_dumax_fields_0-12in.png` (matched to
+`c404_18h_fields_0-3in.png`).
