@@ -6670,3 +6670,95 @@ That is a different hunt from the vertical-mixing one, and it is cheap to start:
 the hourly inflow moisture flux is derivable from output already on disk.
 
 No runs, no config changes. Awaiting a decision before starting anything.
+
+## 51. FLUX DISCRIMINATOR: the boundary over-supplies, and it is NSCBC-specific -- Davies tracks the driver to within 11%
+
+Post-processing on existing output, no runs. Hourly water-vapour flux integrated
+0-6000 m ASL through each lateral face, for the ERF arms and for the CONUS404
+driving frames sampled on the SAME faces at the SAME heights.
+
+**A. ERF inflow (xlo+ylo) divided by driver inflow:**
+
+| h | NSCBC s=0.03 | WSM6 | **Davies** | driver kg/s |
+|---|---|---|---|---|
+| 3 | 1.021 | 1.030 | 1.018 | 6.90e7 |
+| 6 | 1.083 | 1.091 | 0.944 | 5.99e7 |
+| 9 | 1.486 | 1.469 | **1.029** | 3.72e7 |
+| 12 | 1.853 | 1.735 | **1.040** | 2.46e7 |
+| 15 | **2.125** | 2.084 | **1.109** | 1.62e7 |
+| 18 | 3.885 | 4.047 | 2.613* | 3.32e6 |
+
+*Davies was dying at h18; through h15 it is clean.
+
+The driver's inflow decays **21x** between h3 and h18 (6.90e7 -> 3.32e6). NSCBC
+decays only **5.5x**. **Davies tracks the driver to within 11% through h15 while
+NSCBC diverges to 2.13x.** The failure to spin down is a property of the NSCBC
+boundary, not of the model physics.
+
+**Which face.** xlo (west, the main inflow) is faithful in NSCBC -- ratio 0.92 to
+0.96 at every frame hour. The divergence is entirely on **ylo (south)**: at h15
+the driver exports -4.24e7 southward while NSCBC manages only -2.06e7, and at h9
+the driver exports 2.02e7 while NSCBC *imports* 8.2e5. **NSCBC is not letting
+moisture leave through the southern boundary.**
+
+**B. Mass-weighted sub-1500 m wind over the >500 m cells:**
+
+| h | NSCBC | Davies | d02 |
+|---|---|---|---|
+| 9 | 23.40 @ 213 | 3.91 @ 249 | 11.71 @ 214 |
+| 12 | 19.34 @ 216 | 7.38 @ 279 | 12.57 @ 242 |
+| 14 | 17.54 @ 220 | 6.73 @ 285 | 11.88 @ 242 |
+| 15 | 17.76 @ 227 | 6.41 @ 291 | 11.12 @ 244 |
+| 17 | 13.46 @ 235 | 5.07 @ 295 | 11.06 @ 238 |
+
+NSCBC runs **1.5-2.0x too fast** over the ranges through exactly the h13-h17
+window, and holds a more southerly (more upslope, for the E-W Transverse Ranges)
+direction than d02, which veers to 241-244 deg. Davies has the opposite error --
+**too weak** (0.3-0.6x) and too westerly.
+
+**C. Column water vapour over the >500 m cells, ratio to d02:**
+NSCBC 0.99-1.06 through h12-h16; Davies 1.04-1.09. **Neither is holding excess
+vapour.**
+
+**Mechanism.** NSCBC has essentially the same column vapour as d02 over the
+ranges but rains 4-6x more in h14-h17. The excess is therefore neither arriving
+as extra column moisture nor being retained -- it is being *processed faster*,
+driven by a 1.5-2x upslope wind that the boundary sustains after the synoptic
+forcing has decayed. Chain: **boundary fails to spin down -> excessive low-level
+upslope flow persists -> terrain wrings it out at the arrival rate -> a
+precipitation excess with no vapour anomaly.**
+
+**Which sigma the flux implies -- and the awkward answer.** sigma is the coupling
+to the far field: sigma=1 fully driver-driven, sigma=0 fully interior-
+extrapolated. The current 0.03 is nearly free-running, which is exactly why the
+boundary does not feel the driver's decay. The flux says we need MORE coupling,
+i.e. **higher** sigma. From the item-34 sweep:
+
+| sigma | stability | placement (PM-FSS) |
+|---|---|---|
+| 0 | stable 24 h | 0.586 / 0.478 / 0.589 |
+| 0.03 | stable 24 h | 0.628 / 0.547 / 0.634 |
+| 0.1 | **FPE at 7.9 h** | -- |
+| 0.3 | **FPE at 1.9 h** | -- |
+| 1 | stable 24 h | 0.649 / 0.604 / 0.684 |
+
+**The flux behaviour implies sigma = 1** -- the only stable value with strong
+driver coupling, and already the best-placing NSCBC arm. Every intermediate value
+that would interpolate is unstable.
+
+**But the larger reading: no sigma beats a scheme already at 1.02-1.11.** Davies
+has the correct boundary behaviour today. The campaign moved to NSCBC because
+Davies died at 18 h (30p), not because NSCBC was better -- item 34 already found
+NSCBC never reaches Davies placement, and this supplies the mechanism.
+
+**Consequence: the vertical branch is NOT indicated.** The discriminator returned
+"boundary", so pbl_type=MYNN25, the w_damping sweep and the pbl=None diagnostic
+should not be run on this evidence. Recommended instead, in order:
+1. **sigma = 1, 23 h** -- one config change, known stable, maximum coupling; a
+   direct confirmation of the mechanism and possibly a usable arm.
+2. **Make Davies survive 23 h.** It already has both the faithful boundary flux
+   and the better placement; the 18-h death is the blocker, not the physics.
+
+Note Davies' own defect is now also localised: its low-level wind over the ranges
+is 0.3-0.6x d02 and too westerly, so its boundary supply is right while its
+interior response is too weak. That is a separate question from this item.
