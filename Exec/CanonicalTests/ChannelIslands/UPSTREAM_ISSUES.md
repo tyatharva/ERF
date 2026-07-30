@@ -5919,3 +5919,49 @@ and has effectively no wall band (1.72x vs 211.6x at the inflow wall). Davies
 retains a small edge only in the percentile-matched interior at low base rate --
 the same "places the envelope, produces no storm" signature as item 37, and the
 same caveat applies.
+
+## 43. ROTATION 7 IS EXONERATED. The failure is model time / accumulated history, not a frame index
+
+The confound present in every run of this campaign: with 3-hourly frames
+`idx1 = t/10800`, so idx1 first reaches 6 at exactly t = 64800 s. "Rotation 7"
+and "18 h" have therefore been the SAME EVENT in every prior run, and the record
+has consistently framed it as a count ("the failure is at rotation 7 -- a count,
+not a time").
+
+**Separated for the first time.** The converter regenerated the same day at
+HOURLY cadence (10 frames, 00-09Z), putting the [6,7] transition at t = 6 h
+instead of 18 h. Davies, same binary, same deck, cfl 0.3:
+
+    Reading weather data 21600.56055 6 7 10      <- the exact transition that kills it at 18 h
+    ...
+    Coarse STEP 25714 ends. TIME = 28800         <- ran to the 8 h stop
+    NaN = 0   FPE = 0   rotations crossed = 10   mass -0.163%
+
+**The [6,7] rotation is harmless.** Crossed at t = 6 h and the run continued for
+another 2 h and three further rotations ([7,8], [8,9] and the initial read),
+completing its window cleanly. Every one of the ten rotations was clean.
+
+**So the failure is NOT a frame-index count.** It is model time near 18 h, or the
+accumulated history that goes with it. Every hypothesis built on "what does the
+7th frame first touch" -- including the enumeration of frame-indexed allocations
+in 30p, and the allocation-churn reading in 30r/41 -- was aimed at the wrong
+variable. Item 41's elimination table stands (driving data, date, regime, frame
+grid, frame producer, step count are all still excluded); what changes is the
+surviving hypothesis, which is no longer "rotation 7 does something special".
+
+Combined with 42 (NSCBC crosses the 18 h event and completes 23 h, with the same
+FillForecastStateMultiFabs churn executing in the surviving arm), the two live
+readings are now:
+  * something in the DAVIES specified-fill / relaxation-ramp path degrades with
+    accumulated model time and becomes fatal near 18 h; and
+  * it is domain-dependent (item 40: 128x64 completed 24 h continuously).
+
+Note the step counts at failure are NOT constant either: 46,617 (ERA5, cfl 0.2)
+vs 69,876 (CONUS404, cfl 0.3), a 1.5x spread at the same model time. So it tracks
+MODEL TIME, not step count, not rotation index, not wall-clock.
+
+**The one experiment that would close this**, and it is cheap: run the hourly-frame
+Davies configuration out to 18 h (needs 20 hourly frames, ~20 min of conversion,
+~75 min of GPU). If it dies at 18 h with idx1 = 17, model time is confirmed as the
+variable and the frame index is fully eliminated. If it survives, the difference is
+the frame cadence itself and the interval becomes a workaround for the Davies path.

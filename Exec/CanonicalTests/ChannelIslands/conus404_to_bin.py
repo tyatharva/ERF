@@ -118,7 +118,9 @@ def main():
     print(f'target {len(XS)}x{len(YS)}x{len(ZS)}  z {ZS[0]:.0f}..{ZS[-1]:.0f} m '
           f'(ERF top 19003) ; source subset y{j0}..{j1} x{i0}..{i1}', flush=True)
 
-    times = [dt.datetime(2020, 12, 28) + dt.timedelta(hours=3 * k) for k in range(9)]
+    NH = int(os.environ.get("C404_FRAME_HOURS", "3"))
+    NF = int(os.environ.get("C404_NFRAMES", "9"))
+    times = [dt.datetime(2020, 12, 28) + dt.timedelta(hours=NH * k) for k in range(NF)]
     S3 = f'[{j0}:1:{j1}][{i0}:1:{i1}]'
     for t in times:
         wy = 'wy2021'; mo = t.strftime('%Y%m')
