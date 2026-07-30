@@ -355,6 +355,70 @@ record.
 
 ---
 
+## 7b. Running on a rented pod (RunPod)
+
+**Image:** `ghcr.io/tyatharva/erf-hindcast:cuda126-sm89` -- environment only, no
+ERF source (ERF is cloned by the bootstrap and bind-mounted/checked out at
+`/app/ERF`). The pod has no Docker; RunPod starts the container FROM this image
+and the scripts run natively inside it.
+
+**Hardware: sm_89 only** -- RTX 4090 / 4080 / L40S. See the Blackwell note below.
+
+```
+pod/pod_transfer.sh pack            # on the workstation -> 79 MB tarball
+scp .../erf_pod_transfer.tar.gz pod:/app/ERF/
+pod/pod_transfer.sh verify /app/ERF # on the pod, checksums
+pod/pod_bootstrap.sh                # clone, patch, build, verify, VALIDATE
+```
+
+`pod_bootstrap.sh` refuses to continue past any failure and ends in a **hard
+validation gate** (`pod/pod_validate.py`): a 20-step deterministic run compared
+against a reference measured on sm_89, with physical (not bitwise) tolerances.
+Cross-architecture bitwise equality is not expected; the gate exists to catch
+gross corruption -- wrong arch, bad codegen. If it fails, no production arm runs.
+
+It also verifies more than the CMake cache. On the Blackwell attempt the cache
+read back `CMAKE_CUDA_ARCHITECTURES=120` while AMReX actually emitted
+`compute_60..86`, so the script additionally asserts `AMREX_CUDA_ARCHS` contains
+89 and that `AMREX_USE_FLOAT` is really defined.
+
+**Four GPUs = four independent arms, not one job across four.** The standing
+constraint holds: one 23-h job per card, and score timing only from solo runs.
+
+### THE BLACKWELL (RTX 5090 / sm_120) PORT IS BLOCKED -- do not retry casually
+
+Attempted 2026-07-30 and dropped. `Dockerfile.blackwell`,
+`apply_kokkos_blackwell_patch.sh` and `Build/cmake_single_precision_cuda_blackwell.sh`
+are kept **as documentation, clearly marked non-working**. The image builds and
+is a valid environment (CUDA 12.8.1, nvcc 12.8.93 does emit `compute_120`);
+**ERF does not compile for sm_120** against the pinned submodules. Three
+independent pre-Blackwell components block it:
+
+1. **Kokkos 4.5 `cmake/kokkos_arch.cmake`** -- CUDA arch list ends at
+   `HOPPER90`/sm_90; no Blackwell option. With none set, Kokkos auto-detects
+   from the BUILD machine's GPU, so a wrong-arch Kokkos would be produced
+   silently. (`apply_kokkos_blackwell_patch.sh` fixes this one -- necessary, not
+   sufficient.)
+2. **Kokkos 4.5 `core/src/impl/Kokkos_NvidiaGpuArchitectures.hpp`** -- the
+   `KOKKOS_ARCH_* -> KOKKOS_IMPL_ARCH_NVIDIA_GPU` chain also ends at
+   `HOPPER90`, then `#error NVIDIA GPU arch not recognized`. Configure succeeds;
+   every Kokkos translation unit then fails to compile.
+3. **AMReX routes `AMReX_CUDA_ARCH` through `cuda_select_nvcc_arch_flags`** from
+   CMake's **deprecated** `FindCUDA/select_compute_arch`. CMake 4.4.1's copy
+   knows 9.0 and 10.0 but **not 12.0**, so it does not error -- it silently falls
+   back to a "common" list. Measured: cache said 120/12.0, nvcc got
+   `compute_60,61,70,75,80,86`, `AMREX_CUDA_ARCHS=60;61;70;75;80;86`.
+
+**All three are the same silent-failure class this campaign keeps hitting: the
+knob reads back correct and the wrong thing happens underneath.** Only #2
+announced itself. #3 was caught only by reading the emitted nvcc flags instead
+of trusting the cache -- the same discipline as item 46.
+
+Patching through would require patching **AMReX**, which `validated_config.txt`
+requires to be clean for any scored run. **The honest route is bumping AMReX and
+Kokkos to versions with native Blackwell support, and that is a re-validation
+project, not a config change.**
+
 ## 8. Standing constraints
 
 - **No upstream activity.** Do not file issues, open PRs, or comment on

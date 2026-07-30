@@ -1,0 +1,137 @@
+# ============================================================================
+# *** DOES NOT PRODUCE A WORKING ERF BUILD. KEPT AS DOCUMENTATION ONLY. ***
+#
+# This image BUILDS and is a valid environment (CUDA 12.8.1, nvcc 12.8.93 which
+# does emit compute_120). ERF ITSELF DOES NOT COMPILE FOR sm_120 against the
+# pinned submodules. Three independent pre-Blackwell components block it:
+#
+#   1. Kokkos 4.5 cmake/kokkos_arch.cmake -- CUDA arch list ends at
+#      HOPPER90/sm_90; no Blackwell option. (Worked around by
+#      apply_kokkos_blackwell_patch.sh -- necessary but NOT sufficient.)
+#   2. Kokkos 4.5 core/src/impl/Kokkos_NvidiaGpuArchitectures.hpp -- the
+#      KOKKOS_ARCH_* -> KOKKOS_IMPL_ARCH_NVIDIA_GPU chain also ends at
+#      HOPPER90, then `#error NVIDIA GPU arch not recognized`. Configure
+#      succeeds; every Kokkos translation unit then fails to compile.
+#   3. AMReX routes AMReX_CUDA_ARCH through cuda_select_nvcc_arch_flags from
+#      CMake's DEPRECATED FindCUDA/select_compute_arch module. CMake 4.4.1's
+#      copy knows 9.0 and 10.0 but not 12.0, so it does not error -- it
+#      SILENTLY falls back to a "common" list. Measured result: the cache reads
+#      CMAKE_CUDA_ARCHITECTURES=120 and AMReX_CUDA_ARCH=12.0 while the actual
+#      nvcc flags were compute_60,61,70,75,80,86 and
+#      AMREX_CUDA_ARCHS=60;61;70;75;80;86. No compute_120 anywhere.
+#
+# All three are the same silent-failure class this campaign keeps hitting: the
+# knob reads back correct and the wrong thing happens underneath. Only #2
+# announced itself; #3 was caught by reading the emitted nvcc flags rather than
+# trusting the CMake cache.
+#
+# Patching through would require patching AMReX, which validated_config.txt
+# requires to be CLEAN for any scored run. The honest route is bumping AMReX and
+# Kokkos to versions with native Blackwell support -- that is a RE-VALIDATION
+# PROJECT, not a config change.
+#
+# DECISION (2026-07-30): dropped in favour of sm_89 hardware (4x RTX 4090),
+# which needs no patches and keeps the pinned submodules clean.
+# ============================================================================
+# ============================================================================
+# ERF Channel Islands hindcast environment -- BLACKWELL (RTX 5090, sm_120)
+#
+# Self-contained: reproduces the ad-hoc `erf-env` base (which has no Dockerfile
+# in this repo) on a CUDA 12.8 base, then adds the hindcast layer. CUDA 12.6.2
+# predates Blackwell and its nvcc cannot emit compute_120; 12.8's can
+# (verified: `nvcc --list-gpu-arch` includes compute_120).
+#
+# Build:  docker build -t erf-hindcast-blackwell -f Dockerfile.blackwell .
+# Run:    docker run --rm --gpus all -v ~/ERF:/app/ERF \
+#             -v ~/.cdsapirc:/root/.cdsapirc:ro -w /app/ERF erf-hindcast-blackwell <cmd>
+# NOTE: the CDS key is mounted read-only at runtime -- never baked into a layer.
+#
+# Everything except the CUDA version is byte-identical to the sm_89 image:
+# same MPICH 4.2.2, HDF5 1.14.4-3, NetCDF-C 4.9.2, gcc-12, same Python deps.
+#
+# The GPU architecture is NOT set here -- it is set by
+# Build/cmake_single_precision_cuda_blackwell.sh at configure time.
+# See that script and apply_kokkos_blackwell_patch.sh for the Kokkos caveat.
+# ============================================================================
+FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ---- toolchain (matches erf-env) ----
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        g++-12 gcc-12 gfortran-12 git libtool make tar autoconf automake wget python3 \
+        libfftw3-dev zlib1g-dev libcurl4-openssl-dev m4 \
+        ca-certificates gpg && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---- CMake from Kitware ----
+RUN wget -qO - https://apt.kitware.com/keys/kitware-archive-latest.asc | \
+      gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg && \
+    echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ jammy main' \
+      > /etc/apt/sources.list.d/kitware.list && \
+    apt-get update && apt-get install -y --no-install-recommends cmake && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---- MPICH ----
+RUN wget -q https://www.mpich.org/static/downloads/4.2.2/mpich-4.2.2.tar.gz && \
+    tar xzf mpich-4.2.2.tar.gz && cd mpich-4.2.2 && \
+    ./configure CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 F77=/usr/bin/gfortran-12 FC=/usr/bin/gfortran-12 \
+      --with-device=ch3 --disable-fortran-bindings-check && \
+    make -j$(nproc) && make install && ldconfig && \
+    cd .. && rm -rf mpich-4.2.2 mpich-4.2.2.tar.gz
+
+# ---- HDF5 (parallel) ----
+RUN wget -q https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.14/hdf5-1.14.4/src/hdf5-1.14.4-3.tar.gz && \
+    tar xzf hdf5-1.14.4-3.tar.gz && cd hdf5-1.14.4-3 && \
+    CC=/usr/local/bin/mpicc ./configure --prefix=/usr/local --enable-parallel --enable-build-mode=production && \
+    make -j$(nproc) && make install && ldconfig && \
+    cd .. && rm -rf hdf5-1.14.4-3 hdf5-1.14.4-3.tar.gz
+
+RUN apt-get update && apt-get install -y --no-install-recommends libxml2-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---- NetCDF-C (parallel) ----
+RUN wget -q https://downloads.unidata.ucar.edu/netcdf-c/4.9.2/netcdf-c-4.9.2.tar.gz && \
+    tar xzf netcdf-c-4.9.2.tar.gz && cd netcdf-c-4.9.2 && \
+    CC=/usr/local/bin/mpicc CPPFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib \
+      ./configure --prefix=/usr/local --enable-parallel4 --disable-dap && \
+    make -j$(nproc) && make install && ldconfig && \
+    cd .. && rm -rf netcdf-c-4.9.2 netcdf-c-4.9.2.tar.gz
+
+ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+
+# ---- hindcast layer (identical to Dockerfile) ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python3 -m pip install --no-cache-dir \
+        cdsapi xarray cfgrib eccodes netCDF4 numpy scipy pandas \
+        pyproj rasterio mpi4py matplotlib \
+        h5netcdf bottleneck pydantic f90nml click ussa1976 cartopy \
+        herbie-data pygrib tqdm python-dateutil yt
+
+RUN git clone --depth 1 https://github.com/erf-model/erftools.git /opt/erftools
+COPY erftools_eccodes_compat.py /opt/erftools_eccodes_compat.py
+RUN python3 /opt/erftools_eccodes_compat.py /opt/erftools
+COPY erftools_fal_patch.py /opt/erftools_fal_patch.py
+RUN python3 /opt/erftools_fal_patch.py /opt/erftools
+ENV ERFTOOLS_HOME=/opt/erftools PYTHONPATH=/opt/erftools
+RUN python3 -c "import erftools.preprocessing; print('erftools import OK')"
+
+# ---- environment (MUST match erf-env) ----
+# These are load-bearing and were nearly missed: `docker history` renders ENV as
+# 0-byte `#(nop)` lines, so reconstructing the base from history alone drops
+# them silently. Without FC, ekat's `enable_language(Fortran)` fails at configure
+# time -- there is no unversioned /usr/bin/gfortran in this image, only
+# gfortran-12, so CMake cannot find a Fortran compiler on its own.
+ENV CC=mpicc \
+    CXX=mpicxx \
+    FC=mpif90 \
+    HDF5_ROOT=/usr/local \
+    NETCDF_DIR=/usr/local \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+
+WORKDIR /app/ERF
