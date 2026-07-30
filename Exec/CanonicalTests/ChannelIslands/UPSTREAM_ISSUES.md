@@ -5787,3 +5787,50 @@ Levers, measured not guessed:
   from the current 24-h logs: 359 calls, intervals min 180.0 / median 180.7 /
   max 181.6 s. The fix did raise the call count ~1.4x versus the broken 255 s
   cadence, worth ~1% of wall.
+
+## 41. 30p RECURS on CONUS404 driving -- driving data, date and event are all eliminated
+
+Davies, 2020-12-28, CONUS404-driven, cfl 0.3, `real_width=10`. Died at
+
+    Reading weather data 64800.10547 6 7 9
+    Reading surface data 64800.10547 6 7 9
+    Coarse STEP 69876 ends. TIME = 64800.10671 DT = 0.8675203919
+    Erroneous arithmetic operation
+
+**Same rotation, same model time, everything else different.** Against the ERA5
+Jan-9-2023 case:
+
+| | ERA5 Jan-9 2023 | CONUS404 Dec-28 2020 |
+|---|---|---|
+| death time | 64801.05 / 64801.07 s | **64800.11 s** |
+| death step | 46617 / 46632 | **69876** |
+| rotation | `6 7 9` | `6 7 9` |
+| cfl | 0.2 | 0.3 |
+| driving data | ERA5 0.25 deg via erftools | CONUS404 4 km via our converter |
+| frame grid | 40 x 22 x 38 | 118 x 71 x 46 |
+| event | atmospheric river | winter soaker |
+| dt at death | ~1.19 | 0.868 |
+| mass over the leg | -- | +0.014% (1.588663e15 -> 1.588892e15) |
+
+The prediction stated before the run held exactly. What this ELIMINATES, none of
+which was previously ruled out: the driving dataset, the frame producer
+(erftools vs our converter), the frame grid dimensions (nx,ny,nz all changed),
+the frame content, the date, the meteorological regime, the timestep size, and
+the step count (69,876 vs 46,617 -- so it is not an accumulated-step-count
+threshold either).
+
+What it does NOT eliminate, and now stands almost alone: the rotation machinery
+in `ERF_WeatherDataInterpolation` and the allocation churn it performs. Note that
+with 3-hourly frames "rotation 7" and "18 h" are the SAME event by construction
+(`idx1 = t / 10800`, so idx1 = 6 first occurs at t = 64800), so this run cannot
+separate them. **Emitting hourly frames would separate them for the first time**
+-- rotation 7 would fall at t = 6 h -- and the converter can do that with a
+one-line change. That is the cheapest remaining discriminator and it needs no
+model change at all.
+
+Combined with 40 (the failure post-dates the 192x96 domain change and 128x64 runs
+crossed rotation 7 and survived) the surviving hypothesis is narrow: something in
+the rotation path that is sensitive to the 192x96 allocation layout.
+
+Per instruction the run was NOT restart-bracketed. It reached 18 h of the 23 h
+window, so hours 0-18 are available for scoring; plotfiles through plt69876.
