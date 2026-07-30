@@ -6582,3 +6582,91 @@ horizontal mixing closed on evidence (48), microphysics scheme swap rejected
 untested levers are the vertical (MYNNEDMF behaviour over steep terrain, and the
 w-damping/sponge configuration) rather than the horizontal or the hydrometeor
 scheme. That is a new mechanism hunt and needs a decision before it starts.
+
+## 50. The orographic bias is GENUINE AND STEADY, not a spin-up transient -- but it is accumulated in a specific window, and the real defect is a failure to DECAY
+
+Free re-analysis of existing output, no runs. Hours 5-23 re-accumulated for all
+four fields, each differenced in its own native accumulation.
+
+**Controls first.** The h1-23 reconstruction of each reference reproduces the
+checked-in full-period array to **0.00%** of the mean (d02 0.376 vs 0.376 in;
+MRMS 0.300 vs 0.300 in), so the windowing is right and the split is meaningful.
+
+**The spin-up hours are real but small.** LAND mean rate, mm/h:
+
+| h | Morrison | WSM6 | d02 | MRMS |
+|---|---|---|---|---|
+| 1 | 0.540 | 0.926 | 0.000 | 0.000 |
+| 2 | 0.553 | 0.748 | 0.000 | 0.000 |
+| 3 | 0.242 | 0.290 | 0.000 | 0.000 |
+| 4 | 0.247 | 0.389 | 0.005 | 0.002 |
+
+Morrison's h1-4 land total is 1.58 mm against a 23-h land total of 42.87 mm --
+**3.7%**. The references carry essentially nothing in that window, so removing it
+moves the numerator by ~4% and the denominator by ~0%.
+
+**Result: the bias holds.**
+
+| metric | Morrison h1-23 | Morrison **h5-23** | WSM6 h1-23 | WSM6 **h5-23** |
+|---|---|---|---|---|
+| >500 m bias vs d02 | 2.21x | **2.13x** | 2.92x | **2.80x** |
+| >500 m bias vs MRMS | 2.57x | **2.48x** | 3.41x | **3.27x** |
+| 100-500 m vs d02 | 1.48x | 1.43x | 2.00x | 1.93x |
+| flat <100 m vs d02 | 0.74x | 0.68x | 1.00x | 0.93x |
+| Santa Ynez (in) | 6.07 | **6.02** | 9.98 | **9.69** |
+| domain max (in) | 17.47 | **16.88** | 34.66 | **33.58** |
+
+References, h5-23: d02 Santa Ynez 1.89 / max 3.03 / LAND mean 0.957 in;
+MRMS 2.61 / 2.61 / 0.878 in.
+
+**So it is genuine and steady. By the stated decision rule the vertical levers
+become the next question -- but the hour-by-hour view says the framing
+"over-intensification" is wrong, and points somewhere more specific.**
+
+**The excess is NOT a uniform multiplier. It is a failure to shut off.**
+LAND mean rate mm/h, with the >500 m bias vs d02:
+
+| h | Morrison | d02 | MRMS | Morrison >500 bias |
+|---|---|---|---|---|
+| 7 | 1.839 | 1.129 | 0.783 | **0.82** |
+| 8 | 2.259 | 1.908 | 1.453 | **0.91** |
+| 9 | 2.960 | 1.876 | 1.788 | 1.63 |
+| 10 | 2.696 | 2.218 | 1.986 | 1.52 |
+| 11 | 2.528 | 2.110 | 1.866 | 1.65 |
+| 12 | 2.021 | 1.528 | 1.239 | 2.21 |
+| 13 | 1.928 | 1.195 | 0.861 | 2.65 |
+| 14 | 2.345 | **0.602** | 0.951 | **5.83** |
+| 15 | 2.715 | **0.807** | 0.939 | **6.00** |
+| 16 | 2.578 | 1.115 | 0.970 | **4.72** |
+| 17 | 2.361 | 1.204 | 0.739 | **4.00** |
+| 20 | 1.891 | 1.184 | 1.244 | 1.95 |
+| 23 | 2.536 | 1.296 | 1.739 | 2.29 |
+
+**During the storm's main period (h7-h11) the model is essentially unbiased over
+the high terrain -- 0.82x, 0.91x, then 1.5-1.65x.** The excess is accumulated in
+**h13-h17**, where d02 falls from 1.195 to 0.602 mm/h and MRMS from 0.861 to
+0.951, while ERF *rises* from 1.928 to 2.715. Both references show the system
+weakening over the ranges after h12; ERF does not.
+
+Cumulative >500 m bias vs d02, accumulating from h5: 0.98 (through h8), 1.25,
+1.40, 1.50, 1.60, **1.79, 2.00, 2.15, 2.24** (h17), then flat-to-declining --
+2.24, 2.22, 2.17, 2.12, **2.13** (h23). The entire bias is built between h13 and
+h17 and merely persists afterwards.
+
+**Reframing: this is not orographic over-intensification. The model gets the
+orographic response approximately right while the system is being forced, and
+then fails to spin it down when the forcing weakens.** WSM6 shows the identical
+temporal structure at larger amplitude (h14 7.28x, h15 6.91x), which is why a
+microphysics swap could not fix it -- the scheme sets the amplitude, not the
+persistence.
+
+**Consequence for the next step.** A steady-state closure defect (mixing,
+microphysics, terrain) would produce a roughly constant multiplier; this does
+not. What does fit is something that keeps supplying moist upslope flow after the
+synoptic forcing has gone -- which makes the lateral boundary and the low-level
+moisture flux the natural suspects, and connects to the already-documented
+near-wall pathology (fetch-binned bias 1.79x at the inflow walls, item 49).
+That is a different hunt from the vertical-mixing one, and it is cheap to start:
+the hourly inflow moisture flux is derivable from output already on disk.
+
+No runs, no config changes. Awaiting a decision before starting anything.
