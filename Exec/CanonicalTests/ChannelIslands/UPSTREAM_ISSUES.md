@@ -6105,3 +6105,64 @@ So the outstanding NSCBC defect is orographic over-intensification, worst above
 walls. Neither is a mass-controller artifact. Figures:
 `c404_dumax_fields_0-3in.png`, `c404_dumax_fields_0-12in.png` (matched to
 `c404_18h_fields_0-3in.png`).
+
+## 45. BLOCKED: ERF's Smagorinsky2D is unstable in this configuration at every Cs tested
+
+The manifest flagged this as open -- "[OPEN, flagged in audit item 4] no LES
+closure at 3 km ... 3 km is grey-zone ... Revisit after step 7" -- and the
+remaining defect (44) is orographic, so horizontal subgrid mixing is the right
+next lever. It does not run.
+
+**The configuration is correct and ERF confirms it.** `erf.les_type=Smagorinsky2D`
+with MYNNEDMF prints exactly the intended pairing:
+
+    Selected a PBL model and an LES model: Using PBL for vertical transport, LES for horizontal
+    Turning off mix_isotropic for 2-D Smagorinsky
+    Using 2D Smagorinsky LES model at level 0
+
+ERF *requires* the 2-D form with a PBL model (it errors otherwise), which is the
+correct grey-zone choice at dx/dz = 150.
+
+**Cs has no default and 0.25 is the reference-matched value.** `Cs = 0` in
+ERF_TurbStruct.H and ERF errors "Need to specify Cs for Smagorsinky LES", so the
+coefficient must be chosen. Read from the references rather than guessed: **both**
+wrfout d02 (1.5 km) and CONUS404 d01 (4 km) run `DIFF_OPT=2, KM_OPT=4` -- WRF's
+2-D horizontal Smagorinsky, default `c_s = 0.25`. And ERF's formulation is
+identical in form: with `mix_isotropic` forced off, `DeltaH = sqrt(dx*dy)` and
+`nu_h = Cs^2 * DeltaH^2 * |S|`, the same as WRF's `KM_OPT=4`. So 0.25 transfers
+exactly. At 3 km that is nu_h ~ 5.6e5*|S|, about 560 m2/s at typical strain.
+
+**It dies at every Cs, with time-to-death monotone in Cs:**
+
+| Cs | died at step | model time | first NaN cell |
+|---|---|---|---|
+| 0.25 | 7 | 2.4 s | (0,4,8) |
+| 0.20 | 10 | 4.0 s | (0,95,1) |
+| 0.15 | 30 | 14.4 s | (0,20,27) |
+| 0.10 | 140 | 145 s | (32,10,7) |
+| 0.05 | 150 | 259 s | (0,20,27) |
+
+**Not a diffusion CFL violation.** The explicit horizontal-diffusion limit here is
+dt < dx^2/(4*nu_h) = 4/|S| seconds; at dt = 0.44 s that needs |S| > 9 s^-1, a
+27,000 m/s velocity difference across a cell. Nothing near that exists.
+
+**Not boundary-scheme specific.** Davies fails too, at step 10 with the first NaN
+at (118,95,1) -- the yhi wall -- against NSCBC's step 7 at (0,4,8), the xlo wall.
+Four of the five first-NaN locations sit ON a lateral wall (i=0 or j=95).
+
+**Not a tunable stability margin.** Lowering Cs only postpones it: 7 -> 10 -> 30
+-> 140 -> 150 steps. Every arm still goes fully non-finite (884,736 cells at
+Cs = 0.15 and 0.05). This is the same signature as the intermediate-sigma NSCBC
+failures (34): monotone in the coefficient, fatal at every value, which reads as a
+defect the coefficient paces rather than a stability limit it crosses.
+
+**Consequence: the horizontal-mixing lever cannot be exercised until this is
+fixed.** Shrinking Cs further is not a workaround -- by the trend it would still
+fail, and a coefficient far below what both reference models use would not be a
+meaningful test of the hypothesis anyway. The orographic over-intensification
+(44: 2.22x above 500 m, 6x at the domain max) therefore stands unaddressed, and
+the natural next step is a diagnosis of the Smagorinsky2D lateral-boundary path
+rather than another parameter sweep.
+
+Not committed to the deck or manifest: `erf.les_type` remains `"None"` and the
+manifest MUST line is unchanged, since nothing here validates a new value.
