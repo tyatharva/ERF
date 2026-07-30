@@ -6403,6 +6403,52 @@ evidential rather than a blocked mechanism.**
 - The "clean" runs are 500 steps ~ 9.4 model minutes. A 23-h arm is ~80,000
   steps. These results bound instability, they do not establish stability.
 
+**AMENDMENT (source re-check, no runs). The guard is about FILTER WIDTH, not
+double-counting -- and it was never the blocker.**
+
+*(a) No double-counting is possible, and my "3-D would replace the vertical
+closure" reasoning above was wrong.* Every PBL scheme writes
+`K_turb(i,j,k,EddyDiff::Mom_v)` with **plain assignment, never `+=`** --
+`ERF_ComputeDiffusivityMYNNEDMF.cpp:4410`, `MYNN25.cpp:259`, `MYJ.cpp:347`,
+`YSU.cpp:205/229/235`, `MRF.cpp:249/288`. For MYNNEDMF that write sits in a
+`ParallelFor` over `mfi.growntilebox(1)` (line 4227), i.e. the **full column, not
+limited to PBL depth, with no gating conditional**. The PBL block runs AFTER the
+LES block on the same MultiFab in `ComputeTurbulentViscosity`. So the PBL
+overwrites the LES vertical viscosity entirely; **only `Mom_h` survives from the
+LES**, exactly as ERF's "PBL for vertical transport, LES for horizontal" message
+claims. Running 3-D past the guard would NOT replace the vertical closure -- the
+PBL would still own vertical.
+
+*(b) What the guard actually protects is `DeltaH`.* `mix_isotropic` is the only
+other thing `smag2d` changes:
+
+| | `DeltaH` | at this deck |
+|---|---|---|
+| 2-D (`mix_isotropic=false`) | `sqrt(dx*dy)` | **3000 m** -- the horizontal filter width |
+| 3-D (`mix_isotropic=true`) | `cbrt(dx*dy*dz)` | **~500 m** -- contaminated by dz |
+
+Since only `Mom_h` survives, 3-D past the guard is arithmetically **a relabeled
+low-Cs 2-D run** at ~1/36 the viscosity, carrying a filter width that is
+physically wrong for horizontal mixing at dx >> dz. A worse configuration, not a
+workaround.
+
+*(c) The guard was never the binding constraint.* The reference configuration --
+2-D at Cs = 0.25, matching d02 and CONUS404's `KM_OPT=4` -- **is permitted by
+ERF**. It fails at step 16 anyway. And 2-D with NO PBL model at all dies at
+Cs = 0.04. So the viscosity threshold in the table above is what closes this, not
+the configuration guard.
+
+*(d) Guard scope.* `AMREX_ENUM(PBLType, None, MYJ, MYNN25, MYNNEDMF, YSU, MRF,
+SHOC)`. The guard is inside `if (pbl_type != PBLType::None)` and does not
+discriminate by scheme: **only `pbl_type = None` clears it**; MYJ, MYNN25,
+MYNNEDMF, YSU, MRF and SHOC are all refused. `MYNN25` and `MYNNEDMF` are genuinely
+distinct `pbl_type` values with separate implementations (277 vs 4428 lines), not
+one implementation with an EDMF sub-option; the guard treats them identically.
+From the same block, `Deardorff` is also hard-errored with any PBL scheme
+(`AMREX_ENUM(LESType, None, Smagorinsky, Smagorinsky2D, Deardorff)`), so
+**`Smagorinsky2D` is the only LES closure ERF permits alongside any PBL scheme --
+and it is unusable at reference coefficients.**
+
 **Not committed to the deck or manifest:** `erf.les_type` stays `"None"`.
 
 **The orographic over-intensification (44) therefore passes to microphysics
