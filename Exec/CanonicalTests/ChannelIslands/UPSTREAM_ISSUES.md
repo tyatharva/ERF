@@ -6324,3 +6324,87 @@ terrain rough, and it is not the source of the orographic bias.
 **Consequence: the LES / microphysics path stands as the remaining explanation**
 for the orographic over-intensification, and the horizontal-mixing lever is still
 blocked behind item 46.
+
+## 48. Smagorinsky closed on evidence: 3-D is REFUSED with a PBL model, both formulations fail above a common horizontal-viscosity threshold, and the NaN is real
+
+Follow-on to 45/46. All runs on the production CONUS404 deck, clean HEAD build,
+`max_step = 500`, plot/check off.
+
+**1. ERF REFUSES 3-D Smagorinsky with any PBL model. It does not warn, and it
+cannot silently double-count.** `ERF_TurbStruct.H:115-118`, inside
+`if (pbl_type != PBLType::None)`:
+
+    if (les_type == LESType::Smagorinsky) {
+      if (!smag2d)
+        amrex::Error("If using Smagorinsky with a PBL model, the 2-D "
+                     "formulation should be used");
+    }
+
+`Smagorinsky2D` maps to `les_type = Smagorinsky, smag2d = true` at line 92-95, so
+the guard fires on exactly 3-D + PBL. Confirmed at runtime: the arm aborts at
+step 0 with that message. **So the double-counting concern is answered by
+construction -- the combination is unreachable, not silently permitted.**
+
+**2. The MetGrid / WPS_Test precedent does not transfer.** Neither
+`RegTests/MetGrid/inputs_metgrid` nor `RegTests/WPS_Test/inputs_wps` sets
+`erf.pbl_type` at all, so both run with `pbl_type = None`, which is the only
+reason they clear the guard above. They are also at Cs = 0.1 and **Cs = 0.005**
+respectively -- the second is 50x below the reference-model value, which is itself
+a hint at the threshold below.
+
+**3. 3-D is NOT immune -- it fails too, at higher Cs. The defect is not specific
+to the 2-D path.**
+
+| LES | PBL | Cs | last step | model time | outcome |
+|---|---|---|---|---|---|
+| 2-D | None | 0.002 | 500 | 563.6 s | clean |
+| 2-D | None | 0.01 | 500 | 563.4 s | clean |
+| 2-D | None | 0.04 | 151 | 214.7 s | SIGFPE |
+| 2-D | None | 0.10 | 19 | 8.8 s | SIGFPE |
+| 3-D | None | 0.10 | 500 | 552.6 s | clean |
+| 3-D | None | 0.25 | 24 | 15.3 s | SIGFPE |
+| 2-D | MYNNEDMF | 0.10 | 246 | 192.0 s | SIGFPE |
+| 2-D | MYNNEDMF | 0.25 | 16 | -- | SIGFPE |
+| 3-D | MYNNEDMF | any | 0 | -- | REFUSED |
+
+**4. It is a threshold in horizontal eddy viscosity, common to both
+formulations.** `nu_h = Cs^2 * DeltaH^2 * |S|`, and DeltaH differs by
+construction: 2-D uses `sqrt(dx*dy) = 3000 m`, 3-D uses `cbrt(dx*dy*dz) ~ 500 m`
+near the surface on this stretched grid. That is a ~36x ratio in `DeltaH^2` at
+equal Cs. Normalizing, the 2-D stable/unstable window (0.01 lives, 0.04 dies) and
+the 3-D window (0.10 lives, 0.25 dies) **overlap**. The apparent "2-D is broken,
+3-D is fine" is a Cs-normalization artifact, not a code-path difference.
+
+This revises 45's "not a tunable stability margin". It IS a threshold; 45 could
+not see it because it swept Cs within one formulation only, where DeltaH is
+constant and the threshold looks like "fails at every value".
+
+**5. The PBL only paces it.** 2-D at Cs = 0.10 dies at step 19 without a PBL model
+and step 246 with MYNNEDMF. MYNNEDMF's vertical mixing delays the blowup by ~13x
+in steps but does not prevent it, and its presence is not required to produce it.
+
+**6. The NaN is real, not just the FPE alarm.** Re-run of the 2-D Cs = 0.10
+no-PBL arm with `amrex.fpe_trap_invalid = 0` and `check_for_nans_int = 1`: same
+death step (19), and the NaN checker reports **262,704 NaN cells in every state
+component (comps 0-14)**. The field is already globally non-finite when detected.
+The FPE trap is reporting a genuine blowup, not tripping on a benign operation.
+
+**Consequence: there is no usable horizontal-mixing lever, and the reason is now
+evidential rather than a blocked mechanism.**
+- The reference-matched value (Cs = 0.25, 2-D, as d02 and CONUS404 both use for
+  `KM_OPT=4`) sits ~25x above the 2-D stability threshold in Cs, i.e. ~600x in
+  viscosity.
+- The largest stable 2-D value is between Cs 0.01 and 0.04. At 0.01 that is
+  ~1/600 of the reference viscosity -- physically negligible against a 2.22x
+  orographic bias, so running it would not test the hypothesis.
+- 3-D at a stable Cs = 0.1 is reachable ONLY by deleting MYNNEDMF. That replaces
+  the vertical closure rather than adding a horizontal one, so it is a different
+  model, not a lever, and it would confound the orographic comparison outright.
+- The "clean" runs are 500 steps ~ 9.4 model minutes. A 23-h arm is ~80,000
+  steps. These results bound instability, they do not establish stability.
+
+**Not committed to the deck or manifest:** `erf.les_type` stays `"None"`.
+
+**The orographic over-intensification (44) therefore passes to microphysics
+(WSM6), with terrain exonerated (47), du_max exonerated (44), and horizontal
+mixing closed here.**
