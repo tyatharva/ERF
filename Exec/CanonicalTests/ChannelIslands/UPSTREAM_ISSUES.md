@@ -5625,3 +5625,70 @@ construction and should carry the like-for-like comparison.
 
 **Verdict: proceed to Step 1.** No blocker. The two caveats are scoring-design
 issues, not data problems.
+
+### 39a. wrfout d02 validated against MRMS over land: USABLE as a reference, with two limits
+
+**Time convention, both sides, stated before comparing.**
+MRMS Pass-2 `..._01H_..._HHMMSS` is a PAST-HOUR accumulation valid at its stamp,
+so file `-010000` covers 00:00-01:00 and `-230000` covers 22:00-23:00. The 23
+staged files therefore sum to exactly **00:00Z -> 23:00Z**. The wrfout carries 24
+hourly stamps `2020-12-28_00:00:00 .. _23:00:00` and RAINNC is a RUN-TOTAL
+(non-zero at t0: mean 15.7 mm, so the run started before our window), so the
+window accumulation is the difference between the last and first stamps -- also
+exactly **00:00Z -> 23:00Z**. Identical periods, no offset.
+
+**The bucket had to be handled.** `BUCKET_MM = 100` and `I_RAINNC` is live:
+RAINNC wraps at 100 mm. Total = `RAINNC + 100*I_RAINNC`. A naive `RAINNC(23) -
+RAINNC(0)` gives **517 cells at -99.8 mm**; bucket-corrected the field is
+min 0.000, max 78.75, mean 4.114 mm. `RAINC = RAINSH = 0` everywhere, as expected
+for a 1.5 km convection-permitting nest, so grid-scale precipitation is the whole
+signal.
+
+**Regridding** is an area-average of the 1.5 km field into our 3 km cells (median
+4 source cells per target, all 18432 targets filled), not nearest-neighbour
+sampling, which would have thrown away half the information. Conservation check:
+d02 mean over our box 9.526 mm vs regridded 9.554 mm (0.3%).
+
+**Agreement over land:**
+
+| mask | bias | PCC | RMSE | FSS 15 mm (3->60 km) | FSS 30 mm (3->60 km) |
+|---|---|---|---|---|---|
+| all land, n=2831 | **1.09x** | **0.756** | 9.03 mm | 0.912 -> 0.989 (useful 0.866) | 0.535 -> 0.857 (useful 0.604) |
+| interior land, n=509 | **0.93x** | **0.773** | 6.66 mm | 0.902 -> 0.989 (useful 0.899) | 0.286 -> 0.829 (useful 0.562) |
+
+FSS clears the believability threshold at 1, 5 and 15 mm at **every** scale on
+both masks. The 30 mm rung clears from 9 km (all land) / 15-30 km (interior land).
+
+**The disagreement is AMPLITUDE IN THE TAIL, not placement.** Quantiles over land
+(mm): wrfout 5.20/15.68/23.75/32.51/40.22/60.62 against MRMS
+8.90/14.50/23.10/28.90/34.00/45.91 at q10/25/50/75/90/99 -- the middle matches
+closely and the **upper tail overshoots** (q99 60.6 vs 45.9, land max 77.0 vs
+66.3) while the low end undershoots. 76% of land cells agree within 10 mm; of the
+9.1% that disagree by more than 15 mm, **244 of 258 are wrfout-wetter**, at median
+wall-distance d = 8, i.e. concentrated on the northern coastal ranges. PCC 0.76
+and FSS >= 0.9 at 1/5/15 mm say the pattern is right; the 30 mm weakness at 3 km
+that recovers by 30-60 km says the heaviest cells are slightly displaced and too
+intense -- the familiar convection-permitting over-intensification of orographic
+peaks. Interior-core spectral ratio wrfout/MRMS 8-19 km = 1.677 (68% more
+small-scale variance), though that core includes ocean and so partly measures the
+artifact under test.
+
+Figures: `figs/wrf_vs_mrms_0-12in.png`, `figs/wrf_vs_mrms_0-3in.png`.
+
+**Verdict: usable as a full-domain reference.** Over land it is within 9% in the
+mean, correlates at 0.76, and is believable at 1/5/15 mm at all scales.
+
+**Limit 1, as required: offshore trust is extrapolation, not measurement.** The
+validation could only be done over land (2831 of 18432 cells, 15% of the box).
+Nothing here measures wrfout's skill over the ocean, which is 85% of the domain
+and the region the reference is wanted for. The land result makes offshore
+plausible; it does not make it verified.
+
+**Limit 2, structural: d02 cannot be both the reference and an arm.** Step 3
+lists wrfout d02 as the nesting counterfactual. If it is also the reference it
+scores 1.0 against itself by construction and the arm is degenerate. These must
+be separate tables: MRMS-over-land as truth with d02 as an arm, OR d02 as a
+full-domain reference with d02 excluded from the arms. Scoring ERF against d02
+also measures agreement with a different model -- ERA5-driven WRF at 1.5 km,
+carrying its own wet tail and +68% small-scale variance -- not skill against
+observations.
