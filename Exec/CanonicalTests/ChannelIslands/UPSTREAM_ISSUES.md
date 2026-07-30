@@ -5965,3 +5965,70 @@ Davies configuration out to 18 h (needs 20 hourly frames, ~20 min of conversion,
 ~75 min of GPU). If it dies at 18 h with idx1 = 17, model time is confirmed as the
 variable and the frame index is fully eliminated. If it survives, the difference is
 the frame cadence itself and the interval becomes a workaround for the Davies path.
+
+### 42a. Full 0-18 h analysis: the Davies excess is PRESENT FROM HOUR 1, not developed
+
+d02 accumulation contract re-verified: stamps index 0 = `2020-12-28_00:00:00`,
+index 18 = `2020-12-28_18:00:00`, last-minus-first, `BUCKET_MM = 100` applied to
+517 wrapped cells (naive differencing gives min -99.835 mm, corrected min 0.000).
+`RAINC` = 0 over the window. MRMS = 18 past-hour files valid 01Z..18Z. Identical
+periods on all four fields.
+
+**Bulk (mm), all four on our grid:**
+
+| mask | field | mean | bias | PCC | RMSE | MAE |
+|---|---|---|---|---|---|---|
+| full | d02 | 7.90 | -- | -- | -- | -- |
+| full | Davies | 41.59 | **5.26x** | **-0.016** | 131.74 | 39.16 |
+| full | NSCBC | 11.51 | 1.46x | **0.590** | 17.44 | 8.66 |
+| interior | d02 | 6.82 | -- | -- | -- | -- |
+| interior | Davies | 5.98 | 0.88x | 0.434 | 8.02 | 5.28 |
+| interior | NSCBC | 7.92 | 1.16x | 0.290 | 7.98 | 6.03 |
+| LAND | d02 | 17.79 | -- | -- | -- | -- |
+| LAND | Davies | 60.15 | 3.38x | 0.031 | 157.98 | 54.71 |
+| LAND | NSCBC | 31.86 | 1.79x | **0.591** | 39.33 | 23.76 |
+| LAND | MRMS | 15.26 | -- | -- | -- | -- |
+| LAND | Davies vs MRMS | 60.15 | 3.94x | **0.004** | 158.74 | 55.31 |
+| LAND | NSCBC vs MRMS | 31.86 | 2.09x | 0.558 | 42.22 | 25.41 |
+
+**d02 and MRMS agree closely on this window** -- land means 17.79 vs 15.26, and
+their wall-normal profiles nearly overlay -- which is the strongest support yet for
+using d02 as the full-domain reference. Davies correlates with NEITHER (0.031 and
+0.004 over land): the band destroys the field.
+
+**Wall-normal profile (figure 3, left) is the boundary story in one line.**
+Davies 10.0 in at d=0 falling to 0.35 by 45 km and then BELOW both references in
+the deep interior (0.08 in at 140 km against d02 0.18, MRMS 0.17) -- band plus
+starved interior. NSCBC 0.44 in at the wall, a mild bump to 0.85 at 15-20 km, then
+tracking the references at 0.32-0.35. d02 and MRMS overlay each other throughout.
+
+**Hourly rate settles the question the record could not: the divergence is there
+from the first hour.** Domain-mean mm/h:
+
+| h | Davies | NSCBC | d02 | MRMS |
+|---|---|---|---|---|
+| 1 | **5.843** | 0.260 | 0.365 | 0.319 |
+| 2 | 6.843 | 0.392 | 0.434 | 0.525 |
+| 3 | 7.099 | 0.580 | 0.421 | 0.506 |
+| 6 | 2.719 | 1.118 | 0.422 | 0.377 |
+| 9 | 1.119 | 0.605 | 0.480 | 0.492 |
+| 12 | 0.666 | 0.501 | 0.421 | 0.343 |
+| 18 | 0.783 | 0.468 | 0.437 | 0.211 |
+
+Davies is **16-18x the reference in hour 1** and decays through hour 9; NSCBC
+tracks d02 and MRMS from the start. Over LAND the point is sharper still: at hours
+1-3 d02 and MRMS are both **exactly 0.000** mm/h -- the event had not reached land
+-- while Davies produces 3.5, 3.5 and 5.5 mm/h and NSCBC 0.54, 0.55, 0.24. So the
+Davies band is not a slow drift that accumulates; it is an initialisation transient
+that fires immediately, dwarfs the event for the first three hours, and then decays
+into a persistent ~2x land wet bias.
+
+Spectra (figure 4): interior-core PSD ratio in the 8-19 km band, Davies 0.681,
+**NSCBC 1.053** against d02 -- NSCBC reproduces the 4 km driver's small-scale
+variance almost exactly.
+
+Figures: `c404_18h_fields_0-12in.png`, `c404_18h_fields_0-3in.png`,
+`c404_18h_differences.png`, `c404_18h_boundary.png`, `c404_18h_spectra.png`,
+`c404_hourly_rate.png`. Full tables (FSS fixed + percentile-matched on three masks,
+quantiles, wet-area fractions, fetch bins from both wall pairs, all eight islands,
+hourly series): `figs/tables_18h.txt`.
