@@ -6251,3 +6251,70 @@ the existing scored arms before it could be trusted -- it is not a free fix.
 
 Until then the horizontal-mixing lever stays closed and the orographic bias of 44
 (2.22x above 500 m, 6x at the domain max) remains documented and unaddressed.
+
+## 47. TERRAIN EXONERATED: ours is comparable in height and 8-10% SMOOTHER than d02 over the over-producing cells
+
+No runs. All three terrains compared on our 192x96 grid, each as its model sees it.
+
+**What each model's smoothing actually is:**
+- **ERF, `terrain_smoothing = 1` (STF).** This is a VERTICAL coordinate method --
+  Smoothed Terrain Following -- that decays the terrain-following deformation with
+  height (ERF_TerrainMetrics.cpp:196+, `case 1`). It does **not** horizontally
+  filter the surface: the k0 plane is the raw terrain file. So our surface
+  elevation is exactly what `dem_to_erf_terrain.py` wrote.
+- **`dem_to_erf_terrain.py` point-samples.** `rows = np.round(rows).astype(int)`
+  -- nearest-neighbour sampling of the 30 m GLO-30 DEM at 3 km spacing, with no
+  area averaging.
+- **d02 (1.5 km):** `SMOOTH_OPTION = 0`, i.e. no extra WPS topo smoothing, but
+  geogrid's topo interpolation area-averages the source DEM onto each 1.5 km cell.
+- **CONUS404 d01 (4 km):** same geogrid approach at 4 km, and it measures as the
+  smoothest of the three.
+
+**Elevation on our grid (LAND cells, m):**
+
+| field | mean | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| ERF 3 km (GLO-30 point-sampled) | 592.5 | 452.8 | 1277.9 | 1915.0 | 2355.2 |
+| d02 1.5 km -> 3 km (area-avg) | 594.2 | 448.5 | 1291.7 | 1974.8 | 2647.1 |
+| CONUS404 4 km -> 3 km | 592.9 | 451.1 | 1276.5 | 1908.1 | 2290.0 |
+
+Essentially identical -- domain-mean land elevation agrees to 0.3%.
+
+**Slope |grad h| (m per km), LAND:**
+
+| field | mean | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| ERF 3 km | 37.25 | 27.83 | 81.02 | 136.87 | 200.33 |
+| d02 -> 3 km | **40.69** | 30.11 | **91.48** | 155.33 | **214.25** |
+| CONUS404 -> 3 km | 31.00 | 23.44 | 67.36 | 113.08 | 156.46 |
+
+**Over the over-producing cells (our terrain >= 500 m, n = 1322):**
+
+| field | elev mean | slope mean | slope p90 | slope max |
+|---|---|---|---|---|
+| ERF 3 km | 1019.5 | 49.85 | 102.81 | 200.33 |
+| d02 -> 3 km | 1025.7 | **55.12** | **111.73** | **214.25** |
+| CONUS404 -> 3 km | 1015.7 | 41.72 | 83.15 | 156.46 |
+
+**Ratios ERF/d02 over those cells: elevation 0.99, mean slope 0.90, p90 slope
+0.92.** Santa Ynez point: ERF 402 m at 94.1 m/km, d02 331 m at 109.5 m/km.
+
+**Verdict: terrain is exonerated.** Over exactly the cells carrying the 2.22x wet
+bias, our terrain is the same height as d02's and 8-10% LESS steep -- and d02
+produces 2.6x LESS precipitation there. Steeper forced ascent cannot explain the
+over-production; if terrain slope were the driver, d02 should over-produce more
+than we do, and it does the opposite. No regridding of d02's terrain and no
+smoothing change is indicated.
+
+**A prediction of mine that the data falsified.** Having found the point-sampling
+in `dem_to_erf_terrain.py` I expected aliasing to make our 3 km terrain steeper
+than an area-averaged field. It does not: point-sampling a 30 m DEM at 3 km
+spacing yields a field 10% smoother in slope than d02's 1.5 km area-average
+re-averaged to 3 km, because the 1.5 km field retains resolved structure that a
+single 3 km point sample never captures. The point-sampling remains a real
+methodological wart worth fixing for its own sake, but it is not making our
+terrain rough, and it is not the source of the orographic bias.
+
+**Consequence: the LES / microphysics path stands as the remaining explanation**
+for the orographic over-intensification, and the horizontal-mixing lever is still
+blocked behind item 46.
