@@ -6454,3 +6454,131 @@ and it is unusable at reference coefficients.**
 **The orographic over-intensification (44) therefore passes to microphysics
 (WSM6), with terrain exonerated (47), du_max exonerated (44), and horizontal
 mixing closed here.**
+
+## 49. WSM6 REJECTED: worse than Morrison on nearly every measure -- it doubles the orographic peak AND loses small-scale structure
+
+Test of the microphysics hypothesis from 44/48. Arms identical except
+`erf.moisture_model`: NSCBC sigma = 0.03, `nscbc_outflow=1 parts=31 mass_tau=60
+keep_ramp=0`, `hindcast_mass_du_max=8`, `les_type="None"`, cfl 0.3, full 23 h
+(2020-12-28 00-23Z), CONUS404-driven. Both completed cleanly to t = 82816 s.
+
+**Point and peak (inches, 23-h accumulation):**
+
+| | domain mean | Santa Ynez | domain max |
+|---|---|---|---|
+| Morrison (du8 baseline) | 0.542 | 6.07 | 17.47 |
+| **WSM6** | **0.651** | **9.99** | **34.67** |
+| d02 (reference) | 0.376 | 1.89 | 3.03 |
+| MRMS (observed) | 0.300 | 2.61 | 2.61 |
+
+WSM6 **doubles** the domain max, from 5.8x d02 to **11.4x d02**.
+
+**Terrain-stratified bias (ratio of means):**
+
+| bin | n | Morrison /d02 | WSM6 /d02 | Morrison /MRMS | WSM6 /MRMS |
+|---|---|---|---|---|---|
+| flat <100 m | 352 | 0.74 | 1.00 | 0.73 | 0.99 |
+| 100-500 m | 1128 | 1.48 | 2.00 | 1.54 | 2.07 |
+| >500 m | 1351 | **2.21** | **2.92** | **2.58** | **3.41** |
+
+Worse in every bin. The orographic defect (44) is amplified, not relieved.
+
+**bias / PCC / RMSE:**
+
+| mask | ref | Morrison | WSM6 |
+|---|---|---|---|
+| full domain | d02 | 1.44x / 0.616 / 23.86 | 1.73x / 0.563 / 38.93 |
+| interior d>=20 | d02 | 1.03x / 0.269 / 8.95 | 0.89x / 0.205 / 9.62 |
+| LAND | d02 | 1.76x / 0.551 / 56.92 | **2.35x / 0.541 / 93.94** |
+| full domain | MRMS | 1.81x / 0.576 / 25.13 | 2.17x / 0.530 / 40.15 |
+| interior d>=20 | MRMS | 1.42x / 0.070 / 10.36 | 1.22x / 0.100 / 10.23 |
+| LAND | MRMS | 1.92x / 0.527 / 59.25 | **2.56x / 0.515 / 96.48** |
+
+LAND RMSE nearly **doubles** against both references. Note WSM6 *under*-produces
+in the interior (0.89x vs d02, down from 1.03x) while over-producing far more at
+the walls and over terrain -- it redistributes mass toward the boundary and the
+orography rather than adding it uniformly.
+
+**Wall-normal profile (mean mm by distance from any wall) and fetch bias:**
+
+| d | Morrison | WSM6 | d02 |
+|---|---|---|---|
+| 0 | 14.58 | 27.47 | 8.90 |
+| 2 | 19.22 | 31.66 | 9.38 |
+| 5 | 31.04 | 46.15 | 10.40 |
+| 15 | 10.51 | 9.48 | 11.25 |
+| 25 | 8.51 | 8.10 | 9.78 |
+
+Fetch-binned ratio to d02 at the inflow walls: 0-0 **1.79 -> 4.02**, 1-2
+**1.84 -> 4.67**. The near-wall pathology roughly doubles.
+
+**FSS ladder (full domain vs d02), 3/9/15/30/60 km:**
+
+| thr | arm | 3 | 9 | 15 | 30 | 60 |
+|---|---|---|---|---|---|---|
+| 1 mm | Morrison | 0.848 | 0.870 | 0.881 | 0.902 | 0.926 |
+| 1 mm | WSM6 | 0.903 | 0.923 | 0.932 | 0.949 | 0.966 |
+| 5 mm | Morrison | 0.740 | 0.786 | 0.809 | 0.848 | 0.880 |
+| 5 mm | WSM6 | 0.675 | 0.724 | 0.752 | 0.806 | 0.854 |
+| 30 mm | Morrison | 0.477 | 0.552 | 0.586 | 0.649 | 0.719 |
+| 30 mm | WSM6 | 0.448 | 0.525 | 0.560 | 0.628 | 0.708 |
+
+The 1 mm gain is a wet-bias artifact -- a wetter field hits a low threshold more
+often. **Percentile-matched FSS, which removes exactly that, is flat:** 0.867 ->
+0.858 at r = 0.87 and 0.506 -> 0.503 at r = 0.22 (3 km). **WSM6 changes amount,
+not placement.**
+
+**WATCH ITEM 1 -- windward/lee. The predicted signature is present.** Flow
+direction taken from each arm's own mass-weighted sub-1500 m wind (Morrison
+6.2 m/s from 203.5 deg, WSM6 6.3 m/s from 202.6 deg -- SSW, as expected):
+
+| arm | windward /d02 | lee /d02 | W/L | windward /MRMS | lee /MRMS | W/L |
+|---|---|---|---|---|---|---|
+| Morrison | 1.90x | 1.85x | 1.03 | 2.08x | 2.10x | 0.99 |
+| WSM6 | 2.61x | 2.33x | **1.12** | 2.85x | 2.65x | **1.08** |
+
+Morrison over-produces essentially uniformly across the ranges; WSM6 acquires a
+genuine windward preference. And the column snow+graupel proxy **falls** (0.4540
+-> 0.3545 windward) while its W/L ratio is unchanged (4.73 -> 4.71). **Less
+frozen mass aloft with more surface precipitation is faster fallout** -- the
+classic cool-season WSM6 failure with fixed intercepts, confirmed rather than
+merely suspected.
+
+**WATCH ITEM 2 -- spectrum at 8-19 km. This is the decisive one, and it cuts both
+ways:**
+
+| ref | Morrison | WSM6 |
+|---|---|---|
+| vs d02 | **0.957** | **0.661** |
+| vs MRMS | 1.351 | 0.961 |
+
+Against the driver, WSM6 **loses a third of the small-scale variance** -- and it
+did not trade that away for a smaller peak, it doubled the peak. That is the
+worst quadrant: more intense AND smoother.
+
+*Honest counter-reading:* against MRMS the ratio improves, 1.351 -> 0.961. d02
+carries ~+68% small-scale variance over MRMS on land, so matching d02 means
+exceeding the observations. By the observational standard WSM6's variance is
+better calibrated. It does not rescue the arm -- the LAND bias is 2.56x against
+those same observations and the RMSE is 96.48 -- but the spectrum result is not
+uniformly bad and should not be quoted as if it were.
+
+**Hourly series: the divergence is present from hour 1, not developed.** LAND
+mean rate h1 Morrison 0.540 vs WSM6 0.926 mm/h, against d02 0.000 and MRMS 0.000;
+WSM6 exceeds Morrison in every one of the 23 hours. Both arms produce spurious
+early precipitation in h1-h4 when both references are dry -- a spin-up artifact
+that WSM6 makes ~1.7x worse. Figure: `figs/wsm6_hourly_rate.png`.
+
+**Verdict: WSM6 is rejected. Morrison stays in the deck.** The microphysics
+hypothesis is not merely unconfirmed -- the substitution moves the target metric
+in the wrong direction on every mask, doubles the peak, doubles the near-wall
+pathology, and leaves placement skill flat.
+
+**Standing: `erf.moisture_model = "Morrison"` unchanged in the deck and manifest.**
+
+**Where this leaves 44.** Terrain exonerated (47), du_max exonerated (44),
+horizontal mixing closed on evidence (48), microphysics scheme swap rejected
+(49). The orographic over-intensification is still unexplained, and the remaining
+untested levers are the vertical (MYNNEDMF behaviour over steep terrain, and the
+w-damping/sponge configuration) rather than the horizontal or the hydrometeor
+scheme. That is a new mechanism hunt and needs a decision before it starts.
