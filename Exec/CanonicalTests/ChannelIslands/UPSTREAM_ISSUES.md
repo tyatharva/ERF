@@ -5692,3 +5692,98 @@ full-domain reference with d02 excluded from the arms. Scoring ERF against d02
 also measures agreement with a different model -- ERA5-driven WRF at 1.5 km,
 carrying its own wet tail and +68% small-scale variance -- not skill against
 observations.
+
+## 40. 30p history bisect and the 17 -> 90 min performance attribution (no runs)
+
+### 30p: the failure did NOT always exist, and the bisect range is 3 days wide
+
+Twelve mechanism hypotheses were burned. Searching history instead:
+
+**Earliest continuous 24 h with no restart-bracketing: commit `7f917ebd`
+(2026-07-23), "Real-BC inflow for HindCast + vertical-advective dt fix: first
+complete 24-h run", consolidated in `83228eec` the same day -- 38,550 steps,
+17.3 min, mass -0.26%/24 h, on the 128x64x32 deck.** Further clean 24-h
+completions follow through items 22-25 (all scored on 24-h accumulations, so all
+completed) and at line 1164 ("Both ran clean: 24 h complete, exit 0").
+
+**First recorded failure: item 27, measured 2026-07-26 -- "the 192x96 Jan-9 run
+reached 18.002 h (46,270 steps) and then went non-finite".** The domain-change
+commit is `1ab7739a` (2026-07-26), "Domain chain steps 1-7: 192x96 domain on a
+pinned projection".
+
+So the bisect range is **`7f917ebd` .. `1ab7739a`**, ~10 commits over three days,
+with four candidate boundaries:
+
+| commit | date | change |
+|---|---|---|
+| `87c25a24` | 07-24 | production launch config: **cfl 0.3 -> 0.2**, NaN tripwire, max_dt |
+| `617017b0` | 07-26 | five audit SEV-1/SEV-2 corrections wired into the deck |
+| `aca969fd` | 07-26 | validated-configuration manifest |
+| `1ab7739a` | 07-26 | **192x96 domain + pinned projection** |
+
+**The failure post-dates the domain change and does not predate it.** It also
+post-dates the IC fixes (items 19-21, scored on completing runs), the mass
+controller (item 30, later still), and the frame-count change (frames stayed
+9 three-hourly across the boundary -- so rotation 7 existed in the runs that
+COMPLETED).
+
+That last point is the sharp one: **the 128x64 runs also crossed rotation 7 and
+survived.** So "rotation 7" is not sufficient by itself; it is rotation 7 *on the
+192x96 domain*. Item 27b already noted the corner |w| precursor existed at 128x64
+(7.75 vs interior 2.09) on runs scored clean.
+
+**A git bisect is the wrong instrument here.** Deck and code changed together:
+checking out a pre-`1ab7739a` commit gets the 128x64 deck back, so the bisect
+would only re-confirm that 128x64 does not fail. The clean experiment is a 2x2 of
+{old code, new code} x {128x64 deck, 192x96 deck}, and the single most
+informative cell is **current code + 128x64 deck, 24 h continuous** (~20 min GPU,
+one run). If it completes, the failure is domain-dependent and no commit bisect
+is needed at all; if it dies at 18 h, the failure is code-dependent and the
+four-boundary bisect above is worth its ~4 runs.
+
+**Does CONUS404 driving sidestep it? Expectation: NO, and the premise needs
+correcting.** Under the Step-1 design the converter emits the existing `.bin`
+frame format and ERF is unchanged -- so `ERF_WeatherDataInterpolation` and the
+rotation machinery are **bit-identical code on an identical format**. Only frame
+CONTENT changes, and CADENCE is our choice. Emitting 3-hourly frames reproduces
+the rotation structure exactly and should reproduce the failure; emitting hourly
+frames TRIPLES the rotations, and since the suspect mechanism (30r) is
+allocation-history dependence in the ~13 `Gpu::DeviceVector`s that
+`FillForecastStateMultiFabs` churns per rotation, more rotations should make it
+more likely, not less. The one thing that would genuinely sidestep it is a
+different domain size, per the bisect finding above.
+
+### Performance: 17.3 -> 64.6 min is FULLY attributed, with no residual
+
+Baseline `83228eec` (128x64x32): 38,550 steps, 17.3 min, 0.0269 s/step.
+Current (192x96x48, Davies A/B day): 62,602 steps, median **0.0619 s/step**,
+implied 64.6 min. (Observed wall ~75 min including I/O, checkpointing and the
+leg-2 restart.)
+
+| factor | ratio | source |
+|---|---|---|
+| cells 262,144 -> 884,736 | 3.375x | `1ab7739a` domain change |
+| ...but measured s/step | **2.301x** | per-cell-per-step cost **IMPROVED 0.68x** -- the 262K baseline was launch-latency bound |
+| step count | **1.624x** | cfl 0.3 -> 0.2 (`87c25a24`) is 1.50x of this; max_dt=2.5 and domain winds the remaining 1.08x |
+| **product** | **3.74x** | 17.3 x 3.74 = **64.6 min** -- matches |
+
+**There is no unexplained 1.5x.** The 1.5x is the cfl change, and the domain
+change is *sub*-linear in cells because GPU efficiency rises with problem size.
+
+Levers, measured not guessed:
+- **cfl 0.2 -> 0.3: the one large win, already validated and never adopted.**
+  A full 18 h leg ran 31,415 steps against 46,586 (**33% fewer**) and the full day
+  completed with mass -0.032%, identical to cfl 0.2, no NaN/FPE. Would take
+  64.6 -> ~43 min. Caveat: cfl 0.2 was set by Hurricane Hilary (2023-08-20) where
+  0.3 died in ~9 model-minutes, so 0.3 is validated for AR regimes and NOT for the
+  convective summer case. Per-regime cfl, not a global change.
+- **`max_gpu_streams` 1 -> 4: unavailable.** Retested this session on the CURRENT
+  binary in the production config: exit 127, **zero steps**, FPE at launch. The
+  1.2x is not a tunable cost; it is a hard failure.
+- **`check_for_nans_int` 10 -> 100: ~9%.** Measured this session: int=1 costs 3x
+  (4.7 vs 14.9 steps/s), so int=10 is ~10% and int=100 ~1%. The launch config
+  specified 100; the deck runs 10.
+- **Radiation: not a regression source, and #26 is confirmed live.** Measured
+  from the current 24-h logs: 359 calls, intervals min 180.0 / median 180.7 /
+  max 181.6 s. The fix did raise the call count ~1.4x versus the broken 255 s
+  cadence, worth ~1% of wall.
