@@ -5535,3 +5535,93 @@ distribution covers Jan 2023.
 Not proceeding to the converter: the precondition -- 3-D data for the scored day
 -- is not met, and building a converter before knowing which day it targets would
 be work at risk.
+
+## 39. New case 2020-12-28, CONUS404-driven. Step 0: all three checks PASS, with two scoring caveats
+
+### 1. CONUS404 3-D access: UNBLOCKED for this date
+
+The Jan-2023 blocker (38a: GDEX d559000 ends 2022-09-30) does not apply --
+**2020-12-28 sits in WY2021**. Verified:
+
+- All **24 hourly `wrf3d_d01_2020-12-28_HH:00:00.nc`** files present in
+  `d559000/wy2021/202012` (744 wrf2d + 744 wrf3d for the month).
+- 3-D state confirmed by OPeNDAP DDS: `U/V/W`, `TK`, `P`, `P_HYD`, `Z`,
+  `QVAPOR QCLOUD QRAIN QICE QSNOW QGRAUP`, `CLDFRA`, `REFL_10CM`.
+- **Server-side subsetting PROVEN, not just advertised**: anonymous OPeNDAP
+  hyperslab requests against this exact file returned HTTP 200 for both
+  `XLAT/XLONG[500:502][300:302]` and a real 3-D `QCLOUD[0][0:1][500:501][300:301]`
+  slab. No authentication.
+- Practical note for the converter: THREDDS/Tomcat rejects raw `[`/`]`/`:` in the
+  request target -- percent-encode as `%5B %5D %3A`, and pass `curl -g` to stop
+  glob expansion. Both cost a debugging cycle here.
+- Volume unchanged from 38a: ~20.7 MB/hour for our 144x72 footprint, ~500 MB for
+  24 hourly frames.
+
+The zarr Hydro subset remains 2-D only (38) and is not usable; native subsettable
+wrfout via OPeNDAP is the route.
+
+### 2. Domain overlap: our box is fully inside wrfout d02
+
+`wrfout_d02_2020-12-28_00_00_00` (27.7 GB): 745 x 765 at **DX = 1500 m**, 54
+levels, Lambert TRUELAT1/2 = 30/60, STAND_LON = -120, **24 hourly times
+2020-12-28_00 through _23** -- exactly our window. Full 3-D state present
+(T, THM, P, PB, PH, PHB, QVAPOR, QCLOUD, QRAIN, QICE, QSNOW, QGRAUP).
+
+    d02 extent   lat 31.827 .. 42.570   lon -126.963 .. -112.905
+    our box      lat 32.064 .. 34.703   lon -123.470 .. -117.217
+    fully inside: lat YES, lon YES;  73,729 d02 cells inside our box
+
+**Caveat: the southern margin is thin.** Our south edge is 0.24 deg = **26 km**
+from d02's south boundary. d02's own lateral relaxation zone at 1.5 km is
+typically 5-10 cells (7.5-15 km), so our southern boundary samples d02 within
+~11-18 km of d02's own sponge. Clear, but not generously. Every other margin is
+large (west 3.5 deg, north 7.9 deg, east 4.3 deg).
+
+### 3. MRMS: full coverage, but the event is a LAND event and the peak is unscoreable
+
+23 hourly Pass-2 files (01Z..23Z) covering 00Z->23Z exactly. Regridded to our grid:
+**18432/18432 valid cells**; native-in-footprint vs regridded control **7.59 vs
+7.63 mm** (0.5%).
+
+| mask | n | mean | p90 | max |
+|---|---|---|---|---|
+| whole domain | 18432 | 7.63 | 21.0 | 66.3 |
+| interior d>=20 | 8512 | 6.03 | 15.1 | 36.1 |
+| band d<10 | 5360 | 9.03 | 25.3 | **66.3** |
+| **interior d>=20 LAND** | **509** | **22.00** | 30.3 | 36.1 |
+| all LAND | 2831 | 22.29 | 34.0 | 66.3 |
+
+**Confirmed: the domain maximum (66.3 mm, 34.486N -119.802W) sits at d = 8 --
+inside the relaxation band and outside d >= 20.** The event peak will not be
+scored, as anticipated.
+
+**Caveat A -- the interior land sample is 509 cells.** "MRMS primary over land"
+restricted to the scored interior leaves 6% of the 8512 cells used on Jan 9 2023.
+That is enough for bias, PCC and object work, but FSS on 509 cells at 60 km
+neighbourhoods is nearly a single-neighbourhood statistic and should be read with
+that in mind.
+
+**Caveat B -- the ladder does not survive intact on interior land.** Exceedance
+counts:
+
+| mask | n | >=1mm | >=5mm | >=15mm | >=30mm |
+|---|---|---|---|---|---|
+| interior d>=20 (all) | 8512 | 84.3% | 40.6% | 10.2% | **0.7% (63)** |
+| interior d>=20 LAND | 509 | **100%** | **99.2%** | 79.8% | 12.4% (63) |
+| all LAND | 2831 | 100% | 99.5% | 73.2% | 20.9% |
+| whole domain | 18432 | 86.2% | 46.1% | 16.0% | 3.3% |
+
+On interior LAND the 1 mm and 5 mm rungs are **degenerate** -- 100% and 99.2% of
+cells exceed, so those rungs carry no information there. The 15 and 30 mm rungs
+are the informative ones over land, which is the opposite of Jan 9 2023 and
+exactly the reason for extending the ladder. Conversely on the full interior the
+30 mm rung has only 63 cells (0.7%) and is not scoreable.
+
+**Recommended scoring split, to be confirmed:** report 1/5 mm on the full
+interior (d>=20, all surfaces) where they are informative, and 15/30 mm on land
+(all-land n=2831 preferred over interior-land n=509 for sample size, with the
+band caveat stated). Percentile-matched FSS sidesteps the degeneracy by
+construction and should carry the like-for-like comparison.
+
+**Verdict: proceed to Step 1.** No blocker. The two caveats are scoring-design
+issues, not data problems.
