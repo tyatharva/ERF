@@ -7541,3 +7541,112 @@ order as dM/dt. Neither number is reported.
 all confirmed in source before naming: `les_type = None` (no horizontal SGS
 mixing anywhere), and `moistscal_*_adv_type = Upwind_3rd`, which
 `validated_config.txt:233` marks an OPEN EXCEPT never resolved.
+
+
+## 60. THE SURFACE WAS NEVER INGESTED: t_surf is pinned at the 271.0 K validity clamp for the entire run, land and ocean alike, in every CONUS404-driven run
+
+Checkpoint reads, no runs. Found while chasing a boundary defect; it outranks it.
+
+**The symptom in the log**, printed once per run by
+`ERF_SurfaceDataInterpolation.cpp:118` and `:603`:
+
+```
+HindCast SST source frame: 8640 water points, 8640 of them outside 271-305 K
+HindCast SST -> t_surf: 18432 ocean cells ... 18432 still unfilled (left on erf.most.surf_temp)
+```
+
+**The frames are NOT at fault.** Independent reads of the same bytes:
+
+| frame set | land points (lm >= 0.5) | SST inside 271-305 K |
+|---|---|---|
+| Domain A rotated | **3027 / 8640** | 8435 / 8640 (97.6%) |
+| parent (all campaign runs) | 2021 / 8378 | 8247 / 8378 |
+| Domain B (genuinely all ocean) | 0 / 8640 (correct) | 8640 / 8640 |
+
+The generator writes a valid land-sea mask and a valid SST field. ERF produces
+an all-water mask AND an all-bad SST from them.
+
+**Consequence test pins the ingest.** Both counters are gated on
+`water = (ss(i,j,0,0) < 0.5)`, the DESTINATION-grid mask
+(`ERF_SurfaceDataInterpolation.cpp:576-585`):
+
+```
+water    = (ss(i,j,0,0) < 0.5)
+raw      = (water && 271 < ss(i,j,0,1) < 305)
+unfilled = (water && a(i,j,k,1) < 0.5)
+```
+
+`n_water = 8640` (ALL) and `n_bad_water = 8640` (ALL) follow from ONE condition:
+**`surface_state_interp` holding zeros at the check.** Then `ss(...,0)=0` makes
+every cell water, and `ss(...,1)=0` is outside (271,305) for every cell. Coastal
+smear or a units error would fail PARTIALLY; only an empty array fails totally
+on both fields at once. `n_unfilled = 18432 = 192x96` is the whole domain, so
+the land cells are classified water too.
+
+**MEASURED CONSEQUENCE, from checkpoints -- this is the load-bearing evidence.**
+`SST_0` read natively (AMReX FAB), split by the FRAME's mask, not ERF's:
+
+| checkpoint | t (s) | ocean mean | std | land mean | std | cells at 288.0 |
+|---|---|---|---|---|---|---|
+| `run_domA_sig003/chk16240` | 21600 | **271.00** | 0.000 | **271.00** | 0.000 | 0 |
+| `run_domA_sig003/chk34858` | 43200 | 271.00 | 0.000 | 271.00 | 0.000 | 0 |
+| `run_domA_sig003/chk50830` | 64801 | 271.00 | 0.000 | 271.00 | 0.000 | 0 |
+| `run_domA_rot/chk34864` | 21600 | 271.00 | 0.000 | 271.00 | 0.000 | 0 |
+| `run_domA_rot/chk58044` | 43200 | 271.00 | 0.000 | 271.00 | 0.000 | 0 |
+
+**Zero variance, land and ocean identical, 6 h through 18 h, in two independent
+runs.** The `static bool reported` guard means the log prints only on the first
+call; the checkpoints show the surface never becomes real on any later call
+either. Early AND late.
+
+**The value is 271.00, not the 288.0 config fallback.** No cell holds
+`erf.most.surf_temp`. 271.00 is the LOWER CLAMP of the validity window
+`(271.0, 305.0)` in the very check that rejects the field -- the ingest
+saturates against its own bound rather than falling back to config. The log line
+"left on erf.most.surf_temp" is therefore also wrong about where the value came
+from.
+
+**Supporting MOST diagnostics** (`chk34858`, t = 43200):
+
+| | ocean | land |
+|---|---|---|
+| Tstar | 0.1228 | 0.2621 |
+| Ustar | 0.1735 | 0.3667 |
+| **Qstar** | **~0 (|.| < 1e-4)** | **~0** |
+| Olen | -3.86 | 43.27 |
+| Z0 | 0.0001 | 0.0005 |
+
+**Qstar ~= 0 everywhere: essentially NO surface moisture flux in the domain.**
+
+**Cold bias against the reference.** ERF lowest-level air over ocean is
+275.85 K (std 3.475); d02's SST over water is 286.55 K (std 1.632). A **10.7 K**
+deficit, and the reference carries real spatial structure where ERF's surface
+carries none. The 275.85 K is not an instrument artifact and not a generic model
+cold bias -- it is the direct consequence of a 271 K surface.
+
+**SCOPE: whole-domain, both surface temperature and surface moisture flux, every
+CONUS404-driven run.** Not marine-only: the land cells are classified water and
+carry the same 271.00 K.
+
+**NO MECHANISM CLAIMED.** There is an unresolved tension that any mechanism must
+explain: a 271 K surface with Qstar ~= 0 is COLD and DRY, which should SUPPRESS
+precipitation, yet Domain B's marine excess is 6.9-9.2x and the interior ascent
+is 2.4x d02. A candidate to TEST, not to assert: the cold bias lowers the
+saturation threshold rather than adding moisture, so driver-correct air chills
+toward saturation and condenses spuriously, with latent heat driving the ascent.
+That predicts ERF near-saturated where the driver is not, with the gap GROWING
+inward from the inflow wall -- which would match Domain B's near/deep = 0.77.
+Untested at time of writing.
+
+**Two open sub-questions.** (a) A 271 K surface under 275.85 K air is STABLY
+stratified, but Olen = -3.86 reads unstable; ERF's sign convention for Tstar and
+Olen must be checked before either is used, and |L| ~ 4 m may be degenerate at
+ustar ~ 0.17. (b) 271 K is below seawater freezing -- whether any ice-phase or
+saturation-over-ice path in MOST or Morrison keys off t_surf < 273.15 is
+unchecked.
+
+**Process note.** This finding was WITHDRAWN once and reinstated. The withdrawal
+rested on an indirect probe (near-surface air temperature) read as refuting a
+uniform surface; it did not, and the checkpoint read that settles it was
+available throughout. Item 46's rule -- instrument before concluding -- applies
+to retractions as much as to claims.

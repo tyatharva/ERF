@@ -419,6 +419,46 @@ requires to be clean for any scored run. **The honest route is bumping AMReX and
 Kokkos to versions with native Blackwell support, and that is a re-validation
 project, not a config change.**
 
+## 7c. BLAST RADIUS — read this before quoting any number in this document
+
+**Item 60: the surface was never ingested.** `t_surf` is pinned at 271.00 K with
+zero variance, land and ocean identical, for the whole run, in every
+CONUS404-driven result. `Qstar ≈ 0` — essentially no surface moisture flux
+anywhere. The reference d02 has a real SST field (mean 286.55 K, std 1.632).
+**ERF ran 10.7 K cold with a dead surface; the references did not.**
+
+Also **item 58**: the CONUS404 wind rotation was never applied, so every frame
+carried vectors mis-oriented by 8.5–22°.
+
+This partitions every result in this campaign:
+
+### SURVIVES — ERF-vs-ERF comparisons (same broken surface in every arm)
+
+Rankings hold; **magnitudes do not**.
+
+- Davies vs NSCBC (items 30–36, 42) — the 18 h Davies death, NSCBC's survival
+- the σ sweep (item 34) and σ=0.1 stability (item 53)
+- the band-width sweep (36b/36e), Helmholtz projection, tangential-only (36)
+- `du_max` (44), WSM6 vs Morrison (49), MYNN25 vs MYNNEDMF (54)
+- item 57's **relative** finding that the excess follows the wall rather than
+  the terrain — both bands share the same surface
+
+### SUSPECT — absolute bias against d02/CONUS404
+
+Every one of these compares ERF to a reference that had a working surface.
+
+- the orographic excess (2.21×, 2.12–2.61×) — items 44, 47–57
+- Domain B's marine over-production (6.9–9.2×) — item 57
+- the interior ascent excess (2.41× d02) — item 59
+- domain max 17.47 in / 18–21 in, Santa Ynez 6.07 in — HANDOFF §2, items 49, 57
+- the full §2 scoring table (bias, RMSE; PCC and PM-FSS are placement measures
+  and degrade more gracefully, but are not clean either)
+- **item 59's velocity table (ERF vs driver) — SUSPECT.** An earlier assignment
+  of it to the surviving bucket was wrong: it compares ERF to the driver, not
+  ERF to ERF.
+
+**Nothing absolute should be quoted until a fixed-surface run exists.**
+
 ## 8. Standing constraints
 
 - **No upstream activity.** Do not file issues, open PRs, or comment on
