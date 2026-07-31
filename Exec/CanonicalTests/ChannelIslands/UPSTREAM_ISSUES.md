@@ -7973,3 +7973,133 @@ are internally comparable -- every arm had the identical handicap -- so
 scheme-to-scheme differences (sigma sweep, MYNN25, w_damping) remain valid as
 relative statements. What they cannot support is any ABSOLUTE claim against d02
 or MRMS, and several were made. Those are withdrawn pending the 71 h arms.
+
+---
+
+## 65. THE WALL ENHANCEMENT SURVIVES BOTH THE SCHEME CHANGE AND 48 h OF SPIN-UP LEAD -- P5 falsified, and item 64's mitigation does not work
+
+Davies control arm, full 72 h (2020-12-26 00Z -> 2020-12-29 00Z), scored over
+h48-h71 = 2020-12-28 00Z-23Z, the identical 23 h every earlier arm ran as its
+whole life. Surface fix (item 60) and rotation fix (item 58/62) both active.
+
+**The number that matters:**
+
+| | near/far ratio (dN<=12 vs dN>=21), terrain 300-1000 m |
+|---|---|
+| 23-h NSCBC arms, no lead, no surface fix | **4.49** |
+| 72-h DAVIES, 48 h lead, surface fixed | **4.53** |
+| d02 | 1.83 |
+| MRMS | 1.76 |
+
+`PREDICTIONS_71h.md` P5 predicted 1.0 +/- 0.7 from the decay fit
+(A = 0.99 +/- 0.70, tau = 10.6 +/- 5.1 h) on the reasoning that h48 >> tau.
+Measured **5.95x** near-wall. **P5 is falsified**, on the criterion stated in
+advance: "If the enhancement is still ~4x at h48-h71, the decay fit is refuted
+outright and the wall effect is a standing feature, not a transient."
+
+**Three explanations die at once:**
+
+1. **Spin-up transient.** Item 64's 48 h lead was the mitigation. It moved the
+   ratio from 4.49 to 4.53 -- inside noise. The enhancement is not the domain
+   filling from rest.
+2. **NSCBC.** Every earlier arm was NSCBC. This is DAVIES, the incumbent, with
+   the specified+relaxation band NSCBC replaces. Same number. The enhancement
+   is not a property of the characteristic boundary treatment.
+3. **The decay fit itself.** A = 0.99 +/- 0.70 was fitted on 23 h of data that
+   was entirely inside the supposed transient. It extrapolated to a value the
+   data never constrained. Recorded as a caution: the fit was reported with its
+   uncertainty and still misled, because the uncertainty was on the wrong
+   quantity.
+
+**Stratified detail (ERF/d02, Davies, h48-h71):**
+
+| terrain | dN 0-6 | dN 7-12 | dN 13-20 | dN 21-29 | dN 30-47 |
+|---|---|---|---|---|---|
+| 100-300 m | 5.06x | 1.13x | 0.85x | 0.40x | 0.52x |
+| 300-600 m | 6.25x | 2.47x | 1.48x | 0.30x | 1.23x |
+| 600-1000 m | 10.65x | 4.43x | 2.22x | 1.24x | 2.16x |
+| 1000-3000 m | 19.01x | 0.71x | 1.00x | 1.48x | 2.24x |
+
+Monotone decay with distance from the north wall at every terrain band from
+100 m upward, and it reaches 19x on the highest terrain in the first six cells.
+Domain means: ERF 26.20 mm, d02 13.25 mm (1.98x), CONUS404 11.14 mm (2.35x).
+
+**P7 HELD.** Santa Ynez 5x5 = **0.85x** against a 0.7-1.2 prediction (single
+cell 0.43x). At pin 35.4 it sits at dN 34, outside the enhanced band, and the
+rotation fix's correction survives both the scheme change and the longer run.
+That P7 held while P5 failed is the useful part: the instrument is not simply
+reading high everywhere.
+
+**What this leaves.** The enhancement is scheme-independent, spin-up-
+independent, terrain-modulated and wall-anchored. Items 51-59 attributed it to
+the boundary condition; item 64 attributed it to initialisation. Neither
+survives. The remaining candidates are the lateral forcing DATA in the
+near-wall band, and the wall-normal velocity of item 59 -- which is measured
+and still unexplained.
+
+## 66. DAVIES CRASHED ON ONE TRAJECTORY AND NOT ANOTHER: path-dependence, not reproducible instability
+
+Correction to an earlier reading of mine, which was wrong.
+
+Davies died of an FPE at TIME 32400.009 s (h9.00), immediately after the
+frame-3 surface read. Restarting from `chk39560` -- the checkpoint written AT
+that time -- reproduced the crash exactly. Restarting from `chk34664` (h8.00)
+cleared it, and the run went on to complete the full 72 h.
+
+**I reported this as "three independent paths into the same failure." That was
+wrong and is withdrawn.** Two paths entered from the same state and failed;
+one entered from an earlier state and passed. That is path-dependence.
+
+**w-damping census, both arms, full logs:**
+
+| | events | steps | where |
+|---|---|---|---|
+| Davies, dead legs | **3752** | -- | all at h9, j=0-8, k=1-12 |
+| Davies, surviving leg (h8 -> h72) | **0** | ~316k | -- |
+| NSCBC (h0 -> h30 so far) | **0** | ~256k | -- |
+
+The surviving trajectory passed t = 32400 s with **no w-damping events at
+all** -- not elevated-but-sub-critical, but entirely quiescent. On the dead
+legs the same instant produced max |w| = **48,539 m/s** and max w-CFL 795, in
+a grid-scale dipole at j = 4-8 (the ylo band, real_width = 10) and k = 6-11,
+the surface-compressed cells. w-damping was inert against it, reducing
+1241.5 -> 1233.1 m/s (0.7%), consistent with item 54.
+
+**Defensible claim:** Davies exhibits a grid-scale w dipole in the ylo band
+that was fatal on one trajectory and required an earlier restart to pass;
+NSCBC has fired zero w-damping events over its run to date. That is a
+robustness difference, not a completion failure -- Davies completed 72 h.
+
+**Not claimed:** that Davies is unstable in general, that the crash is
+reproducible, or that the ylo dipole is scheme-attributable. Both arms died at
+the same h9 frame-3 transition, so the trigger is shared and upstream of the
+boundary treatment.
+
+## 67. NSCBC's TIMESTEP COLLAPSE IS INTERIOR-LIMITED, so it is NOT a cost of the scheme
+
+Under identical config (cfl 0.2), NSCBC runs dt = 0.27-0.38 s where Davies
+runs 1.08-1.20 s -- a 4x cost at the same 14 steps/s throughput. The
+compressible criterion binds in both (NSCBC 0.284 vs Davies 1.153; anelastic
+1.065 / 2.064).
+
+Localising the argmax of |u|/dx + |v|/dy + |w|/dz on NSCBC plotfiles:
+
+| plotfile | argmax (i,j,k) | cells from nearest wall | vertical share | top-100 in band |
+|---|---|---|---|---|
+| h28 | (181, 55, 11) | 10 from xhi | 95.8% | 29 / 100 |
+| h29 | (178, 53, 2) | 13 from xhi | 91.7% | 15 / 100 |
+| h30 | (180, 51, 2) | 11 from xhi | 95.4% | 11 / 100 |
+
+**The limiter is INTERIOR**, 10-13 cells from the wall and outside the 10-cell
+band, and 71-89% of the hundred most-limiting cells are interior. So by the
+criterion set in advance -- boundary-limited would be an NSCBC cost,
+interior-limited is not -- **this is not a cost of NSCBC.**
+
+Caveat kept deliberately: 10-13 cells is *just* outside the band, so "interior"
+here means "adjacent to the band", not "deep interior". The limiter is vertical
+velocity (|w| = 16-27 m/s) in thin near-surface cells, with |v| reaching
+72-82 m/s at k=2 -- itself an unexplained number that deserves its own check.
+
+dt is **not monotonic**: 0.527 (h6-9), 0.442 (h9-15), 0.648 (h15-20), 0.484
+(h20-25), 0.314 (h25-30). It recovers and re-collapses, which argues against a
+runaway and for episodic forcing.
