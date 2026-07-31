@@ -7678,3 +7678,141 @@ Note for anyone reading checkpoints: the AMReX FAB header is
 `FAB ((8, (32 8 23 0 1 9 0 127)),(4, (4 3 2 1)))...` -- the byte width is the
 **second** tuple (4 = float32). The first (8) is the RealDescriptor and reading
 it as the width produces a clean-looking reshape error, not silent garbage.
+
+
+## 62. THE ROTATION FIX WORKS: item 58's mechanism reading was wrong, falsified against a criterion stated in advance
+
+Paired 23-h runs, Domain A, sigma=0.03, identical but for the frames:
+`run_domA_sig003` (unrotated) vs `run_domA_rot` (rotated). Both `EXIT=0` at
+TIME = 82816.
+
+**The prediction, recorded BEFORE the run**, from item 58's reasoning that
+restoring the rotation restores cross-barrier flow over the E-W ranges and so
+should make the orographic excess WORSE:
+
+| quantity | unrotated | predicted | **MEASURED** |
+|---|---|---|---|
+| Santa Ynez, dN 34 | 2.13x | 2.5-3.4x | **0.83x** |
+| Santa Ynez 5x5 nbhd | 1.97x | -- | **0.99x** |
+| domain-mean bias vs d02 | 1.097x | 1.3-1.5x | **1.034x** |
+| direction over ranges | 238.7 deg | ~225 (away from d02) | **converges ON d02** |
+
+The stated falsification criterion was "if the excess goes DOWN, my mechanism
+reasoning is wrong and the rotation is a genuine fix." **It went down.**
+
+**Terrain x dN, ERF/d02 (unrotated -> rotated):**
+
+| terrain | dN 0-6 | dN 7-12 | dN 13-20 | dN 21-29 | dN 30-47 |
+|---|---|---|---|---|---|
+| 100-300 m | 3.03 -> **3.03** | 1.86 -> 0.86 | 1.18 -> 0.68 | 0.66 -> 0.92 | 0.94 -> 0.52 |
+| 300-600 m | 4.92 -> **5.34** | 2.51 -> 1.21 | 1.33 -> 1.03 | 0.76 -> 0.71 | 1.43 -> 0.72 |
+| 600-1000 m | 3.18 -> **3.77** | 2.80 -> 1.35 | 0.84 -> 0.66 | 1.33 -> 1.01 | 2.01 -> 1.07 |
+| 1000-3000 m | 1.51 -> 1.10 | 1.15 -> 0.26 | 0.49 -> 0.43 | 0.93 -> 0.94 | 1.32 -> 0.85 |
+
+**Everything beyond dN 7 moves toward 1.0. NOTHING at dN 0-6 improves** -- three
+of four bands get slightly worse. Per wall: north dN 0-4 goes 3.16 -> 3.73 while
+every other bin at both walls falls.
+
+**This separates the two defects.** Item 57 decomposed the excess as ~2.1x
+"real orographic" plus ~2x wall enhancement. The 2.1x was **the missing
+rotation**; what remains at dN 0-6 is the wall artifact alone, undiminished.
+
+### Validation -- an overshoot signature was tested before this was written
+
+Every band beyond dN 7 lands BELOW 1.0 (0.26 at 1000-3000 m, east wall
+0.31-0.58x), which could mean the rotation over-corrected. Four checks:
+
+1. **Direction converges, does not overshoot.** Five of six bands improve,
+   four by 10-18 deg; no band passes d02 by more than 7 deg.
+   h15 dN 0-6: 246.5 -> **217.5** against d02 209.8.
+2. **Geometry confirms sign and size.** CONUS404 cone n = 0.6461 gives
+   gamma_C = -13.79 deg at lon -119.25; SINALPHA/COSALPHA give
+   alpha_C = +14.49 deg. alpha = -gamma, the standard WRF convention,
+   magnitudes agreeing to **0.69 deg**. The patch applied +15.08 deg mean.
+3. **Precipitation was REDISTRIBUTED, not destroyed.** Domain total
+   14.537 -> **13.699** mm against d02's 13.248 -- a 5.8% fall, landing at
+   1.034x d02. An amount collapse would show a far larger drop.
+4. **Speed** rose 28-44% -- see item 63. That is NOT the transform (verified
+   speed-preserving to 1.0010x on the frames); it is the model's response, and
+   it is the subject of its own item.
+
+**CAVEAT, prominent: both runs carry the item-60 surface** (uniform 271 K,
+Qstar ~= 0), so this is an ERF-vs-ERF ranking. The 0.83x at Santa Ynez must NOT
+be read as "ERF is now unbiased there" -- only as "the rotation removed ~1.3x of
+excess." Absolute ratios against d02 remain suspect until the surface is fixed.
+
+**Item 58 is corrected by this item.** Its mechanism paragraph states the
+rotation "cannot explain the orographic excess" and "works against it." Both are
+refuted. The reasoning was: the frames are too westerly, so restoring v adds
+cross-barrier flow and adds orographic precipitation. The measurement says the
+opposite -- correcting the direction moved precipitation OFF the terrain.
+**Third mechanism claim in this campaign to fall to a measurement** (after item
+51's chain and item 59's misclassification).
+
+
+## 63. THE INTERIOR RUNS 2.5-3.6x TOO FAST AT LOW LEVELS -- against BOTH references
+
+Post-processing, no runs. Found while validating item 62 and it outranks it.
+
+**Height-matched, h15, both averaging conventions, land cells:**
+
+| height | band | ERF scalar | d02 scalar | **CONUS404 driver** | ERF/driver |
+|---|---|---|---|---|---|
+| 100 m | dN 0-6 | 19.71 | 5.06 | 5.41 | **3.64x** |
+| 100 m | dN 21-47 | 15.44 | 5.84 | 6.25 | **2.47x** |
+| 500 m | dN 0-6 | 17.75 | 7.82 | 8.15 | 2.18x |
+| 500 m | dN 21-47 | 15.85 | 10.36 | 10.76 | 1.47x |
+
+**d02 is not the outlier: the driver that actually forces the run agrees with
+it.** Vector-mean gives 2.4x where scalar-mean gives 3.0x at 100 m -- real under
+either convention.
+
+**THE SIGNATURE IS THE SHEAR PROFILE.**
+
+| | 100 m | 500 m |
+|---|---|---|
+| ERF | 15.4 | 14.8 (**no shear**) |
+| d02 | 5.06 | 7.82 (**strong shear**) |
+
+ERF's low-level wind is nearly uniform with height where the reference has a
+normal sheared boundary layer.
+
+**DRAG COEFFICIENT, from measured quantities:** Cd = (ustar/U)^2 with the
+checkpoint's ustar and the 100 m speed:
+
+| | ustar | U(100 m) | Cd | physical | short by |
+|---|---|---|---|---|---|
+| ocean | 0.1735 | 15.4 | **1.27e-04** | 1.0-1.5e-03 | **~9x** |
+| land | 0.3667 | 17.0 | **4.65e-04** | 5e-03 - 2e-02 | **~17x** |
+
+**The surface is barely gripping the flow.**
+
+### Mechanism: CANDIDATE, not established
+
+The item-60 surface -- uniform 271 K, `Qstar ~= 0`, `Tstar > 0` (stable) --
+suppresses vertical mixing, the boundary layer decouples from the ground, and
+the low-level flow runs free of surface drag. That single defect predicts the
+absent shear, the ~10x drag deficit, and the speed excess together.
+
+**PENDING: whether the excess is present at t=0 or grows.** If ERF starts at the
+driver's speed and accelerates over hours, decoupling is confirmed and the
+surface fix is the fix. If it is fast in the FIRST output, initialisation or the
+ingest is injecting fast winds and the low Cd is a CONSEQUENCE rather than a
+cause -- which changes what the fixed-SST run tests. Not yet measured.
+
+### Instrument caveat
+
+`z_phys` is NODAL, so pairing `velocity[k]` with `z_phys[k]` carries a half-cell
+offset (~12.5 m near the surface). At 100 m that is a few percent and cannot
+manufacture a factor of 3. The first comparison of this quantity was invalid --
+it put ERF's mass-weighted 0-1500 m mean against d02's first six eta levels
+(24-488 m AGL); the numbers above are interpolated to matched AGL heights.
+
+### REFRAMING -- flagged as hypothesis, not finding
+
+If the interior runs 2.5-3.6x too fast, air arrives at and leaves the wall fast,
+and NSCBC with the relaxation off faithfully transmits it. **Item 59's 1.8-4.7x
+at inflowing columns may be this same excess sampled at the wall rather than a
+boundary defect**, and the entire boundary arc (items 51-59) may have been
+measuring an interior momentum defect at its most visible location. Item 59 is
+NOT rewritten on this; the candidate is recorded.
