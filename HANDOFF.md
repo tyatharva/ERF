@@ -421,9 +421,11 @@ project, not a config change.**
 
 ## 7c. BLAST RADIUS — read this before quoting any number in this document
 
-**Item 60: the surface was never ingested.** `t_surf` is pinned at 271.00 K with
-zero variance, land and ocean identical, for the whole run, in every
-CONUS404-driven result. `Qstar ≈ 0` — essentially no surface moisture flux
+**Item 60: the surface was never ingested.** ERF's land mask `LMASK_0` is
+ALL-ZERO (0 land cells against the frame's 5429), so `ERF_SurfaceLayer.cpp:845`
+routes every cell to the sea branch and `t_surf = SST_0 = 271.00 K` with zero
+variance -- land included -- for the whole run, in every CONUS404-driven result.
+271.00 is the LOWER CLAMP of the ingest's own validity window, not a fallback. `Qstar ≈ 0` — essentially no surface moisture flux
 anywhere. The reference d02 has a real SST field (mean 286.55 K, std 1.632).
 **ERF ran 10.7 K cold with a dead surface; the references did not.**
 
