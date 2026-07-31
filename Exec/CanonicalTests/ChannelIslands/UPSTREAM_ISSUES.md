@@ -7408,8 +7408,15 @@ UNDER-state the meridional component. Over the Transverse Ranges at h15:
 | d02 earth-relative (independent) | 240.5 deg |
 
 Since the Transverse Ranges run E-W, the cross-barrier component IS v, so the
-bug UNDER-states orographic forcing. **It therefore cannot explain the
-orographic excess -- it works against it.** An earlier reading of this item had
+bug UNDER-states orographic forcing.
+
+> **CORRECTED BY ITEM 62 (measured).** This originally concluded the bug "cannot
+> explain the orographic excess -- it works against it." **Both clauses are
+> refuted.** The paired rotated run took Santa Ynez from 2.13x to **0.83x** and
+> every band beyond dN 7 toward 1.0, against a prediction of 2.5-3.4x recorded in
+> advance. Correcting the direction moved precipitation OFF the terrain: the
+> wind-DIRECTION error was placing precipitation wrongly, and that dominates the
+> component argument below. An earlier reading of this item had
 the sign inverted and claimed the bug inflated v and matched item 51's
 "more southerly than d02" signature; that was wrong. ERF's interior is more
 southerly than d02 while its frames are more westerly than d02 -- opposite
@@ -7627,7 +7634,20 @@ flux, in every CONUS404-driven run.** Items 41, 44, 47-59.
 
 A 271 K surface with no evaporation is cold and dry and should SUPPRESS
 precipitation, yet Domain B's marine excess is 6.9-9.2x and interior ascent 2.4x
-d02. A supersaturation route was proposed and **FALSIFIED**: ERF is consistently
+d02.
+
+> **TENSION RESOLVED ON THE MOMENTUM SIDE (item 63).** Excess precipitation with
+> CORRECT relative humidity and NO surface moisture flux is not a moisture
+> defect -- it is **upslope/convergence flux excess from flow 2.5-3.6x too fast
+> at 100 m** against both d02 and the driver. Cd is 1.27e-4 over ocean and
+> 4.65e-4 over land, 9x and 17x below physical, and ERF's low-level shear is
+> absent (15.4 -> 14.8 m/s over 100-500 m) where the reference has a normal
+> sheared boundary layer. A 271 K surface with Qstar ~= 0 and Tstar > 0 is stably
+> stratified, suppresses mixing, and decouples the boundary layer from the
+> ground -- which produces exactly that. **This surface defect is therefore the
+> leading CANDIDATE mechanism for the speed excess, not merely a caveat on the
+> wet runs.** Still a candidate: whether the speed excess is present at t=0 or
+> grows in time is unmeasured, and decides cause from consequence. A supersaturation route was proposed and **FALSIFIED**: ERF is consistently
 DRIER than the driver, never near-saturated where the driver is not (A h15
 dN 20-40: RH 76.2% vs 93.9%; B h15 dN 60+: 64.3% vs 77.6%), and the gap widens
 inward as increasing dryness. **The cause of the excess remains unidentified.**
