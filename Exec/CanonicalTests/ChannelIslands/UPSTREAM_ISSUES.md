@@ -7160,3 +7160,219 @@ discussed in items 52-54, but the four arms are not on a bit-common instant.
 correct and the wrong thing happens underneath* -- as in the Blackwell arch
 fallback (HANDOFF 7b) and item 46. 55a is worse than a missing guard, because it
 printed `OK`.
+
+
+## 56. THE ">500 m BIAS" WAS MEASURED WHERE SCORING IS INVALID -- 99.6% of those cells lie outside the scored interior, and the excess tracks the NORTH WALL, not elevation
+
+Post-processing on the item-52 arms, no runs. Prompted by plotting the fields
+instead of tabulating them: the maps show the excess as a narrow coastal strip
+that never enters the scored interior.
+
+**A. The mask geometry, which nobody had checked.**
+
+| | |
+|---|---|
+| >500 m LAND cells | 1351 |
+| ...inside the scored interior d>=20 | **5 (0.4%)** |
+| ...inside the d<10 relaxation band | **1010 (74.8%)** |
+| max terrain anywhere in the interior | **561 m** |
+| LAND cells inside the interior | 509 of 2831 (18%) |
+
+Land-only mean terrain by distance from the wall: **781 m** at d 0-4, 721 at
+5-9, 747 at 10-14, 429 at 15-19, **169** at 20-29, 110 at 30-47. Terrain height
+and wall distance are nearly perfectly anti-correlated on this domain, so
+"orographic" and "boundary-adjacent" name THE SAME CELLS. Item 44 closed
+boundary-adjacency using `du_max`, a single mass-clamp knob; that test cannot
+separate the two hypotheses because both predict the same cells.
+
+**Consequence: the campaign's headline defect was computed almost entirely in
+the region it declares unscoreable.** In the region designed to be scored, the
+interior mean difference is **+0.01 to +0.04 in** across all four item-52 arms,
+and the interior bias is 1.03-1.11x d02.
+
+**B. At fixed terrain height, the excess tracks the WALL.** ERF/d02, land cells
+(sigma=1 / w_damp):
+
+| terrain | d 0-4 | d 5-9 | d 10-14 | d 15-24 |
+|---|---|---|---|---|
+| 100-300 m | 4.70 / 4.19 | 4.13 / 2.59 | 1.97 / 0.80 | **0.66 / 0.34** |
+| 300-600 m | 1.94 / 1.62 | 4.06 / 3.15 | 2.65 / 1.31 | 1.28 / 0.65 |
+| 600-1000 m | 2.70 / 2.55 | 4.31 / 3.52 | 1.75 / 1.07 | 2.19 / 1.87 |
+| 1000-3000 m | 2.03 / 1.60 | 2.88 / 2.48 | 0.41 / 1.02 | 1.55 / 1.74 |
+
+Down a column the ratio is ~4x at d 5-9 whether the terrain is 100 m or 1000 m.
+Across a row at 100-300 m it falls 4.7 -> 0.66, a factor of seven on essentially
+flat ground.
+
+**C. It is ONE wall, not "walls" -- and that is the control.** A `min(distance
+to any wall)` metric is WRONG here and manufactures a wall effect out of an
+average: the north and east walls behave oppositely. All land within 9 cells of
+a wall is near the north or east wall only (west and south are open ocean).
+
+| wall | 0-4 | 5-9 | 10-14 | 15-24 | 25-47 |
+|---|---|---|---|---|---|
+| **north (yhi)** | 2.72 | **4.12** | 1.77 | 1.27 | 0.58 |
+| east (xhi) | 1.11 | 1.25 | 0.60 | 0.88 | 1.49 |
+
+**D. Controlled -- terrain 300-1000 m, upslope exposure 0.01-0.06 and 18-45 km
+inland ALL held fixed, only distance from the north wall varying:**
+
+| dN | n | terr | upslope | inland | d02 | MRMS | ERF | /d02 | /MRMS |
+|---|---|---|---|---|---|---|---|---|---|
+| 0-6 | 42 | 558 m | 0.030 | 23 km | 1.79 | 1.49 | 5.97 | 3.33 | 4.01 |
+| 7-12 | 36 | 571 m | 0.033 | 31 km | 1.26 | 1.29 | 4.74 | **3.76** | **3.68** |
+| 13-19 | 77 | 556 m | 0.031 | 32 km | 1.12 | 1.18 | 1.50 | 1.34 | 1.28 |
+| 20-34 | 38 | 466 m | 0.029 | 34 km | 1.02 | 0.95 | 1.16 | **1.13** | **1.22** |
+
+Near/far enhancement: **d02 1.83x, MRMS 1.76x, ERF 4.49x.** Break at dN ~ 12-13
+(36-39 km) against `real_width` = 10 cells. Both references agree independently
+and both show a REAL windward maximum -- 1.54 in (d02) and 1.30 in (MRMS) at
+24-33 km inland, ~2.5x the immediate coast. ERF reproduces that feature and then
+multiplies it near the wall.
+
+**E. Why this hid so long.** Both references are FLAT across d 0-24 at every
+terrain bin (d02 0.92/0.97/1.10/1.08 at 100-300 m; MRMS likewise), so nothing in
+a reference-vs-reference check flags it. And d02's genuine windward maximum sits
+at mean d = 8.4 -- geometrically on top of ERF's spike -- so the confound is
+real and not obviously separable without moving the domain.
+
+**Caveat carried:** on this domain "near the north wall" and "on the coastal
+windward front" remain the same cells. The controlled table matches terrain,
+exposure and inland distance but not range identity, and distance from the north
+wall IS latitude here. Suggestive, not decisive. **Item 57 moves the domain,
+which is the only thing that separates them.**
+
+Figures: `figs/c404_fields_0-3in.png`, `c404_fields_0-12in.png`,
+`c404_diff_vs_d02.png`, `c404_profiles_spectra.png`, `c404_wall_vs_coast.png`.
+Scripts: `scoring/c404_fields.py`, `scoring/c404_wall_vs_coast.py`.
+
+
+## 57. MOVE THE DOMAIN: the excess FOLLOWS THE WALL, not the terrain -- and a second, separate defect is an interior-wide marine over-production
+
+Item 56 could not separate "near the north wall" from "on the coastal windward
+front" because on the parent box they are the same cells. Two new domains, same
+192x96 @ 3 km and the same PINNED LCC -- size held fixed on purpose, because
+`real_width`, the dN ~ 12 break and the near/far bins are all defined in CELLS.
+Four runs, one GPU each, `sigma` = 0.1 and 0.03 on both. All four `EXIT=0` at
+TIME = 82816 s.
+
+| domain | NE pin | what it removes |
+|---|---|---|
+| **A** | 35.4 / -117.2 | moves Santa Ynez from dN 0-6 to dN 34; new, different terrain enters the near-wall band |
+| **B** | 32.3 / -119.3 | removes terrain entirely -- deep Pacific, no land in the box and none upstream of any wall |
+
+### A. THE ANSWER: the excess stayed at the wall
+
+ERF/d02, **stratified by terrain height, never aggregated** -- Domain A's
+near-wall band tops out far below the parent's 2368 m, so an aggregate number
+would confound a weaker wall effect with lower terrain:
+
+| terrain | dN 0-6 | dN 7-12 | dN 13-20 | dN 21-29 | dN 30-47 | dN 48-95 |
+|---|---|---|---|---|---|---|
+| 100-300 m | **3.79x** (156) | 2.03 (111) | 1.36 (84) | **0.86** (98) | 1.01 (242) | 0.35 (354) |
+| 300-600 m | **5.18x** (140) | 2.96 (78) | 1.55 (94) | **0.81** (50) | 1.52 (318) | 0.81 (236) |
+| 600-1000 m | **3.71x** (261) | 3.32 (281) | 1.03 (442) | **1.25** (412) | 2.04 (365) | 1.17 (64) |
+| 1000-3000 m | **2.70x** (159) | 1.49 (101) | 0.61 (176) | **0.83** (349) | 1.16 (400) | -- |
+
+**2.7-5.2x inside dN 0-6 and 0.8-1.25x beyond dN 21, at EVERY height from 100 m
+to 3000 m.** The 1000-3000 m band -- the highest terrain present -- is 2.70x at
+the wall and 0.83x away from it. The wall effect appears at every elevation; the
+elevation effect does not appear at any wall distance.
+
+**Santa Ynez, the same mountain, moved.** dN 0-6 -> **dN 34**:
+
+| | ERF | d02 | ratio |
+|---|---|---|---|
+| parent domain, dN 0-6, sigma=0.03 | 6.07 in | 1.89 in | **3.21x** |
+| Domain A, dN 34, sigma=0.03 | 4.12 in | 1.94 in | **2.13x** |
+| Domain A, dN 34, sigma=0.1 | 4.73 in | 1.94 in | 2.44x |
+| 5x5 neighbourhood (n=23, 388 m, dN 32-36) | -- | -- | 1.97x / 2.33x |
+
+d02 barely moves (1.89 -> 1.94 in, same mountain, same data). **ERF drops 32%.**
+
+Per wall, terrain >= 100 m -- the east wall is again the internal control:
+
+| wall | 0-4 | 5-9 | 10-14 | 15-24 | 25-47 |
+|---|---|---|---|---|---|
+| **north yhi** | **3.79x** | **3.85x** | 1.98 | 0.81 | 1.34 |
+| east xhi | 1.27 | 1.21 | 0.69 | 0.74 | 1.17 |
+
+Controlled near/far (matched terrain 300-1000 m, upslope, inland): **4.02x near
+vs 1.28x far, near/far 3.14** -- against the parent's 4.49x. And the wall
+profile is the clearest statement of all: **d02 has ONE peak (dN ~ 34, Santa
+Ynez). ERF has TWO** -- Santa Ynez, plus a second at dN 0-3 with no counterpart
+in either reference.
+
+**The decomposition:** a real orographic excess of **~2.1x** that is independent
+of the wall, plus **~2x additional wall enhancement** stacked on top when terrain
+sits inside dN 0-12. The parent domain's 2.21x ">500 m bias" was 74.8% inside the
+band, so it was reading the wall-enhanced value and calling it orographic.
+Domain A's whole-domain bias is **1.10x (sigma=0.03) / 1.26x (sigma=0.1)** vs
+d02, against the parent's 1.44x, purely because less terrain sits in the band.
+
+### B. A SECOND, SEPARATE DEFECT: interior-wide marine over-production
+
+Domain B has zero land and none upstream of any wall. Reference is **CONUS404**,
+the driver, so this asks "does ERF invent precipitation the boundary data does
+not contain" -- departure from forcing, not skill.
+
+| band | n | CONUS404 | sigma=0.03 | sigma=0.1 |
+|---|---|---|---|---|
+| near-wall d<=9 | 5360 | 0.751 mm | **6.1x** | **6.5x** |
+| interior d>=20 | 8512 | 0.424 | 6.9x | 9.5x |
+| deep d>=30 | 4752 | 0.398 | **7.2x** | **8.4x** |
+| deepest d>=40 | 1792 | 0.291 | 10.0x | 12.5x |
+
+**near/deep = 0.84 and 0.77.** The excess is SMALLER at the walls and grows
+inward -- the opposite sign from a boundary artifact. Domain mean 3.66 / 4.84 mm
+against CONUS404's 0.527 mm (**6.94x / 9.17x**).
+
+The wall profiles confirm it structurally: ERF's maxima sit at d ~ 145 from xlo,
+83 from ylo, 47 from xhi and 10 from yhi -- **all the same physical region**, the
+domain's northeast. One coherent feature seen from four walls, not four
+artifacts. Both references are flat at 0.00-0.06 in on every wall while ERF runs
+0.15-0.50 in, as diffuse SW-NE cellular structure CONUS404 simply does not have.
+The same signature is visible in Domain A as a saturated offshore maximum near
+34.5 N / -122 W that neither reference contains.
+
+**This would have been present in every run of the campaign and masked by
+land-focused scoring.** It points at the surface-flux / SST path, not the
+boundary path.
+
+### Instrument controls, all passed before anything was believed
+
+| check | result |
+|---|---|
+| new d02 regridder vs checked-in `wrf_d02_on_grid.npy` | **0.0000 mm** max diff |
+| CONUS404 vs d02, parent domain | 0.96x, PCC 0.804 |
+| CONUS404 vs d02, Domain A grid | 0.84x, PCC 0.788 |
+| Domain B all-ocean | FOUR independent sources agree: CONUS404 `LANDMASK`, CONUS404 SST, GLO-30 DEM, and the model's own `z_phys` = 12.50 m flat |
+| `conus404_to_bin.py` default target grid | bit-identical to the shipped literals |
+
+Three bugs caught by those controls: bin-averaging left 44% of cells empty for a
+COARSER source (right for d02 at 1.5 km, wrong for CONUS404 at 4 km, which needs
+interpolation); the terrain reader returned the file's x-coordinates as
+elevations (the file is `nx, ny, <nx x-coords>, <ny y-coords>, <nx*ny z>`); and
+`C404_LANDMASK` is not in wrf2d or wrf3d at all -- it is in
+`INVARIANT/USGS404_geo_em_d01.nc`.
+
+### Caveats carried
+
+- In Domain A, dN 0-6 is the Santa Lucia range and dN 34 is Santa Ynez -- both
+  coastal windward ranges, so wall distance and coastal-front position are still
+  partly confounded. What is new and not available before is that the SAME
+  mountain moved and lost a third of its excess.
+- Domain B turned out to be largely OUTSIDE the storm (CONUS404 puts 0.53 mm
+  across the box in 23 h), so its ratios divide by a near-dry denominator and are
+  not comparable in kind to the parent's 1.44x. Removing the terrain-inflow
+  confound and staying inside the storm traded against each other; that trade was
+  not flagged before the box was built.
+- MRMS is unusable on Domain B and **will not say so**: 0% flagged-missing, 93.5%
+  exactly zero, ~556 km from the nearest WSR-88D. Excluded explicitly.
+- Nothing here establishes that the marine excess and the orographic excess share
+  a cause. They are two findings, not one.
+
+Domains are `channelislands-3km-192x96-domA` / `-domB` in `validated_config.txt`.
+Figures `figs/item56_dom{A,B}_*`. Scripts `scoring/item56_analysis.py`,
+`scoring/item56_figs.py`, `pod/make_c404_bbox.py`, `pod/make_domain_refs.py`,
+`pod/fetch_c404_precip.py`.

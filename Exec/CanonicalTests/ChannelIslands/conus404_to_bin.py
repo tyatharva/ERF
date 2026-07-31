@@ -37,9 +37,32 @@ C404 = ("+proj=lcc +lat_1=30.0 +lat_2=50.0 +lat_0=39.100006103515625 "
 NLEV_SRC = 50
 RD, CP, P0 = 287.0, 1004.5, 1.0e5
 
-# target frame grid: ERF prob_lo/hi with > 4 ERF cells of margin on every side
-XS = np.arange(-450000., 252001., 6000.)
-YS = np.arange(-230000., 190001., 6000.)
+# target frame grid: ERF prob_lo/hi with > 4 ERF cells of margin on every side.
+#
+# The ERF box comes from C404_PROB (x_lo y_lo x_hi y_hi, metres in the PINNED
+# LCC). Defaults reproduce the channelislands-3km-192x96 grid this file shipped
+# with, bit for bit -- the 2020-12-28 frames in pod_data were built from those
+# literals, so the default path must not move. A second domain only needs
+# C404_PROB set; nothing else here is domain-specific.
+#
+# MARGIN is generous on purpose: erftools insets the frame and ERF refuses a
+# domain within 4 cells (12 km) of the frame edge
+# (ERF_WeatherDataInterpolation.cpp:312-323). build_mapping() hard-raises if the
+# target grid escapes the source subset, so an under-sized margin fails loudly.
+if 'C404_PROB' in os.environ:
+    _pl = [float(v) for v in os.environ['C404_PROB'].split()]
+    if len(_pl) != 4:
+        raise SystemExit('C404_PROB must be "x_lo y_lo x_hi y_hi" in metres')
+    MARGIN = float(os.environ.get('C404_MARGIN', '66000.'))
+    _snap = lambda v, up: (np.ceil(v / 6000.) if up else np.floor(v / 6000.)) * 6000.
+    XS = np.arange(_snap(_pl[0] - MARGIN, False), _snap(_pl[2] + MARGIN, True) + 1., 6000.)
+    YS = np.arange(_snap(_pl[1] - MARGIN, False), _snap(_pl[3] + MARGIN, True) + 1., 6000.)
+else:
+    # The 192x96 literals this file shipped with. The pod_data frames were built
+    # from exactly these, so the unset path stays byte-for-byte identical rather
+    # than being re-derived from a margin rule that would round differently.
+    XS = np.arange(-450000., 252001., 6000.)
+    YS = np.arange(-230000., 190001., 6000.)
 # stretched heights ASL; must exceed the ERF domain top (19003 m) with margin
 _s = np.arange(46) / 45.0
 ZS = (25000.0 * (np.exp(3.6 * _s) - 1.0) / (np.exp(3.6) - 1.0)).astype(np.float64)
@@ -111,6 +134,18 @@ def write_frame(path, lat, lon, x, y, z, fields):
 
 
 def main():
+    # Fail on a missing input NOW, not with a bare KeyError partway through the
+    # surface step of frame 1 -- by which point several minutes of OPeNDAP
+    # fetching have already been spent.
+    missing = [k for k in ('C404_BBOX', 'C404_LAT', 'C404_LON', 'C404_LANDMASK')
+               if k not in os.environ]
+    if missing:
+        sys.exit(f'FATAL: unset environment variable(s): {", ".join(missing)}\n'
+                 f'  C404_LAT / C404_LON / C404_LANDMASK are the full 1015x1367\n'
+                 f'  CONUS404 XLAT, XLONG and LANDMASK saved as .npy. LANDMASK is in\n'
+                 f'  INVARIANT/USGS404_geo_em_d01.nc (it is NOT in wrf2d/wrf3d).\n'
+                 f'  C404_BBOX comes from pod/make_c404_bbox.py.')
+
     outdir3 = sys.argv[1]; outdirS = sys.argv[2]
     os.makedirs(outdir3, exist_ok=True); os.makedirs(outdirS, exist_ok=True)
     j0, j1, i0, i1 = [int(v) for v in np.load(os.environ['C404_BBOX'])]

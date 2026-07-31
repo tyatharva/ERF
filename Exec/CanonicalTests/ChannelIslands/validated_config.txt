@@ -276,3 +276,69 @@ MUST erf.initial_dz                25.0
 #   precedent. Cross-checked against the 128x64 terrain in the overlap: bias
 #   +0.03 m, RMS 12.86 m, corr 0.9954 -- the projection carried through.
 MUST erf.terrain_file_name         "channel_islands_terrain_3km_192x96.txt"
+
+
+DOMAIN channelislands-3km-192x96-domA 192 96 48
+# ITEM 56 DISCRIMINATOR DOMAIN. Same 192x96 @ 3 km and the same PINNED LCC as
+# the parent box -- only the NE pin moves, 34.7 -> 35.4 N at the same -117.2.
+# Size is held fixed on purpose: real_width, the dN ~ 12 break and the near/far
+# bins are all defined in CELLS, so a different box would not be comparable.
+#
+# WHY: in the parent domain 99.6% of the >500 m cells sit OUTSIDE the scored
+# interior (1346 of 1351) and 74.8% sit inside the d<10 relaxation band, so the
+# ">500 m bias" was measured almost entirely where the campaign says scoring is
+# invalid. Shifting the pin north moves the Transverse Ranges from dN 0-6 to
+# dN 26-32, past the 12-cell break, and brings new terrain into the near-wall
+# band. Excess follows the wall -> boundary artifact; excess follows Santa Ynez
+# -> real orographic response.
+# prov: MEASURED 2026-07-31. d02 coverage 100.00% of the box AND 100.00% of the
+#   interior d>=20 (against the real 765x745 curvilinear wrfout footprint, not
+#   the quoted lat/lon bounds). CONUS404 100.00% including the frame margin.
+#   Scoreable >500 m cells inside d>=20 rise from 13 to 1176. >500 m by dN:
+#   478 at 0-6, 412 at 7-12, 1085 at 13-25, 569 at 26-32, 715 beyond -- terrain
+#   on BOTH sides of the break, which is what makes the test a discriminator.
+MUST geometry.prob_lo              -389768.39  -89294.60     0.0
+MUST geometry.prob_hi              186231.61  198705.40  19003.0
+MUST erf.grid_stretching_ratio     1.09311734
+MUST erf.initial_dz                25.0
+# prov: same dem.tif, same pinned projection, regenerated at 1000 m -> 577x289,
+#   identical convention to the parent terrain file. 7.67% of points fall
+#   outside the DEM and are zero-filled (parent 6.85%, precedent 8.75%).
+#   elev 0.0 .. 3021.1 m.
+MUST erf.terrain_file_name         "terrain_3km_192x96_domA.txt"
+
+
+DOMAIN channelislands-3km-192x96-domB 192 96 48
+# ALL-OCEAN CONTROL for item 56. Same 192x96 @ 3 km, same pinned LCC, NE pin
+# 32.3 / -119.3 -- deep Pacific, no terrain anywhere in the box and none
+# upstream of any wall. If the near-wall excess survives over open ocean it is
+# not orographic in any sense, and all four walls are independent controls.
+# prov: MEASURED 2026-07-31. ZERO land cells in the box by TWO independent
+#   sources -- CONUS404 LANDMASK (INVARIANT/USGS404_geo_em_d01.nc) and the
+#   GLO-30 DEM, which agree on 100.00% of cells over the checked window.
+#   Nearest land 98.3 km (San Clemente I.). Land within 200 km outboard of each
+#   wall face: xlo W 0, ylo S 0, xhi E 0, yhi N 36 pts at 102.5 km -- i.e. NONE
+#   off either inflow wall, and none anywhere upwind of the box centre.
+#   CONUS404 100.00% of box and frame margin; box sits 128.8 km from the
+#   CONUS404 boundary (interior 202 km), clear of its 20-40 km relaxation zone.
+#
+# REFERENCE IS CONUS404, NOT d02. d02 reaches only 10.42% of this box, and the
+#   shape is disqualifying: 100% of dN 0-6, 50% of dN 7-12, 0% of everything
+#   beyond, 0% of the interior d>=20. It covers the NEAR bins and none of the
+#   FAR bins, so it cannot form a near/far ratio at all. Use it only as a
+#   reference-consistency check in dN 0-6, never as the enhancement measurement.
+# MRMS IS NOT USABLE HERE AND WILL NOT SAY SO. It reports 0% flagged-missing
+#   over this box but 93.5% of cells are exactly zero, and the box centre is
+#   ~556 km from KNKX, far outside useful radar range. Pass-2 writes 0 rather
+#   than a missing flag, so a scoring script will silently accept a field of
+#   zeros and report ERF as enormously wet. Exclude Domain B explicitly.
+MUST geometry.prob_lo              -580708.67 -434903.69     0.0
+MUST geometry.prob_hi               -4708.67  -146903.69  19003.0
+MUST erf.grid_stretching_ratio     1.09311734
+MUST erf.initial_dz                25.0
+# prov: same generator, 1000 m -> 577x289. 69.95% zero-filled (the box is
+#   mostly west/south of the DEM) and elev min/max = 0.0/0.0 m exactly.
+#   dem_to_erf_terrain.py prints "WARNING: max elevation < 100 m -- wrong box or
+#   wrong DEM?" on this file. That warning is EXPECTED and CORRECT here; it is a
+#   print only (line 187, return 0), not a failure.
+MUST erf.terrain_file_name         "terrain_3km_192x96_domB.txt"

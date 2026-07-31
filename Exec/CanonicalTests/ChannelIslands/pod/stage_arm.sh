@@ -11,7 +11,11 @@ set -uo pipefail
 RUN=${1:?usage: stage_arm.sh <run_dir_name>}
 ERF_ROOT=${ERF_ROOT:-/app/ERF}
 CI=$ERF_ROOT/Exec/CanonicalTests/ChannelIslands
+# DATA / DECK / TERRAIN select the domain. Defaults are the parent
+# channelislands-3km-192x96 box, so existing callers are unaffected.
 DATA=${DATA:-$ERF_ROOT/pod_data}
+DECK=${DECK:-inputs_c404}
+TERRAIN=${TERRAIN:-channel_islands_terrain_3km_192x96.txt}
 DEST=$ERF_ROOT/$RUN
 
 die () { printf '\nFATAL: %s\n' "$*" >&2; exit 1; }
@@ -26,8 +30,13 @@ cd "$DEST" || die "cannot cd $DEST"
 
 ln -sf "$DATA/CONUS404Data_3D" .
 ln -sf "$DATA/CONUS404Data_Surface" .
-cp "$CI/channel_islands_terrain_3km_192x96.txt" . || die "no terrain file"
-cp "$CI/inputs_c404" .                            || die "no inputs_c404"
+cp "$CI/$TERRAIN" .   || die "no terrain file $CI/$TERRAIN"
+# ERF reads the deck by the name the run command passes, always inputs_c404.
+cp "$CI/$DECK" inputs_c404 || die "no deck $CI/$DECK"
+# The deck must name the terrain file that was actually staged, or ERF silently
+# falls back to the problem's custom terrain (see inputs_c404 line 203).
+grep -q "erf.terrain_file_name = \"$TERRAIN\"" inputs_c404 \
+    || die "deck $DECK does not name the staged terrain $TERRAIN"
 for t in rrtmgp-data-sw-g224-2018-12-04.nc rrtmgp-data-lw-g256-2018-12-04.nc; do
     cp "$ERF_ROOT/Submodules/RRTMGP/rrtmgp/data/$t" . || die "missing RRTMGP table $t"
 done
