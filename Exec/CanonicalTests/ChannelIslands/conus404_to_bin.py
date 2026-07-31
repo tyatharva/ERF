@@ -173,7 +173,13 @@ def main():
 
     NH = int(os.environ.get("C404_FRAME_HOURS", "3"))
     NF = int(os.environ.get("C404_NFRAMES", "9"))
-    times = [dt.datetime(2020, 12, 28) + dt.timedelta(hours=NH * k) for k in range(NF)]
+    # C404_START lets a run start before the event for spin-up lead (item 64:
+    # the interior initialises at rest, so the analysis window must sit AFTER
+    # the wind field has spun up from the boundaries). Default is the event day,
+    # so the existing frame sets reproduce byte-for-byte.
+    _s = os.environ.get('C404_START', '2020-12-28')
+    _y, _m, _d = [int(v) for v in _s.split('-')]
+    times = [dt.datetime(_y, _m, _d) + dt.timedelta(hours=NH * k) for k in range(NF)]
     S3 = f'[{j0}:1:{j1}][{i0}:1:{i1}]'
     for t in times:
         wy = 'wy2021'; mo = t.strftime('%Y%m')

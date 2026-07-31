@@ -39,6 +39,17 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     infile.read(reinterpret_cast<char*>(&ndata), sizeof(int));
 
     amrex::Gpu::DeviceVector<Real> xvec_d(nx*ny*nz), yvec_d(nx*ny*nz), zvec_d(nz);
+
+    // The frame format carries two nx*ny lat/lon planes between the header and
+    // the x/y/z coordinate vectors. The 3D path reads them (ReadCustomBinaryIC
+    // takes latvec_h/lonvec_h); this parser did not skip them, so every read
+    // below was offset by 2*nx*ny - (nx+ny+nz) floats: xvec_h held latitudes,
+    // sst_h held longitudes, and alb_h ran past EOF. Targets then clamped to a
+    // single corner in bilinear_interpolation_2d and no SST stencil point ever
+    // passed the 271-305 K test, so the whole surface state came back as
+    // sentinels (mask 0, SST -1, albedo at its 0.03 floor).
+    infile.seekg(std::streamoff(2)*nx*ny*std::streamoff(sizeof(float)), std::ios::cur);
+
     for(int i=0; i<nx; i++) {
         infile.read(reinterpret_cast<char*>(&value), sizeof(float));
         xvec_h.emplace_back(value);
@@ -354,6 +365,43 @@ ERF::SurfaceDataInterpolation(const int lev,
             IntVect ng_sst_copy = surf_mf.nGrowVect();
             ng_sst_copy.min(sst_lev[lev][0]->nGrowVect());
             MultiFab::Copy(*sst_lev[lev][0], surf_mf, 1, 0, 1, ng_sst_copy);
+
+            // ---- UPSTREAM_ISSUES item 60 ----------------------------------
+            // comp 0 is the LAND-SEA MASK and was allocated above but NEVER
+            // POPULATED. lmask_lev stayed at its default, so LMASK_0 read a
+            // single unique value of 0 -- every cell classified SEA, and
+            // ERF_SurfaceLayer.cpp:845 routed every column (land included) to
+            // the SST branch.
+            //
+            // This is the SECOND of item 60's two defects and only becomes
+            // visible once the first is fixed. The first was in the reader
+            // above (the unskipped lat/lon planes): while that stood, comp 0
+            // was identically 0 anyway, so populating lmask from it would have
+            // changed nothing -- measured, 0 land cells of 18432. Both fixes
+            // are required, and neither alone is sufficient.
+            //
+            // lmask is an iMultiFab and surf_mf is Real, so this cannot be a
+            // MultiFab::Copy -- convert per cell. Ghosts are clamped to what
+            // the DESTINATION owns for exactly the reason the 29m comment
+            // above gives: the restart path allocates with ng[2]=0 and an
+            // over-wide copy walks off the fab silently in Release.
+            {
+                IntVect ng_lm = surf_mf.nGrowVect();
+                ng_lm.min(lmask_lev[lev][0]->nGrowVect());
+                ng_lm[2] = 0;
+                for (MFIter mfi(*lmask_lev[lev][0]); mfi.isValid(); ++mfi) {
+                    const Box& gbx = mfi.growntilebox(ng_lm);
+                    const Array4<int>&        lm = lmask_lev[lev][0]->array(mfi);
+                    const Array4<const Real>& sm = surf_mf.const_array(mfi);
+                    ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        lm(i,j,k) = (sm(i,j,k,0) >= Real(0.5)) ? 1 : 0;
+                    });
+                }
+                Print() << "HindCast land-sea mask -> lmask: "
+                        << lmask_lev[lev][0]->sum(0) << " land cells of "
+                        << lmask_lev[lev][0]->boxArray().numPts() << std::endl;
+            }
 
             // comp 2 = surface albedo (ERA5 fal). Register only when the
             // frames carry it (comp 2 >= 0); radiation falls back to its
