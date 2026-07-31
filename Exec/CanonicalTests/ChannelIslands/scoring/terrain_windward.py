@@ -16,6 +16,7 @@ each run rather than imposed. Windward = terrain rising along the flow.
 import sys
 import numpy as np
 import yt
+from plt_guard import reject_if_poisoned
 
 yt.set_log_level(50)
 NX, NY, DX = 192, 96, 3000.0
@@ -42,30 +43,13 @@ BINS = [('flat   <100 m', (terr < 100) & LAND),
         ('>500 m', (terr >= 500) & LAND)]
 
 
-def reject_if_truncation_poisoned(lab, path, ra):
-    """Refuse a plotfile written on the stop_datetime truncation step.
-
-    Item 31 reaches PLOTFILES, not just checkpoints -- see the twin of this
-    function in score_c404.py for the measurement. A final step of dt = 2^-25 s
-    leaves NaN in a 19-cell band on all four faces, covering 99.0% of the
-    >500 m LAND cells and the Santa Ynez point, while prognostic fields stay
-    clean. Scoring it silently returns a wrong bias and a NaN at Santa Ynez.
-    """
-    n = int(np.isnan(ra).sum())
-    if n:
-        sys.exit(
-            f'FATAL [{lab}]: {path} has {n} NaN cells in rain_accum '
-            f'({100.0 * n / ra.size:.1f}% of the surface).\n'
-            f'  This is the stop_datetime truncation-step plotfile (item 31, '
-            f'extended to plotfiles). Score the previous plotfile instead.')
-
 
 def load(spec):
     lab, p = spec.split('=', 1)
     ds = yt.load(p)
     g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
     ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
-    reject_if_truncation_poisoned(lab, p, ra)
+    reject_if_poisoned(lab, p, ra)
     u = np.asarray(g[('boxlib', 'x_velocity')])
     v = np.asarray(g[('boxlib', 'y_velocity')])
     rho = np.asarray(g[('boxlib', 'density')])

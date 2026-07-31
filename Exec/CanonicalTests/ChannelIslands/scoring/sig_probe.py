@@ -14,6 +14,8 @@ import sys
 import numpy as np
 import yt
 
+from plt_guard import reject_if_poisoned
+
 yt.set_log_level(50)
 BINS = [(0, 0), (1, 2), (3, 5), (6, 9), (10, 14), (15, 19), (20, 29), (30, 95)]
 
@@ -22,6 +24,7 @@ def one(pltdir, label):
     ds = yt.load(pltdir)
     g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
     ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+    reject_if_poisoned(label, pltdir, ra)
     t = float(ds.current_time) / 3600.0
     NX, NY = ra.shape
     ii, jj = np.meshgrid(np.arange(NX), np.arange(NY), indexing='ij')

@@ -7106,15 +7106,50 @@ which never reads the end-of-run plotfile at all.
 
 ### Guard status after this item
 
-| script | reads a plotfile path | guarded |
+All of it now goes through one module, `scoring/plt_guard.py`, which enforces two
+rules: **reject on the DATA, never on dt** (the degenerate dt is not a fixed
+value -- 2^-25 here, 2^-26 on the item-29-era width runs -- and an AMReX plotfile
+Header carries no dt field at all, which is also why `pick_restart_chk.sh`
+cannot simply be extended to plotfiles); and **order plotfiles by TIME, never by
+name** (`plt10000` sorts before `plt9999`, so first-wins hour dedup was relying
+on step numbering happening to be lexicographic).
+
+| script | how it reads plotfiles | guard |
 |---|---|---|
-| `score_c404.py` | yes | **yes** (`reject_if_truncation_poisoned`, hard exit) |
-| `terrain_windward.py` | yes | **yes** |
-| `pm_fss_hourly.py` | globs a run dir | **yes** -- and it was ACTIVELY WRONG: its `series()` lacked the `h in out` dedup its sibling `inflow_flux.py:51` has, so both the h23 and the end-of-run plotfile mapped to h=23 and the poisoned one won. Now dedups AND rejects on NaN. |
-| `sig_probe.py`, `outflow_probe.py`, `interior_moisture.py` | yes | **NO -- still exposed.** All three use `nanmean`, so a poisoned file degrades silently rather than erroring. |
+| `score_c404.py`, `terrain_windward.py` | explicit path | `reject_if_poisoned` -- hard exit |
+| `sig_probe.py`, `outflow_probe.py`, `interior_moisture.py` | explicit path | `reject_if_poisoned` -- hard exit. Previously unguarded AND `nanmean` throughout, so a poisoned file degraded silently rather than erroring. |
+| `spinup_split.py`, `hourly_series_arms.py` | globs a run dir | `plotfiles_by_time` + `is_poisoned` skip. Previously excluded only *incidentally*, by first-wins dedup plus lexicographic order happening to equal time order. |
+| `pm_fss_hourly.py` | globs a run dir | `plotfiles_by_time` + `is_poisoned` skip + the `h in out` dedup it was missing. **This one was ACTIVELY WRONG**: its `series()` lacked the dedup its sibling `inflow_flux.py:51` has, so both the h23 and the end-of-run plotfile mapped to h=23 and the poisoned one won. |
 | `inflow_flux.py` | globs | n/a -- reads only prognostic fields, which are clean |
-| `spinup_split.py`, `hourly_series_arms.py` | glob | excluded only *incidentally*, by first-wins dedup plus lexicographic order happening to equal time order. Fragile, not guarded. |
-| `pick_restart_chk.sh` | checkpoints | checkpoints only, and **cannot** be extended -- an AMReX plotfile Header carries no dt field |
+| `pick_restart_chk.sh` | checkpoints | checkpoints only (see above) |
+
+Regression: `spinup_split.py` and `hourly_series_arms.py` reproduce their
+pre-change output **bit-identically** on arm A, confirming the incidental
+exclusion had been working there; the guards now make it structural.
+
+**Did the `pm_fss_hourly.py` defect corrupt any published number? NO.** Its only
+consumer is item 35, and:
+
+1. It scores on `mask = (d >= 20)`. **The NaN band is `d <= 18`. Zero poisoned
+   cells fall inside the scored mask** -- the band and the mask are disjoint.
+2. **Item 35 publishes only the 3 km columns** (`1 mm 3 km gap`, `5 mm 3 km
+   gap`, and the distance table's `20-29 / 30-39 / 40-47` bins, all `d >= 20`).
+   At 3 km the FSS window is `size=1` -- no smoothing, so nothing can reach
+   outside the mask. Measured on arm A, clean vs poisoned h23: delta
+   **+0.0000** at 1 mm and **+0.0003** at 5 mm.
+3. The only quantity that *would* have moved is the **60 km** column, where the
+   `size=21` window reaches 10 cells past the mask edge into the band and
+   NaN >= thr evaluates False: **-0.0215** at 1 mm, **-0.0535** at 5 mm. Item 35
+   does not publish it, and in a Davies-minus-NSCBC *gap* it would partly cancel
+   if both arms collided.
+
+Secondary, and not load-bearing: the Jan 9 runs item 35 used may never have
+collided at all. The collision needs two distinct plotfiles inside one hour,
+which arises here because `stop_datetime` "23:00:00" resolves to 82816 s (+16 s,
+item 32) while the hourly plotfile sits at 82800. Item 32 records that a
+**00:00:00 stop resolves exactly**, so a 24-h run ending at midnight writes one
+plotfile at h24, not two. Those runs are not in this checkout, so this is
+inference; points 1 and 2 do not depend on it.
 
 **Residual known issue:** because the guard selects the last clean plotfile, arms
 A and C were scored at t ~ 82801 s while B and D were scored at t = 82816 s -- a

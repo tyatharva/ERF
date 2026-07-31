@@ -15,6 +15,8 @@ import sys
 import numpy as np
 import yt
 
+from plt_guard import reject_if_poisoned
+
 yt.set_log_level(50)
 NX, NY = 192, 96
 ii, jj = np.meshgrid(np.arange(NX), np.arange(NY), indexing='ij')
@@ -28,6 +30,7 @@ def one(pltdir):
     g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
     t = float(ds.current_time) / 3600.0
     ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+    reject_if_poisoned(pltdir, pltdir, ra)
     qv = np.asarray(g[('boxlib', 'qv')])
     rho = np.asarray(g[('boxlib', 'density')])
     z = np.asarray(g[('boxlib', 'z_phys')])

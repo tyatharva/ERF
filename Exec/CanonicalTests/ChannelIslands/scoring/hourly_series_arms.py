@@ -15,6 +15,8 @@ import netCDF4 as nc
 import pyproj
 import pygrib
 import yt
+
+from plt_guard import is_poisoned, plotfiles_by_time
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -36,7 +38,11 @@ D = np.minimum.reduce([ii, jj, NX - 1 - ii, NY - 1 - jj])
 
 def erf_series(run):
     got = {}
-    for p in sorted(glob.glob(f'/app/ERF/{run}/plt[0-9]*')):
+    # Ordered by TIME, not by name: 'plt10000' sorts before 'plt9999', so the
+    # first-wins dedup below was relying on step numbering happening to be
+    # lexicographic. Poisoned plotfiles are skipped explicitly rather than
+    # being excluded by that accident of ordering (item 55b).
+    for p in plotfiles_by_time(f'/app/ERF/{run}'):
         try:
             ds = yt.load(p)
         except Exception:
@@ -45,7 +51,11 @@ def erf_series(run):
         if abs(t - h * 3600.) > 400. or h < 1 or h > 23 or h in got:
             continue
         g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
-        got[h] = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+        ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+        if is_poisoned(ra):
+            print(f'  [skip] {p} -- truncation-step NaN (item 55b)', flush=True)
+            continue
+        got[h] = ra
     hs = sorted(got); out = {}
     for k, h in enumerate(hs):
         out[h] = got[h] - (got[hs[k - 1]] if k > 0 else 0.0)

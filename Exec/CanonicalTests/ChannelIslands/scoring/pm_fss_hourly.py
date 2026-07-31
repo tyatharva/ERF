@@ -24,6 +24,7 @@ import sys
 import numpy as np
 import yt
 from scipy.ndimage import uniform_filter
+from plt_guard import is_poisoned, plotfiles_by_time
 
 yt.set_log_level(50)
 
@@ -44,7 +45,7 @@ def binarize(field, mask, rate):
 
 def series(run):
     out = {}
-    for p in sorted(glob.glob(f'{run}/plt[0-9]*')):
+    for p in plotfiles_by_time(run):
         try:
             ds = yt.load(p)
         except Exception:
@@ -60,7 +61,7 @@ def series(run):
         g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
         ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
         # Ordering alone is too fragile to rely on; reject on the data.
-        if np.isnan(ra).any():
+        if is_poisoned(ra):
             continue
         out[h] = ra
     return out
