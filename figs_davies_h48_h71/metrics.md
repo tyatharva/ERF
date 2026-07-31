@@ -57,7 +57,19 @@ is **5761 mm / 23 h at dN = 94** (j ~ 1, the ylo band) on 42 m terrain -- the
 same band where the dead legs' w dipole fired. RMSE 184.7 mm and the p99 of
 579 mm are driven by these band cells, not by the interior.
 
+The whole-domain maps (01_maps_h48_h71.png) show this directly: saturated
+yellow along the full north wall AND the full east wall, a spot at the south
+wall, and a difference panel that is near-white through the entire interior.
 Read plainly: in the interior this arm is a **1.2-1.3x wet bias with real
 spatial skill (r ~ 0.54)**. The 2.5x and r ~ 0 headline is a boundary-band
 artifact contaminating a domain that is only 192x96, where the four 10-cell
 bands are 33% of the land cells.
+
+## Whole-domain means (maps only; all metrics above stay land-only)
+
+| source | whole domain | land-only |
+|---|---|---|
+| ERF Davies | 26.2 mm | 47.2 mm |
+| WRF d02 | 13.2 mm | 18.6 mm |
+| MRMS | 10.2 mm | 18.8 mm |
+| Davies - d02 | +13.0 mm | +28.6 mm |

@@ -149,29 +149,44 @@ def main():
     ii, jj = np.meshgrid(np.arange(NX), np.arange(NY), indexing='ij')
     dN = NY - 1 - jj
 
-    # ---------- FIG 1: maps ----------
+    # ---------- FIG 1: maps, WHOLE DOMAIN ----------
+    # Plotted over every cell, not the land-only mask, so the boundary bands
+    # and the ocean field are visible. The METRICS stay land-only. Note MRMS
+    # over water is radar-only (no gauge constraint), so the ocean part of that
+    # panel is weaker evidence than the land part.
+    LAND = terr > 20.0
+    FULL = np.isfinite(erf_tot) & np.isfinite(d02_tot) & np.isfinite(mrms_tot)
     vmax = float(np.nanpercentile(np.concatenate(
-        [erf_tot[M], d02_tot[M], mrms_tot[M]]), 99))
+        [erf_tot[FULL], d02_tot[FULL], mrms_tot[FULL]]), 99))
     fig, ax = plt.subplots(2, 2, figsize=(13, 9))
-    show = lambda a: np.where(M, a, np.nan).T
     for k, (a, t) in enumerate([(erf_tot, 'ERF Davies'), (d02_tot, 'WRF d02'),
                                 (mrms_tot, 'MRMS')]):
-        p = ax.flat[k].imshow(show(a), origin='lower', vmin=0, vmax=vmax,
+        p = ax.flat[k].imshow(a.T, origin='lower', vmin=0, vmax=vmax,
                               cmap='viridis', aspect='auto')
-        ax.flat[k].set_title(f'{t}  (mean {np.nanmean(a[M]):.1f} mm)')
+        ax.flat[k].set_title(f'{t}   whole domain mean {np.nanmean(a):.1f} mm'
+                             f'  |  land-only {np.nanmean(a[M]):.1f} mm')
         plt.colorbar(p, ax=ax.flat[k], label='mm / 23 h')
     d = erf_tot - d02_tot
-    lim = float(np.nanpercentile(np.abs(d[M]), 99))
-    p = ax.flat[3].imshow(show(d), origin='lower', vmin=-lim, vmax=lim,
+    lim = float(np.nanpercentile(np.abs(d[FULL]), 99))
+    p = ax.flat[3].imshow(d.T, origin='lower', vmin=-lim, vmax=lim,
                           cmap='RdBu_r', aspect='auto')
-    ax.flat[3].set_title(f'Davies - d02  (mean {np.nanmean(d[M]):+.1f} mm)')
+    ax.flat[3].set_title(f'Davies - d02   whole domain {np.nanmean(d):+.1f} mm'
+                         f'  |  land-only {np.nanmean(d[M]):+.1f} mm')
     plt.colorbar(p, ax=ax.flat[3], label='mm / 23 h')
     for a in ax.flat:
-        a.axhline(NY - 1 - BAND, color='w', ls='--', lw=1)
+        a.contour(LAND.T.astype(float), levels=[0.5], colors='w',
+                  linewidths=0.6, alpha=0.9)
+        for e in (BAND, NX - 1 - BAND):
+            a.axvline(e, color='r', ls=':', lw=0.9)
+        for e in (BAND, NY - 1 - BAND):
+            a.axhline(e, color='r', ls=':', lw=0.9)
         a.set_xlabel('i'); a.set_ylabel('j')
-    fig.suptitle('Davies control, h48-h71 = 2020-12-28 00Z-23Z. '
-                 'Dashed = 10-cell band edge at the north wall.', fontsize=10)
-    fig.text(0.5, 0.005, CAP, ha='center', fontsize=7.5, wrap=True)
+    fig.suptitle('Davies control, h48-h71 = 2020-12-28 00Z-23Z, WHOLE DOMAIN. '
+                 'White = coastline (terrain 20 m); red dotted = all four '
+                 '10-cell lateral bands.', fontsize=10)
+    fig.text(0.5, 0.005, CAP + ' Maps show every cell; MRMS over water is '
+             'radar-only and is weaker evidence than its land field.',
+             ha='center', fontsize=7.5, wrap=True)
     fig.tight_layout(rect=[0, 0.03, 1, 0.97])
     fig.savefig(f'{out}/01_maps_h48_h71.png', dpi=130)
     plt.close(fig)
