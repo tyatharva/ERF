@@ -7836,3 +7836,140 @@ at inflowing columns may be this same excess sampled at the wall rather than a
 boundary defect**, and the entire boundary arc (items 51-59) may have been
 measuring an interior momentum defect at its most visible location. Item 59 is
 NOT rewritten on this; the candidate is recorded.
+
+---
+
+## 60 (ROOT CAUSE). THE SURFACE READER NEVER SKIPPED THE LAT/LON PLANES -- one missing seek, and TWO defects, neither sufficient alone
+
+Item 60 above established the symptom and is correct as written. This is the
+cause, found by source trace after the component read below, and fixed at
+commit `dc4a29fe`. It took two wrong guesses first, both recorded here because
+the wrong ones are what make the trace worth reading.
+
+**The trace that mattered.** Printing min/max per component of
+`surface_state_1` immediately after `FillSurfaceStateMultiFabs`:
+
+| comp | meaning | before | after |
+|---|---|---|---|
+| 0 | land-sea mask | 0 / 0 | **0 / 1** |
+| 1 | SST | -1 / -1 | **-1 / 288.92** |
+| 2 | albedo | 0.03 / 0.03 | **0.080 / 0.244** |
+
+All three degenerate **at once**, from a file independently verified good
+(`nx=120 ny=72 nz=1 nd=6`, `xs -456000..258000`, `ys -156000..270000`, field 0
+= 266.171..292.093 K) whose coordinates fully bracket the domain
+(`prob_lo -389768.39 -89294.60`, `prob_hi 186231.61 198705.40`).
+
+Those are not garbage values. **They are the fallback path's outputs**, and
+three independent fields taking their fallback simultaneously means the
+trigger is universally true, not that the interpolator is failing.
+
+**The defect.** `write_frame` (`conus404_to_bin.py`) emits:
+
+```
+[4 int32: nx ny nz nfields] [lat: nx*ny] [lon: nx*ny] [x: nx] [y: ny] [z: nz] [fields...]
+```
+
+`FillSurfaceStateMultiFabs` (`ERF_SurfaceDataInterpolation.cpp:36-45`) reads the
+four ints and then goes **straight to the x-coordinate vector**. It never skips
+the two `nx*ny` lat/lon planes. The 3D path does not have this bug: it calls
+`ReadCustomBinaryIC`, whose signature takes `latvec_h, lonvec_h`. Every read
+after the header was offset by `2*nx*ny - (nx+ny+nz)` = **17087 floats**.
+
+Each sentinel then follows arithmetically:
+
+| observed | cause |
+|---|---|
+| `xvec_h` = latitudes 32-37 | reads into the lat plane |
+| target x ~ -390 km >> `xvec[nx-1]` | `bilinear_interpolation_2d:162-172` clamps to a corner -> **one value for every cell** |
+| comp 0 mask = 0 | that corner of the misaligned array |
+| comp 1 SST = -1 | `sst_h` holds LONGITUDES (~ -119), never inside the 271-305 K test, so the masked stencil never accumulates -> `den = 0` -> `-1` at `:202` |
+| comp 2 alb = 0.03 | `alb_h` runs past EOF -> stale constant -> clamped up to its floor at `:219` |
+
+The layout is otherwise consistent -- `transpose(a,(2,1,0))` gives
+`k*nx*ny + j*nx + i`, matching both the reader loop and `get_single_index`.
+**Only the offset was wrong.**
+
+**The second defect.** comp 0 was allocated but never copied into `lmask_lev`,
+so `LMASK_0` had a single unique value of 0. This is genuinely separate, and it
+is invisible while the first stands: with the misaligned read, comp 0 was
+identically 0 anyway, so populating `lmask` from it changes nothing --
+**measured, 0 land cells of 18432**, which is what the first fix attempt
+produced. Both fixes are required; neither alone suffices.
+
+**Verification -- 30-step proof run, all four gate checks, reproduced on the
+committed binary:**
+
+| # | check | result |
+|---|---|---|
+| 1 | `SST_0` structure | 285.177-288.917 K, mean 287.470, sd 0.751, **3152 unique values**, **0 cells** at the 271.0 clamp |
+| 2 | land/sea split | **5533 land / 12899 water**; source frame 3027/8640, matching. `t_surf` = 285.18-288.92 tracking SST over water, **288.00 = T0** over land |
+| 3 | `Qstar` over water | nonzero on **12899/12899** cells, mean -7.62e-05 |
+| 4 | `Cd` over ocean | mean **1.217e-03**, median 1.217e-03, range 5.4e-4..1.9e-3 -- target 1.0-1.5e-3 |
+
+Check 4 is the one that reaches furthest. Item 63 measured `Cd` **9-17x below
+physical**; it is now inside the physical band. That does not by itself prove
+item 63's causal reading -- see `PREDICTIONS_71h.md` P1, which commits to the
+speed excess falling below 1.5x and says plainly what a partial recovery would
+falsify.
+
+**Two method notes, both about instruments rather than physics:**
+
+- The source-side audit at `:107-122` was **already in the code and already
+  correct**, and it reported `8640 water points, 8640 outside 271-305 K` for
+  the whole campaign. It now reports `5613 water points, 0 of them outside
+  271-305 K, 13 land points carrying fills`. The instrument was never wrong;
+  nobody read it as a statement about the READER rather than the FRAME.
+- I verified "the file is fine" and then wrote that the host-side data was
+  fine. Those are different claims. The file was fine; `xvec_h` was not, and
+  one `Print` of `xvec_h[0]` would have ended the trace an hour earlier.
+
+## 64. ERF INITIALISES THE MOMENTA AT REST BY DESIGN -- every 23 h arm in this campaign was measuring a domain still filling
+
+Source read, `ERF.cpp:2391`:
+
+```cpp
+// HindCast theta/qv coupling: ... Momenta remain zero (spin-up from rest).
+if (solverChoice.init_type == InitType::HindCast && solverChoice.hindcast_lateral_forcing) {
+    init_thermo_from_hindcast(lev);
+```
+
+This is **not a defect**. It is a documented design choice, stated in the
+comment, and `init_type = HindCast` is what every deck in this campaign sets.
+It is filed because of what it implies for everything already measured, not
+because anything needs fixing upstream.
+
+**The consequence.** At `t = 0` the interior carries **0.05 m/s** against the
+driver's 4.12 m/s. Only theta and qv are initialised from the frames; the wind
+field must be built entirely by lateral forcing propagating inward from the
+walls. On a 192x96 domain at 3 km, air entering at ~10 m/s needs **~16 h** to
+cross the short axis and longer to establish a balanced flow.
+
+**Why this reorders the campaign.** Every scored arm ran 23 h from rest. The
+first 12-16 h of each was a domain filling, not a hindcast, and the scoring
+window included all of it. That is the most likely single explanation for:
+
+- the near-wall enhancement being **strongest early and decaying** (fitted
+  tau = 10.6 +/- 5.1 h -- consistent with a fill time, though the fit does not
+  discriminate);
+- the excess following the **wall** rather than the terrain (item 56/57) --
+  the walls are where momentum enters a resting domain;
+- the interior being simultaneously too fast at 100 m (item 63) and too slow
+  in bulk at t=0, which is contradictory for a spun-up flow and ordinary for
+  one where the boundary is injecting momentum into stagnant air.
+
+**It does not explain everything, and saying so matters.** Item 63's `Cd` was
+9-17x below physical, which is a surface-coupling defect (item 60), not a
+spin-up artefact. Items 58/62's rotation error was in the frames themselves and
+is upstream of any initialisation. Both are independent of this.
+
+**The mitigation, not a fix.** The 71 h arms start 2020-12-26 00Z and score
+only h48-h71, giving 48 h of lead before the scored window opens. If h48 still
+shows a rest signature, 48 h is not enough and the lead has to grow. That is
+testable and is recorded as such in `PREDICTIONS_71h.md`.
+
+**What is NOT claimed here.** That the earlier 23 h results are worthless. They
+are internally comparable -- every arm had the identical handicap -- so
+scheme-to-scheme differences (sigma sweep, MYNN25, w_damping) remain valid as
+relative statements. What they cannot support is any ABSOLUTE claim against d02
+or MRMS, and several were made. Those are withdrawn pending the 71 h arms.
