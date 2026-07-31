@@ -51,10 +51,18 @@ def series(run):
             continue
         t = float(ds.current_time)
         h = int(round(t / 3600.0))
-        if abs(t - h * 3600.0) > 400.0 or h == 0:
+        # `h in out` matches inflow_flux.py:51. Without it BOTH the h23 plotfile
+        # and the end-of-run one land on h=23 (t=82816 is only 16 s off), and
+        # the later one wins -- so a run that took a degenerate zero-length
+        # final step silently OVERWROTE hour 23 with its poisoned rain_accum.
+        if abs(t - h * 3600.0) > 400.0 or h == 0 or h in out:
             continue
         g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
-        out[h] = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+        ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+        # Ordering alone is too fragile to rely on; reject on the data.
+        if np.isnan(ra).any():
+            continue
+        out[h] = ra
     return out
 
 

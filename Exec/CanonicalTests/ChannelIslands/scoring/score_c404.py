@@ -49,10 +49,38 @@ def spec(x, m):
     return 1. / (0.5 * (b[1:] + b[:-1])), P
 
 
+def reject_if_truncation_poisoned(lab, path, ra):
+    """Refuse a plotfile written on the stop_datetime truncation step.
+
+    Item 31 reaches PLOTFILES, not just checkpoints. A run that lands exactly on
+    stop_time can take a final step of dt = 2^-25 s (the float32 ULP of 1.0);
+    the plotfile written on that step carries NaN in a uniform 19-cell (57 km)
+    band on all four lateral faces, while every prognostic field stays clean.
+    That band swallows 99.0% of the >500 m LAND cells and 80.0% of all LAND
+    cells, including the Santa Ynez scoring point (112,87).
+
+    Measured on arm A (sigma=1, 2026-07-31): scoring the poisoned plotfile gave
+    Santa Ynez = nan, domain max 6.61 in and >500 m bias 4.35x; the clean
+    plotfile 14.8 s earlier gave 8.38 in, 21.34 in and 2.46x. The failure is
+    silent everywhere except the NaN itself -- hence a hard stop here rather
+    than a warning. pick_restart_chk.sh guards checkpoints; this guards scoring.
+    """
+    n = int(np.isnan(ra).sum())
+    if n:
+        sys.exit(
+            f'FATAL [{lab}]: {path} has {n} NaN cells in rain_accum '
+            f'({100.0 * n / ra.size:.1f}% of the surface).\n'
+            f'  This is the stop_datetime truncation-step plotfile (item 31, '
+            f'extended to plotfiles).\n'
+            f'  Score the previous plotfile instead -- it is <1 min of model '
+            f'time earlier and is clean.')
+
+
 def load_arm(spec_):
     lab, p = spec_.split('=', 1)
     ds = yt.load(p); g = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
     ra = np.asarray(g[('boxlib', 'rain_accum')])[:, :, 0]
+    reject_if_truncation_poisoned(lab, p, ra)
     return lab, ra, float(ds.current_time)
 
 

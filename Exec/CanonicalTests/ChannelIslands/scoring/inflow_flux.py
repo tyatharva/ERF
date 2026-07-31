@@ -160,13 +160,22 @@ def drc(ub, vb):
 
 def main():
     arms = {}
+    runs = []
     for spec in sys.argv[1:]:
         lab, run = spec.split('=', 1)
         arms[lab] = erf_hourly(run)
+        runs.append(run)
     print('[loaded ERF arms]', ', '.join(f'{k}:{len(v)}h' for k, v in arms.items()), flush=True)
 
+    # The driver frames are the ones the FIRST arm was actually driven by, read
+    # through its own run directory. This was hardcoded to run_c404_nsc, which
+    # does not exist on a fresh pod -- and pointing it at some other arm's copy
+    # would silently compare against the wrong frames.
+    fdir = f'/app/ERF/{runs[0]}/CONUS404Data_3D'
+    if not os.path.isdir(fdir):
+        sys.exit(f'FATAL: no driving frames at {fdir}')
     fr = {}
-    for p in sorted(glob.glob('/app/ERF/run_c404_nsc/CONUS404Data_3D/ERF_IC_*.bin')):
+    for p in sorted(glob.glob(f'{fdir}/ERF_IC_*.bin')):
         # ERF_IC_2020_12_28_00_00.bin -> [ERF, IC, yyyy, mm, dd, HH, MM.bin]
         parts = os.path.basename(p).split('_')
         if parts[4] == '28':

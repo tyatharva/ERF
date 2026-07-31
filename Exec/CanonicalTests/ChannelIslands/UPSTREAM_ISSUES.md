@@ -6585,6 +6585,39 @@ scheme. That is a new mechanism hunt and needs a decision before it starts.
 
 ## 50. The orographic bias is GENUINE AND STEADY, not a spin-up transient -- but it is accumulated in a specific window, and the real defect is a failure to DECAY
 
+> **AMENDED 2026-07-31 (see item 52). The "h13-h17 window" is substantially an
+> artifact of d02, not a feature of ERF.** The window below is measured against
+> d02. **d02 collapses for one hour at h14 and MRMS does not corroborate it** --
+> the d02/MRMS LAND-mean ratio runs 1.13, 1.23, 1.39 at h11-h13, drops to
+> **0.63** at h14, then 0.86, 1.15, 1.63, 1.45. That single-hour dip is what
+> creates the apparent 5-6x spike. Against MRMS there is **no h14 spike at all**
+> in any of the four arms of item 52:
+>
+> | h | A/d02 | **A/MRMS** | D/d02 | **D/MRMS** |
+> |---|---|---|---|---|
+> | 13 | 2.48 | 3.44 | 1.67 | 2.32 |
+> | 14 | **5.19** | **3.29** | **3.45** | **2.18** |
+> | 15 | 3.55 | 3.05 | 3.01 | 2.59 |
+>
+> Against observations the ratio is flat or falling through h14. The real shape
+> is: **ERF's over-production over land rises through h11 -> h13 and then
+> plateaus at ~2.2-3.9x for the rest of the day.** There is no distinct h13-h17
+> accumulation event to explain. The claim below that the bias is "accumulated
+> in a specific window" should be read as *accumulated against d02 in a window
+> where d02 itself behaves anomalously*.
+>
+> **What survives unchanged:** the bias is genuine and steady, not a spin-up
+> transient (excluding h1-4 moves it only 2.21 -> 2.13), and the failure is one
+> of *not decaying* while both references do. That much is corroborated by MRMS.
+>
+> **THIS IS THE SECOND TIME THE REFERENCE, NOT THE MODEL, PRODUCED AN APPARENT
+> SIGNAL.** The first was item 47, where d02's terrain -- not ours -- explained
+> the difference in slope. **d02 is a model with its own hourly behaviour and
+> its own errors, not a smooth reference.** Any hour-resolved feature seen only
+> against d02 must be checked against MRMS before a mechanism is built on it.
+> Item 51's entire mechanism hunt, and the four arms of item 52, were scoped
+> around a window that this test substantially dissolves.
+
 Free re-analysis of existing output, no runs. Hours 5-23 re-accumulated for all
 four fields, each differenced in its own native accumulation.
 
@@ -6762,3 +6795,333 @@ should not be run on this evidence. Recommended instead, in order:
 Note Davies' own defect is now also localised: its low-level wind over the ranges
 is 0.3-0.6x d02 and too westerly, so its boundary supply is right while its
 interior response is too weak. That is a separate question from this item.
+
+## 52. ITEM 51 FALSIFIED: the boundary is NOT the cause -- four arms bracket the flux 11.6x and the orographic excess does not move
+
+Four full 23-h CONUS404 arms, one per GPU on a 4x RTX 4090 pod, all `EXIT=0` at
+TIME = 82816 s. Baseline for all four: `inputs_c404`, `cfl=0.3`, Morrison,
+`les_type=None`, `nscbc_lateral=1 nscbc_outflow=1 nscbc_parts=31
+nscbc_mass_tau=60 nscbc_keep_ramp=0 hindcast_mass_du_max=8`.
+
+| arm | knob | run dir |
+|---|---|---|
+| A | `nscbc_sigma=1.0` | `run_c404_sig1` |
+| B | `nscbc_sigma=0.1` | `run_c404_sig01` |
+| C | `pbl_type=MYNN25`, sigma=0.03 | `run_c404_mynn25` |
+| D | `w_damping_cfl=0.15`, sigma=0.03 | `run_c404_wdamp` |
+
+**A. The item-51 test itself: sigma=1 DOES make ylo export when the driver
+exports.** At every frame hour, and it over-shoots:
+
+| h | ylo ERF/driver | xlo ERF/driver |
+|---|---|---|
+| 3 | **3.10** | 0.958 |
+| 6 | **3.20** | 0.946 |
+| 9 | **1.75** | 0.947 |
+| 12 | 1.28 | 0.939 |
+| 15 | 1.24 | 0.943 |
+| 18 | 1.17 | 0.947 |
+| 21 | 1.21 | 0.901 |
+
+At h9 sigma=0.03 *imported* 8.2e5 against a driver export of -2.02e7; sigma=1
+exports -3.54e7. The sign defect is gone. xlo stays faithful at 0.90-0.96 all
+day, so the whole change is on ylo -- exactly where item 51 localised it.
+
+**B. And the excess got WORSE.** Total inflow (ERF/driver) across the arms:
+
+| h | sigma=0.03 | **A** sigma=1 | **B** sigma=0.1 | **C** MYNN25 | **D** w_damp | Davies |
+|---|---|---|---|---|---|---|
+| 3 | 1.021 | 0.924 | 0.990 | 1.021 | 1.020 | 1.018 |
+| 9 | 1.486 | 0.510 | **1.078** | 1.451 | 1.463 | 1.029 |
+| 12 | 1.853 | 0.460 | **0.849** | 1.698 | 1.764 | 1.040 |
+| 15 | 2.125 | **0.168** | **0.945** | 1.931 | 1.943 | 1.109 |
+| 18 | 3.885 | -1.661 | 1.549 | 3.954 | 4.286 | 2.613* |
+
+*Davies dying at h18. sigma=1 does not merely decay -- it reverses sign at h17
+and runs net export while the driver is still importing.
+
+**The h15 flux ratio spans 0.168 to 1.943 -- 11.6x -- and the 23-h >500 m bias
+vs d02 stays inside 2.12-2.61x in every arm** (A 2.46, B 2.61, C 2.26, D 2.12,
+baseline 2.21). The h13-h17 accumulation window is present in all four.
+
+**C. The low-level wind, item 51's proposed intermediate, was also repaired --
+and it did not help either.** Sub-1500 m wind over the >500 m cells, ERF/d02:
+
+| h | **A** | **B** | **C** | **D** | (sigma=0.03 was 1.5-2.0x) |
+|---|---|---|---|---|---|
+| 13 | 1.01 | 0.84 | 1.44 | 1.37 | |
+| 14 | 0.97 | 0.73 | 1.26 | 1.21 | |
+| 15 | 0.99 | 0.60 | 1.06 | 1.17 | |
+| 16 | 0.98 | 0.62 | 0.95 | 1.15 | |
+| 17 | 0.86 | 0.56 | 1.01 | 0.98 | |
+
+Arm A matches d02 to within 1.5% at h13-h16 and holds d02's direction to 0.4 deg
+at h13-h14 (242.6 vs 242.2; 241.9 vs 242.2), against sigma=0.03's persistent
+too-southerly bias. **The wind excess is eliminated and the >500 m bias rises
+2.21 -> 2.46.**
+
+**D. The trend runs BACKWARDS.** Mean h13-h17 wind ratio against 23-h >500 m
+bias, all four arms, monotone:
+
+| arm | mean wind/d02 h13-17 | 23-h >500 m bias |
+|---|---|---|
+| B sigma=0.1 | 0.670 | 2.61 |
+| A sigma=1 | 0.963 | 2.46 |
+| C MYNN25 | 1.143 | 2.26 |
+| D w_damp | 1.174 | 2.12 |
+
+Pearson r = **-0.949**. *Less* low-level wind gives *more* orographic excess --
+the opposite of item 51's chain, which read the 1.5-2.0x wind as the driver of
+the excess. (Stated on the 23-h bias against the mean h13-h17 ratio; the
+hour-specific h14 version is not monotone, r = -0.587, because arm D breaks it.
+n=4 and arm D is confounded -- its damping removes ascent directly -- so this is
+a refutation of the stated direction, not a new causal claim.)
+
+**Verdict.** Item 51's chain was *unfaithful ylo flux -> excessive sub-1500 m
+upslope -> orographic excess in h13-h17*. Links 1 and 2 have now each been
+repaired independently, and link 3 got worse in both cases. **The discriminator
+correctly identified that the NSCBC boundary is unfaithful; it did not establish
+that the unfaithfulness causes the precipitation excess, and it does not.**
+Item 51's flux measurements stand; its mechanism does not.
+
+**Also closed by this item:** HANDOFF's kill condition for sigma tuning ("if both
+the spin-down fix and the Jan 9 wetness appear, sigma cannot satisfy both").
+Both appeared. sigma=1 is 1.80x wet full-domain vs d02 (baseline 1.44x) and
+2.24x on LAND (1.76x), while its column vapour over the ranges is 0.76-1.03x d02
+-- i.e. **wetter while holding less water and exporting more**. Not the
+over-retention route that was predicted, but the same conclusion: the outflow
+condition needs reformulating, not tuning.
+
+**Caveat carried:** the four arms ran concurrently, one per card. Fields, flux
+ratios and scores are valid; **no timing conclusion may be drawn from them.**
+
+
+## 53. sigma=0.1 IS STABLE under CONUS404 -- a new capability that does not help
+
+The item-34 sweep recorded sigma=0.1 as **FPE at 7.9 h**, and HANDOFF
+generalised that to "everything that would interpolate is unstable". **That is
+ERA5/Jan-9-specific.** Arm B (`run_c404_sig01`) ran the full 23 h under CONUS404
+driving with no FPE, no NaN, no fault of any kind, `EXIT=0` at TIME = 82816.
+
+**It has the best boundary fidelity of any NSCBC arm ever run:**
+
+| h | 3 | 6 | 9 | 12 | 15 | 18 | 21 |
+|---|---|---|---|---|---|---|---|
+| sigma=0.1 ERF/driver | 0.990 | 1.042 | 1.078 | 0.849 | 0.945 | 1.549 | 0.691 |
+
+0.85-1.08 through h15 is **Davies-class** (1.02-1.11) in a scheme that survives
+the full day -- which the campaign has never had. ylo tracks the driver's export
+from h9 on: 0.71x, **1.006x**, 0.937x, 0.895x, 0.840x.
+
+**And it inherits Davies' interior failure exactly.** Sub-1500 m wind over the
+ranges is **0.56-0.84x d02** at h13-h17 and **20-28 deg too westerly** (262-266
+vs d02's 238-244) -- the same signature as Davies' 0.3-0.6x and 279-291 deg.
+
+**It posts the WORST orographic bias of the four arms: >500 m = 2.61x** against
+a 2.21x baseline. It also wins PCC (0.635 full-domain vs d02, best of any arm,
+baseline 0.616) and both point metrics (Santa Ynez 5.84 in, domain max 16.81 in,
+baseline 6.07/17.47). **It places better and distributes worse.**
+
+**Conclusion.** The faithful-flux/weak-interior trade is a property of the
+*boundary being anchored to the driver*, not of the Davies formulation. Any
+scheme that makes the boundary track the driver appears to buy the too-weak
+low-level wind with it. Together with item 52 this is the second independent
+demonstration that boundary fidelity and orographic response are not the same
+knob. The stability record for sigma is now **case-dependent** and the item-34
+sweep should be read as ERA5-only.
+
+
+## 54. THE VERTICAL BRANCH IS EXCLUDED ON ITS OWN EVIDENCE -- and `w_damping_const` is an inert knob
+
+**First, the knob does not do what its name says.** `erf.w_damping` is gated on
+the vertical Courant number exceeding `erf.w_damping_cfl` (default 1.0);
+`w_damping_const` only scales a correction applied *after* that gate opens
+(`ERF_TI_substep_fun.H:187-246`). At this configuration's CFL-limited
+dt ~ 1.6 s and `initial_dz = 25 m`, the gate needs **|w| > 15.6 m/s at 12.5 m
+AGL and > 78 m/s at 1.2 km**. Measured: **arm A fired the damping ONCE in 66,636
+steps**; arms B and C fired it **zero** times. **A `w_damping_const` sweep at
+shipped settings is a null experiment** -- it scales a correction that is never
+applied. Instrument before tuning (item 46).
+
+Gate-vs-firing-rate, measured on 700 steps before committing a card:
+
+| `w_damping_cfl` | firings / 700 steps |
+|---|---|
+| 1.0 (shipped) | **0** |
+| 0.30 | 717 |
+| 0.15 | 324,459 |
+
+**Arm D therefore moved the GATE, holding `w_damping_const = 0.3`.**
+`w_damping_cfl = 0.15` puts the damping envelope at |w| >~ 2.3 m/s near the
+surface rising to ~14 m/s at 1473 m, and inert above ~2 km.
+
+**It bit hard and it barely mattered.** Over 23 h arm D applied **21,467,004**
+damping events, **94.1% of them below k=20 (1473 m)** -- the exact layer item 51
+names -- at 1.25-1.48M per hour right through h13-h15. Result:
+
+| | baseline sigma=0.03 | **arm D** |
+|---|---|---|
+| >500 m bias vs d02 | 2.21x | **2.12x** (-4%) |
+| h14 >500 m bias | -- | **4.96** (A 5.94, B 6.08, C 5.88) |
+| 100-500 m | 1.48x | 1.49x |
+| flat <100 m | 0.74x | 0.76x |
+| full domain bias vs d02 | 1.44x | 1.43x |
+| full domain PCC | 0.616 | 0.606 |
+| LAND vs d02 / vs MRMS | 1.76x / 1.92x | 1.72x / 1.88x |
+| Santa Ynez / domain max | 6.07 / 17.47 in | 6.14 / 18.84 in |
+
+**Arm D is the only arm that reduced the orographic excess, and it moved it 4%.**
+If the excess were driven by excessive resolved sub-1500 m ascent, 21.5M damping
+applications concentrated in that layer should have moved it far more. The
+vertical branch is now closed on measurement rather than on inference from the
+item-51 discriminator.
+
+**Note what arm D is not.** Damping w directly suppresses the condensation that
+makes the rain, so any reduction here is **symptomatic suppression, not a
+mechanism fix**. The informative quantity is the smallness of the response, not
+its sign.
+
+**Arm C, the same branch from the PBL side.** `pbl_type=MYNN25` (MYNNEDMF
+without the mass-flux plumes) tested whether the plumes sustain upslope flow
+after forcing weakens. They do not: >500 m 2.26x against 2.21x, and the
+low-level wind got *worse* where it had been fine -- 1.88x, 2.12x, 1.78x, 1.87x
+d02 at h7-h10, a window where the model had been essentially unbiased. It moved
+the wind error earlier rather than removing it, and made the direction defect
+worse (227.3 deg at h13 vs d02's 242.2). Arm C also serves as a clean control
+that **the PBL does not touch the boundary**: its flux ratios (1.021 / 1.102 /
+1.451 / 1.698 / 1.931) are within a few percent of the MYNNEDMF baseline's at
+every frame hour, and ylo still imports at h3/h6.
+
+**PM-FSS r=0.87 at 3 km is 0.867-0.873 across ALL FOUR arms** (baseline 0.867).
+No lever in this campaign has yet moved placement -- the same signature as the
+WSM6 result in item 49. Everything tested changes amount.
+
+
+## 55. TWO INSTRUMENT FAILURES, both of the silent-pass class: `gpu_preflight.sh` was a no-op, and item 31 reaches PLOTFILES
+
+### 55a. `gpu_preflight.sh` approved unconditionally instead of refusing
+
+The guard that exists specifically to prevent environmental contamination --
+after a stray container held 7072 MiB for eleven hours and invalidated three
+consecutive "results" including a retracted root-cause conclusion (29c/29d) --
+**did not check anything.** On the 4x RTX 4090 pod, verbatim:
+
+```
+line 33: docker: command not found
+line 42: [: 1\n1\n1\n1: integer expression expected
+[gpu_preflight] OK -- 1\n1\n1\n1 MiB in use, no stray erf-hindcast containers
+exit=0
+```
+
+Two independent fail-opens:
+
+1. `nvidia-smi --query-gpu=memory.used` **with no `--id`** returns one line PER
+   CARD. `[ "$used" -gt "$BASELINE_MIB" ]` received a newline-separated blob,
+   errored with status 2, took the `else` branch, and printed `OK`. **The
+   threshold test could never fire on any multi-GPU host, whatever the cards
+   held.**
+2. `docker ps` on a pod with no Docker is `command not found` -> empty stray
+   list -> silent pass.
+
+It would have waved through a second 23-h job on an occupied card -- the one
+thing it exists to stop -- and reported `OK` while doing it.
+
+**Fixed.** Per-card parsing (never compare the blob), `--id` targeting via
+argument or `CUDA_VISIBLE_DEVICES`, an explicit statement when Docker is absent
+rather than a check that silently did not run, and -- the substantive change --
+**any compute process on the target card now fails the check regardless of
+memory**, because on a headless pod the baseline is ~1 MiB and a 1 GB leftover
+sits under the 1200 MiB desktop threshold. Validated against a known-nonzero
+control: with three arms live it refuses GPUs 0/1/2 and passes the free GPU 3.
+
+### 55b. Item 31 reaches PLOTFILES, not just checkpoints
+
+Item 31 records that a **checkpoint** written on the `stop_datetime` truncation
+step poisons every restart from it, and `pick_restart_chk.sh` guards that. The
+same class reaches **plotfiles**, where nothing guarded it.
+
+**Trigger -- and it is NOT "landing on stop_datetime".** All four arms end at
+TIME = 82816.000000 and all four write an end-of-run plotfile there. Only the
+two that took a **degenerate extra step of zero length** are poisoned:
+
+| arm | final step | poisoned? |
+|---|---|---|
+| A | 66635 already at 82816, then **extra** step 66636 DT = 2.98e-08 | **YES** |
+| C | 74602 already at 82816, then **extra** step 74603 DT = 2.98e-08 | **YES** |
+| B | 77873 at 82815.80, step 77874 lands on 82816 DT = 0.1986 | no |
+| D | 72006 at 82815.60, step 72007 lands on 82816 DT = 0.3963 | no |
+
+`2.980232239e-08 = 2^-25`, the float32 ULP of 1.0 -- the item-32 family. The
+degenerate dt is **not a fixed value** (item 29-era runs recorded 1.49e-08 =
+2^-26), so any guard keyed on dt is defeatable; **reject on the data.**
+
+**Damage profile.** `rain_accum` only -- all 18 other plotfile fields are clean,
+so the prognostic state is fine and this is a diagnostic artifact, not
+corruption. But the NaN sits in a **uniform 19-cell (57 km) band on all four
+lateral faces** (9500/18432 = 51.5% of the surface), and the mask is
+**bit-identical between arms A and C** -- different sigma, different PBL --
+i.e. deterministic. That band covers:
+
+- **99.0%** of the >500 m LAND cells (1338/1351)
+- **80.0%** of all LAND cells
+- the **Santa Ynez scoring point (112,87)**
+
+Measured on arm A, scoring the poisoned vs the clean plotfile 14.8 s earlier:
+
+| | poisoned `plt66636` | clean `plt66624` |
+|---|---|---|
+| Santa Ynez | **nan** | 8.38 in |
+| domain max | 6.61 in | 21.34 in |
+| >500 m bias | 4.35x | 2.46x |
+| domain mean | 0.369 in | 0.677 in |
+
+**Caught by cross-instrument disagreement, not by any check** --
+`spinup_split.py` (which accumulates hourly and never reads the end-of-run
+plotfile) said domain max 21.34 in while `terrain_windward.py` said 6.61 in.
+Two instruments on one arm is what surfaced it.
+
+### Is the sigma=0.03 BASELINE contaminated? NO.
+
+`run_c404_nsc/plt73172` is not present in this checkout, so it could not be
+inspected directly. It is nonetheless settled from the fingerprint, three ways:
+
+1. **The full-domain row would collapse onto the interior row.** Simulating the
+   19-cell band on a clean file: "full domain" becomes 1.11x / 0.430 / 10.08,
+   versus the true interior d>=20 of 1.11x / 0.416 / 9.61 -- indistinguishable,
+   because only the interior survives. **HANDOFF S2 publishes full domain
+   1.44x / 0.616 / 23.86 against interior 1.03x / 0.269 / 8.95.** Clearly
+   distinct, therefore not poisoned. (The scoring scripts use `nanmean`
+   throughout, so a poisoned file degrades *silently* to the collapsed numbers
+   rather than erroring -- which is why this is the decisive test.)
+2. **Santa Ynez is indexed directly**, not averaged (`terrain_windward.py:101`,
+   `spinup_split.py:116`), so a poisoned array can only print `nan` there.
+   Item 50 and HANDOFF S2 both publish a finite **6.07 in**.
+3. **Item 49's wall-band rows would be `nan`.** It publishes finite
+   d = 0/2/5/15 values (14.58 / 19.22 / 31.04 / 10.51) and fetch bins
+   1.79 / 1.84 for this same baseline arm -- all of which lie inside the band.
+
+**No published number changes. Items 44, 49, 50, 51 and the HANDOFF S2 table
+stand as written.** Note also that item 50's figures come via `spinup_split.py`,
+which never reads the end-of-run plotfile at all.
+
+### Guard status after this item
+
+| script | reads a plotfile path | guarded |
+|---|---|---|
+| `score_c404.py` | yes | **yes** (`reject_if_truncation_poisoned`, hard exit) |
+| `terrain_windward.py` | yes | **yes** |
+| `pm_fss_hourly.py` | globs a run dir | **yes** -- and it was ACTIVELY WRONG: its `series()` lacked the `h in out` dedup its sibling `inflow_flux.py:51` has, so both the h23 and the end-of-run plotfile mapped to h=23 and the poisoned one won. Now dedups AND rejects on NaN. |
+| `sig_probe.py`, `outflow_probe.py`, `interior_moisture.py` | yes | **NO -- still exposed.** All three use `nanmean`, so a poisoned file degrades silently rather than erroring. |
+| `inflow_flux.py` | globs | n/a -- reads only prognostic fields, which are clean |
+| `spinup_split.py`, `hourly_series_arms.py` | glob | excluded only *incidentally*, by first-wins dedup plus lexicographic order happening to equal time order. Fragile, not guarded. |
+| `pick_restart_chk.sh` | checkpoints | checkpoints only, and **cannot** be extended -- an AMReX plotfile Header carries no dt field |
+
+**Residual known issue:** because the guard selects the last clean plotfile, arms
+A and C were scored at t ~ 82801 s while B and D were scored at t = 82816 s -- a
+15.9 s window mismatch worth **0.013%** of the domain mean. Below every effect
+discussed in items 52-54, but the four arms are not on a bit-common instant.
+
+**Class.** Both failures are the campaign's recurring one: *the knob reads back
+correct and the wrong thing happens underneath* -- as in the Blackwell arch
+fallback (HANDOFF 7b) and item 46. 55a is worse than a missing guard, because it
+printed `OK`.
