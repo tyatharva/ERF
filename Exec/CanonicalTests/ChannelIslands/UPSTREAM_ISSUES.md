@@ -7376,3 +7376,168 @@ Domains are `channelislands-3km-192x96-domA` / `-domB` in `validated_config.txt`
 Figures `figs/item56_dom{A,B}_*`. Scripts `scoring/item56_analysis.py`,
 `scoring/item56_figs.py`, `pod/make_c404_bbox.py`, `pod/make_domain_refs.py`,
 `pod/fetch_c404_precip.py`.
+
+
+## 58. CONUS404 WIND ROTATION WAS NEVER APPLIED -- every frame in the campaign carried grid-relative vectors mis-oriented by 8.5-22 deg
+
+Source read plus data verification, then a fix. `conus404_to_bin.py` fetched
+CONUS404's U/V, destaggered them, and wrote them straight into the frames.
+CONUS404's U/V are GRID-relative to ITS Lambert (lat_1=30, lat_2=50,
+lon_0=-97.9); ours is a different Lambert (32.04/35.21, -119.25). Nothing in the
+chain rotated between them -- not the converter, not ERF.
+
+**Magnitude, from CONUS404's own SINALPHA/COSALPHA over the Domain A window:**
+
+| | |
+|---|---|
+| CONUS404 grid->earth angle | 10.96 .. 18.22 deg (mean 14.49) |
+| our LCC convergence | -3.80 .. +2.43 deg |
+| **net unapplied rotation** | **8.53 .. 22.02 deg (mean 15.08)** |
+
+**Verified at the data level.** The .bin frames hold the RAW source vectors:
+matched-height comparison at 10 points gave mean |du| 0.152, |dv| 0.114 m/s --
+interpolation error. A 15 deg rotation would show 1-3 m/s.
+
+**Direction, and a correction that matters.** The frames are too WESTERLY: they
+UNDER-state the meridional component. Over the Transverse Ranges at h15:
+
+| | direction |
+|---|---|
+| frames as fed to ERF | 269.8 deg |
+| CONUS404 earth-relative (its actual meaning) | 255.9 deg |
+| d02 earth-relative (independent) | 240.5 deg |
+
+Since the Transverse Ranges run E-W, the cross-barrier component IS v, so the
+bug UNDER-states orographic forcing. **It therefore cannot explain the
+orographic excess -- it works against it.** An earlier reading of this item had
+the sign inverted and claimed the bug inflated v and matched item 51's
+"more southerly than d02" signature; that was wrong. ERF's interior is more
+southerly than d02 while its frames are more westerly than d02 -- opposite
+signs. The ~15 deg magnitude agreement was coincidence.
+
+Note also that even correctly rotated, CONUS404 and d02 differ by 15.4 deg over
+the ranges. "Match d02's direction" was never a clean target.
+
+**Fix.** `(u,v)_ours = R(a_c - a_o) (u,v)_c404`, applied on the source grid
+before interpolation, gated on `C404_ROTATE` (default 1; set 0 to reproduce
+legacy frames). Convention pinned EMPIRICALLY, not from a reference: the chosen
+sign moves CONUS404 from 269.8 -> 255.8 deg, TOWARD d02's independent 240.5; the
+other sign moves it away. Speed preserved to 1.0010x.
+
+**Blast radius: every CONUS404-driven run in this campaign** -- items 41, 44,
+47-57 inclusive. The ERA5 path is far less affected: ERA5 winds are
+earth-relative on a lat-lon grid, so only our own <=3.8 deg convergence applies.
+
+Frames regenerated for Domain A into `pod_data_A_rot/`; the unrotated
+`pod_data_A/` is kept for the paired comparison. A 23-h test run is in flight
+with the prediction ON RECORD that the orographic excess should get WORSE
+(Santa Ynez 2.13 -> 2.5-3.4x), because restoring v restores cross-barrier flow.
+
+
+## 59. THE WALL ENHANCEMENT IS A FREE-RUNNING WALL-NORMAL VELOCITY -- the moisture is correct, the mass carrying it is 1.8-4.7x too fast
+
+Post-processing on Domain A, no runs. Item 57 localised a north-wall
+enhancement (3.79x at dN 0-4, decaying to 0.81x by dN 21) absent at the east
+wall (1.27x). This item identifies what is wrong in those cells.
+
+**FALSIFIED FIRST: it is not a moisture excess.** An earlier framing had
+"entering air runs 1.9-2.6x the driver's specific humidity." Measured, it does
+not:
+
+| | north dN 0-12 | east dE 0-12 | interior |
+|---|---|---|---|
+| ERF qv / DRIVER qv, 0-3000 m AGL | **0.96-1.08** | 0.96-1.13 | 0.68-1.16 |
+| ERF CWV / d02 CWV | **0.91-1.03** | 0.95-1.04 | 0.83-0.91 |
+
+Two independent references agree the entering air carries the driver's moisture
+correctly. **Supply is exonerated.**
+
+**INSTRUMENT ERROR BAR, measured.** A first pass used nearest-neighbour
+horizontal sampling and an ASL height band, and read 1.08-1.16 at t=0 where
+construction requires exactly 1.00 (ERF is initialised FROM the frame). With
+matched sampling -- bilinear in x,y plus linear in z at ERF's OWN cell centres
+-- t=0 gives **1.003-1.010**. The ~10% was sampling structure, not a wet init.
+Every ratio in this item uses matched sampling.
+
+**WHAT IS WRONG: the wall-normal velocity is free-running.** North wall row,
+split per column by regime:
+
+| h | columns inflowing | ERF v (inflow cols) | driver v | ratio |
+|---|---|---|---|---|
+| 3 | 22/192 | -1.81 | **+3.21 (OUTflow)** | sign disagreement |
+| 6 | 67/192 | -5.01 | **+0.97 (OUTflow)** | sign disagreement |
+| 9 | 81/192 | -7.16 | -1.53 | **4.69x** |
+| 12 | 111/192 | -6.98 | -1.62 | **4.32x** |
+| 15 | 121/192 | -6.78 | -3.79 | 1.79x |
+| 18 | 147/192 | -6.09 | -5.30 | 1.15x |
+| 21 | 142/192 | -7.25 | -7.51 | 0.97x |
+
+ERF draws air IN through the north wall at up to 4.7x the driver's rate, and at
+h3/h6 does so on columns where the driver has OUTFLOW. The inflowing-column
+count grows monotonically 22 -> 147. **The h21 convergence is the driver walking
+into ERF's roughly fixed -6 to -7 m/s, not ERF correcting toward the driver.**
+
+Correct humidity times 1.8-4.7x the mass flux IS excess moisture flux
+convergence -- a RATE, not a state. That is the quantity that survives.
+
+**Downstream chain, measured:**
+
+| h15, ERF/d02 | CWV | condensate | w_max |
+|---|---|---|---|
+| north dN 0-12 | 1.01x | **4.45x** | 3.88x |
+| east dE 0-12 | 0.95x | **0.60x** | 3.08x |
+| interior d>=20 | 0.91x | 2.46x | **2.41x** |
+
+Same microphysics at both walls, same order of excess ascent, opposite
+condensate response -- so conversion is responding to the inflow state, not to w
+alone.
+
+**qc/qr profiles do NOT indicate a fall-speed defect.** North/east ratio by AGL
+at h15: qc 2.14 (0-500 m) rising to 12.71 (3000-5000 m); qr 6.62 falling to
+10.41. The north band holds condensate ALOFT, not low -- a deep-column ascent
+signature. **Morrison stays held.**
+
+**WHY NORTH AND NOT EAST -- and it is not a code asymmetry.** Audited: `is_read`
+is indexed [var][component] and NEVER by face; `cons_read[RhoQ1] = 1` and both
+xvel and yvel are read at all four faces. `hindcast_bdy_u` / `hindcast_bdy_v` do
+not exist. The difference is physical: the north face flips from outflow to
+INFLOW at h11 and stays inflow to h23; the east face is outflow at all 23 hours.
+
+**The likely mechanism, from source.** `nscbc_sigma` is the LODI coefficient on
+the ONE incoming condition in the OUTFLOW branch
+(`ERF_BoundaryConditionsRealbdy.cpp:652`): `Jin = sigma*Jin_far +
+(1-sigma)*Jin_int`, setting `un_s`. At INFLOW the normal velocity is prescribed
+and sigma never enters. The regime is latched per column from `un_i` one face
+inboard through a Schmitt deadband (item 19d). A column whose WALL cell has
+reversed to inflow but whose `un_i` has not -- or which the deadband holds --
+stays in the outflow branch, where sigma = 0.03 makes `Jin` 97% interior, i.e.
+nearly free-running. That is consistent with the table above and, unlike the
+inflow branch, it IS sigma-controllable. NOT YET TESTED.
+
+**The 12-cell decay scale is NOT a configuration length.** `set_width = 1` --
+the fill prescribes only the wall row -- and the relaxation block
+(`ERF_TI_slow_rhs_pre.H:337`) is skipped entirely when
+`nscbc_lateral && !nscbc_keep_ramp`, which is the production config.
+`real_width = 10` sizes the boundary data structures and nothing in the forcing.
+Cells 2-12 are neither prescribed nor relaxed; the scale is emergent.
+
+**The inflow condition count is CORRECT.** With `nscbc_parts = 31`: rho FREE
+(rides the outgoing u_n-c wave), u/v prescribed, w = 0 (bit 8), theta, q_v, q_c,
+q_r, KE and scalar specified. That is 4+N with rho free -- exactly admissible,
+neither over- nor under-specified.
+
+**WHAT THIS DOES NOT EXPLAIN.** The deep interior runs w_max 2.41x d02 with no
+wall touching it, and Domain B's all-ocean marine excess is 6.9-9.2x with
+near/deep = 0.77 (larger AWAY from the walls). **The wall defect and the
+domain-wide ascent excess remain two findings, not one.** A one-defect test via
+the lateral mass budget was attempted and ABANDONED: the instrument failed its
+control both ways -- the driver's own faces against its own tendency left a
+residual of 10^4-10^5% (the frames are interpolated to height levels with
+sub-surface fill and do not satisfy continuity on the box), and an ERF-only
+budget omits the surface precipitation sink, which at ~2.9e7 kg/s is the same
+order as dM/dt. Neither number is reported.
+
+**Untested candidates for the domain-wide part**, all active over flat ocean and
+all confirmed in source before naming: `les_type = None` (no horizontal SGS
+mixing anywhere), and `moistscal_*_adv_type = Upwind_3rd`, which
+`validated_config.txt:233` marks an OPEN EXCEPT never resolved.

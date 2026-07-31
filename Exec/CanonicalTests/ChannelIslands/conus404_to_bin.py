@@ -90,6 +90,23 @@ def dods(url_var, shape, retries=3):
     raise RuntimeError(f'OPeNDAP fetch failed: {url_var[:120]}')
 
 
+_GEO_CACHE = {}
+
+
+def _geo(var, j0, j1, i0, i1):
+    """One invariant field (SINALPHA/COSALPHA) on the source subset, cached.
+
+    These live in INVARIANT/USGS404_geo_em_d01.nc -- NOT in wrf2d or wrf3d,
+    which is why the rotation was missed in the first place.
+    """
+    key = (var, j0, j1, i0, i1)
+    if key not in _GEO_CACHE:
+        u = (f'{BASE}/INVARIANT/USGS404_geo_em_d01.nc.dods?'
+             f'{var}[0:1:0][{j0}:1:{j1}][{i0}:1:{i1}]')
+        _GEO_CACHE[key] = dods(u, (1, j1 - j0 + 1, i1 - i0 + 1))[0]
+    return _GEO_CACHE[key]
+
+
 def build_mapping(j0, j1, i0, i1):
     """Fractional source indices for every target point, plus target lat/lon."""
     X, Y = np.meshgrid(XS, YS, indexing='ij')
@@ -150,6 +167,7 @@ def main():
     os.makedirs(outdir3, exist_ok=True); os.makedirs(outdirS, exist_ok=True)
     j0, j1, i0, i1 = [int(v) for v in np.load(os.environ['C404_BBOX'])]
     fi, fj, tlat, tlon = build_mapping(j0, j1, i0, i1)
+    lo_src = np.load(os.environ['C404_LON'])[j0:j1+1, i0:i1+1]   # for the wind rotation
     print(f'target {len(XS)}x{len(YS)}x{len(ZS)}  z {ZS[0]:.0f}..{ZS[-1]:.0f} m '
           f'(ERF top 19003) ; source subset y{j0}..{j1} x{i0}..{i1}', flush=True)
 
@@ -174,6 +192,32 @@ def main():
                  (1, NLEV_SRC+1, j1-j0+1, i1-i0+1))[0]
         U = 0.5 * (U[:, :, :-1] + U[:, :, 1:])
         V = 0.5 * (V[:, :-1, :] + V[:, 1:, :])
+
+        # ---- GRID ROTATION (added 2026-07-31; see UPSTREAM_ISSUES item 58) ----
+        # CONUS404's U/V are GRID-relative to ITS Lambert (lat_1=30, lat_2=50,
+        # lon_0=-97.9). Ours is a different Lambert (32.04/35.21, -119.25). The
+        # two grid norths differ by 8.5-22 deg (mean 15.1) over this region, and
+        # every frame written before this date carried the raw CONUS404 vectors,
+        # i.e. a wind field mis-oriented by that angle.
+        #
+        #   (u,v)_ours = R(a_c - a_o) (u,v)_c404
+        #
+        # a_c comes from CONUS404's own SINALPHA/COSALPHA; a_o is our LCC
+        # convergence n*(lon - lon_0). Verified empirically: applying this moves
+        # CONUS404's direction over the Transverse Ranges from 269.8 deg (raw)
+        # to 255.9 deg, i.e. TOWARD d02's independent 240.5 deg. The opposite
+        # sign moves it away, which is how the convention was pinned down.
+        if os.environ.get('C404_ROTATE', '1') != '0':
+            sa = _geo('SINALPHA', j0, j1, i0, i1)
+            ca = _geo('COSALPHA', j0, j1, i0, i1)
+            a_c = np.arctan2(sa, ca)
+            n_ours = 0.55380  # cone constant for lat_1=32.041667, lat_2=35.208333
+            a_o = np.deg2rad(n_ours * (lo_src + 119.25))
+            da = a_c - a_o
+            cd, sd = np.cos(da), np.sin(da)
+            U, V = U * cd - V * sd, V * cd + U * sd
+            print(f'    rotated winds by {np.degrees(da).mean():.2f} deg mean '
+                  f'({np.degrees(da).min():.2f}..{np.degrees(da).max():.2f})', flush=True)
         W = 0.5 * (W[:-1] + W[1:]); ZC = 0.5 * (Z[:-1] + Z[1:])
         TH = TK * (P0 / P) ** (RD / CP)
         RHO = P / (RD * TK * (1.0 + 0.608 * QV))
