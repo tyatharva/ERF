@@ -127,6 +127,8 @@ def mrms_hourly():
 def main():
     run = sys.argv[1].rstrip('/')
     out = sys.argv[2].rstrip('/')
+    # label must follow the run, or NSCBC figures come out captioned 'Davies'
+    LBL = sys.argv[3] if len(sys.argv) > 3 else ('ERF ' + run.replace('run_A71_', '').upper())
     os.makedirs(out, exist_ok=True)
 
     acc, zs = erf_hourly(run)
@@ -159,7 +161,7 @@ def main():
     vmax = float(np.nanpercentile(np.concatenate(
         [erf_tot[FULL], d02_tot[FULL], mrms_tot[FULL]]), 99))
     fig, ax = plt.subplots(2, 2, figsize=(13, 9))
-    for k, (a, t) in enumerate([(erf_tot, 'ERF Davies'), (d02_tot, 'WRF d02'),
+    for k, (a, t) in enumerate([(erf_tot, LBL), (d02_tot, 'WRF d02'),
                                 (mrms_tot, 'MRMS')]):
         p = ax.flat[k].imshow(a.T, origin='lower', vmin=0, vmax=vmax,
                               cmap='viridis', aspect='auto')
@@ -170,7 +172,7 @@ def main():
     lim = float(np.nanpercentile(np.abs(d[FULL]), 99))
     p = ax.flat[3].imshow(d.T, origin='lower', vmin=-lim, vmax=lim,
                           cmap='RdBu_r', aspect='auto')
-    ax.flat[3].set_title(f'Davies - d02   whole domain {np.nanmean(d):+.1f} mm'
+    ax.flat[3].set_title(f'{LBL} - d02   whole domain {np.nanmean(d):+.1f} mm'
                          f'  |  land-only {np.nanmean(d[M]):+.1f} mm')
     plt.colorbar(p, ax=ax.flat[3], label='mm / 23 h')
     for a in ax.flat:
@@ -194,7 +196,7 @@ def main():
     # ---------- FIG 2: wall-distance profile ----------
     fig, a2 = plt.subplots(figsize=(9, 5))
     ds_ = np.arange(0, 60)
-    for arr, lab, c in ((erf_tot, 'ERF Davies', 'C3'), (d02_tot, 'WRF d02', 'C0'),
+    for arr, lab, c in ((erf_tot, LBL, 'C3'), (d02_tot, 'WRF d02', 'C0'),
                         (mrms_tot, 'MRMS', 'k')):
         prof = [np.nanmean(arr[M & (dN == q)]) if (M & (dN == q)).any() else np.nan
                 for q in ds_]
@@ -215,7 +217,7 @@ def main():
     sd = [np.nanmean(a[M]) for a in d02_hr]
     sm = [np.nanmean(a[M]) for a in mrms_hr]
     fig, a3 = plt.subplots(figsize=(9, 5))
-    a3.plot(hrs, se, 'C3-o', ms=3, label=f'ERF Davies (sum {np.sum(se):.1f})')
+    a3.plot(hrs, se, 'C3-o', ms=3, label=f'{LBL} (sum {np.sum(se):.1f})')
     a3.plot(hrs, sd, 'C0-o', ms=3, label=f'WRF d02 (sum {np.sum(sd):.1f})')
     a3.plot(hrs, sm, 'k-o', ms=3, label=f'MRMS (sum {np.sum(sm):.1f})')
     a3.set_xlabel('hour ending, 2020-12-28 UTC  (= ERF h48+n)')
@@ -230,7 +232,7 @@ def main():
     # ---------- metrics ----------
     L = []
     P = L.append
-    P('# Davies control, h48-h71 (2020-12-28 00Z-23Z) -- metrics\n')
+    P(f'# {LBL}, h48-h71 (2020-12-28 00Z-23Z) -- metrics\n')
     P(f'Mask: land-only, terrain > 20 m AND finite in all three sources.')
     P(f'n = {n} of {NX*NY} cells ({100.0*n/(NX*NY):.1f}%).')
     P('Regridding: both references BIN-AVERAGED (area-averaged) from finer')
