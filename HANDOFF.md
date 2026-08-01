@@ -472,3 +472,53 @@ Every one of these compares ERF to a reference that had a working surface.
 - **Never run two 24-h jobs on one card**, and score timing only from solo runs.
 - **No new mechanism hunt without checking with the operator first.**
 - Diagnostics stay stripped from committed source. Add, measure, revert, rebuild.
+
+---
+
+## Regenerating the Domain A lead frames (`pod_data_A_lead`)
+
+The frames that drove BOTH 72-h arms. The converter and the rotation are in
+git; the three input arrays are NOT, and neither were the invocation values
+until this section. Written because that was the one piece of the campaign that
+existed only on the rented pod.
+
+**Exact invocation used, 2026-07-31:**
+
+```bash
+export C404_LAT=<XLAT.npy>          # CONUS404 full-grid XLAT
+export C404_LON=<XLONG.npy>         # CONUS404 full-grid XLONG
+export C404_LANDMASK=<LANDMASK.npy> # from INVARIANT/USGS404_geo_em_d01.nc
+                                    #   -- NOT in wrf2d or wrf3d (see item 55)
+export C404_BBOX=<bbox.npy>         # from pod/make_c404_bbox.py
+export C404_PROB="-389768.39 -89294.60 186231.61 198705.40"
+export C404_START=2020-12-26
+export C404_NFRAMES=25
+# defaults left alone: C404_FRAME_HOURS=3, C404_MARGIN=66000, C404_ROTATE=1
+
+python3 Exec/CanonicalTests/ChannelIslands/conus404_to_bin.py \
+        pod_data_A_lead/CONUS404Data_3D pod_data_A_lead/CONUS404Data_Surface
+```
+
+`C404_PROB` is `geometry.prob_lo`/`prob_hi` (x,y only) from
+`inputs_c404_domA_71h`. **Verified, not recalled:** with the default
+`MARGIN = 66000` the snap rule reproduces the frames' actual edges exactly --
+xs `-456000..258000`, ys `-156000..270000`, both at 6000 m, nx=120 ny=72.
+25 frames x 3 h spans 2020-12-26 00Z -> 2020-12-29 00Z, the full 72 h.
+
+**What is and is not in git:**
+
+| | in git? |
+|---|---|
+| `conus404_to_bin.py` incl. the wind rotation | YES |
+| rotation rationale + falsification | YES -- UPSTREAM_ISSUES items 58, 62 |
+| `write_frame` binary layout | YES (and item 60 root cause depends on it) |
+| `pod/make_c404_bbox.py` | YES -- but it only READS lat/lon, does not fetch |
+| `C404_LAT` / `C404_LON` / `C404_LANDMASK` arrays | **NO** |
+| the invocation above | now yes |
+
+No committed script downloads XLAT/XLONG/LANDMASK. Rebuilding from scratch
+means pulling them from CONUS404 THREDDS (landmask from
+`INVARIANT/USGS404_geo_em_d01.nc`), saving as `.npy`, running
+`make_c404_bbox.py`, then the converter -- roughly an hour of work plus the
+~70 min fetch. **Keeping `pod_data_A_lead` (312 MB) avoids all of that and
+guarantees bit-identical frames.** Treat it as primary data, not a cache.
