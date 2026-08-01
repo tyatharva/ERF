@@ -8103,3 +8103,72 @@ velocity (|w| = 16-27 m/s) in thin near-surface cells, with |v| reaching
 dt is **not monotonic**: 0.527 (h6-9), 0.442 (h9-15), 0.648 (h15-20), 0.484
 (h20-25), 0.314 (h25-30). It recovers and re-collapses, which argues against a
 runaway and for episodic forcing.
+
+---
+
+## 68. THE RESULT: NSCBC HAS NO BOUNDARY-BAND PATHOLOGY AND DAVIES DOES -- P4 and P9 falsified, in the direction opposite to the prediction
+
+Both arms complete, 72 h (2020-12-26 00Z -> 2020-12-29 00Z), Domain A pin 35.4,
+identical config differing ONLY in the lateral boundary scheme. Scored over
+h48-h71 = 2020-12-28 00Z-23Z. Surface fix (item 60) and rotation fix (item 58)
+active in both. Land-only mask, n = 5536; references bin-averaged from finer
+grids; d02-vs-MRMS control corr 0.840 confirms the grids are aligned.
+
+| mask | arm | n | ERF mm | d02 mm | ratio | r(d02) | r(MRMS) |
+|---|---|---|---|---|---|---|---|
+| all land | DAVIES | 5536 | 47.2 | 18.6 | **2.54x** | **0.048** | 0.012 |
+| all land | NSCBC | 5536 | 22.8 | 18.6 | **1.23x** | **0.532** | 0.511 |
+| bands excl, d>=10 | DAVIES | 3692 | 28.8 | 22.2 | 1.29x | 0.541 | 0.405 |
+| bands excl, d>=10 | NSCBC | 3692 | 23.1 | 22.2 | **1.04x** | 0.572 | 0.463 |
+| bands excl, d>=20 | DAVIES | 2221 | 32.5 | 26.8 | 1.22x | 0.542 | 0.351 |
+| bands excl, d>=20 | NSCBC | 2221 | 27.0 | 26.8 | **1.01x** | 0.490 | 0.301 |
+
+| | DAVIES | NSCBC |
+|---|---|---|
+| max cell | **5761 mm** | **359 mm** |
+| RMSE vs d02, all land | **184.7 mm** | **27.9 mm** |
+| RMSE vs d02, interior | 30.1 mm | 20.3 mm |
+| near/far (dN<=12 / >=21) | 4.53 | 2.83 |
+| Santa Ynez 5x5 | 0.85x | 0.97x |
+
+**The single sentence.** Davies loses essentially all domain-wide spatial skill
+(r = 0.048) because its four lateral bands manufacture precipitation up to
+5761 mm/23 h; NSCBC keeps r = 0.532 domain-wide and is unbiased in the interior
+at **1.04x (d>=10) and 1.01x (d>=20)**.
+
+Davies' skill is not absent -- it is destroyed by the bands. Excluding them
+recovers r = 0.541, statistically the same as NSCBC's 0.572. **The two schemes
+model the interior about equally well. They differ almost entirely in what they
+do at the boundary**, and that difference is worth a factor of 16 in the
+maximum cell and 6.6x in domain RMSE.
+
+**Predictions, settled:**
+
+- **P4 FALSIFIED, and in the opposite direction.** It predicted "Davies remains
+  the better-behaved scheme at the wall and the worse one in the interior."
+  NSCBC is better at the wall (dN 0-6: 4.30x vs 8.41x) AND equal-to-better in
+  the interior. The stated consequence of the inverse -- "if Davies wins on
+  both, NSCBC has no case" -- does not trigger; the reverse did.
+- **P9 FALSIFIED.** The arms do not agree within 10% on interior metrics; the
+  null-result outcome is off the table.
+- **P3 does not survive in its stated form.** It carried forward a record of
+  NSCBC 210 mm/day vs Davies 0.03 mm/day at the inflow wall and predicted the
+  gap would persist above 100x with NSCBC the wetter. The sign is inverted:
+  Davies is now the scheme with the wall problem. The earlier number was
+  measured on 23-h arms with a broken surface ingest and unrotated frames, and
+  should not be carried further.
+- **P5 FALSIFIED for both** (Davies near-wall 5.95x, NSCBC 3.49x, predicted
+  1.0 +/- 0.7). See item 65: 48 h of lead did not remove the enhancement.
+- **P7 HELD for both** (Davies 0.85x, NSCBC 0.97x). The rotation fix survives
+  the scheme change, the longer run, and the surface fix.
+- **P1 and P8 remain untested here** -- P1 needs the wind comparison, and P8's
+  crash prediction was contaminated by my own cfl error.
+
+**Honest caveats.** (a) Davies rolled back once to its h8 checkpoint; the
+scored window lies entirely in the surviving leg and window accumulation had no
+negative cells. (b) NSCBC completed all 72 h but aborted during Kokkos/CUDA
+finalisation after the final I/O; every plotfile including h71/h72 verified
+readable, unpoisoned and NaN-free. (c) NSCBC paid ~4x in timestep (item 67),
+which is a real cost -- though the dt limiter is interior, not boundary. (d)
+This is ONE case, one domain, one 23-h scoring window. It is a strong result
+for this configuration and not yet a general claim about the schemes.
