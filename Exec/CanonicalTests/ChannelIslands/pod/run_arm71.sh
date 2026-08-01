@@ -28,13 +28,17 @@ die () { printf '\nFATAL: %s\n' "$*" >&2; exit 1; }
 [ -x "$BIN" ]  || die "no binary at $BIN"
 [ -d "$DEST" ] || die "$DEST not staged -- run pod/stage_arm.sh first"
 
-# cfl 0.3 matches every scored arm in the campaign and is demonstrated on this
-# exact domain and date by run_domA_rot. The deck's own default is 0.2 and its
-# comment records blow-ups at 0.25/0.3 on a different (convectively active)
-# day. Holding 0.3 keeps continuity with the record; a crash is recoverable
-# from an hourly checkpoint, a silent config drift is not.
+# cfl 0.2 = the deck's own default. The first launch overrode it to 0.3 for
+# continuity with the 23-h record, and NSCBC died of an FPE at step 262,
+# TIME 588 s -- ~10 model minutes. The deck comment at line 229 predicts this
+# exactly: "At cfl 0.3 that case blows up ~9 model minutes in", via a
+# grid-scale w dipole in the lowest cells that the dt estimate never sees.
+# run_domA_rot survived 0.3, but it started 12-28 00Z; this run starts
+# 12-26 00Z and passes through a more active period. The deck's measured
+# number beat my continuity argument. Both arms move together so they stay
+# identical -- see run_A71_*_cfl03 for the aborted pair.
 SHARED=(
-    erf.cfl=0.3
+    erf.cfl=0.2
     erf.moisture_model=Morrison
     erf.les_type=None
     erf.hindcast_mass_du_max=8
