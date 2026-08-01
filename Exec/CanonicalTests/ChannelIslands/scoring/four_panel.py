@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One 2x2 comparison: Davies / NSCBC over MRMS / d02, whole domain, 0-60 mm.
+"""One 2x2 comparison: Davies / NSCBC over MRMS / d02, whole domain, 0-100 mm.
 
   four_panel.py <outpath.png>
 
-Whole domain, every cell, common 0-60 mm scale so the four panels are directly
+Whole domain, every cell, common 0-100 mm scale so the four panels are directly
 comparable by eye. Window h48-h71 = 2020-12-28 00Z-23Z.
 
 Also prints a bias decomposition: how much of each arm's excess over d02 sits
@@ -21,7 +21,7 @@ from plt_guard import is_poisoned, plotfiles_by_time
 
 yt.set_log_level(50)
 NX, NY, BAND = 192, 96, 10
-VMAX = 60.0
+VMAX = 100.0
 H0, H1 = 48, 71
 
 
@@ -64,7 +64,7 @@ def main():
     fig, ax = plt.subplots(2, 2, figsize=(13.5, 9))
     for a, (arr, title) in zip(ax.flat, panels):
         p = a.imshow(arr.T, origin='lower', vmin=0, vmax=VMAX,
-                     cmap='viridis', aspect='auto')
+                     cmap='turbo', aspect='auto')
         a.set_title(f'{title}\nwhole domain {np.nanmean(arr):.1f} mm   |   '
                     f'land {np.nanmean(arr[M]):.1f} mm   |   '
                     f'max {np.nanmax(arr):.0f} mm', fontsize=10)
@@ -72,13 +72,14 @@ def main():
         a.contour(LAND.T.astype(float), levels=[0.5], colors='w',
                   linewidths=0.6, alpha=0.9)
         for e in (BAND, NX - 1 - BAND):
-            a.axvline(e, color='r', ls=':', lw=0.9)
+            a.axvline(e, color='k', ls=':', lw=1.1)
         for e in (BAND, NY - 1 - BAND):
-            a.axhline(e, color='r', ls=':', lw=0.9)
+            a.axhline(e, color='k', ls=':', lw=1.1)
         a.set_xlabel('i'); a.set_ylabel('j')
-    fig.suptitle('h48-h71 = 2020-12-28 00Z-23Z, whole domain, common 0-60 mm scale. '
-                 'White = coastline (20 m); red dotted = the four 10-cell lateral bands. '
-                 'Colour saturates at 60 mm -- see per-panel max.', fontsize=10)
+    fig.suptitle('h48-h71 = 2020-12-28 00Z-23Z   |   whole domain   |   turbo, '
+                 'common 0-100 mm (saturating; see per-panel max)\n'
+                 'white = coastline (20 m)   |   black dotted = the four '
+                 '10-cell lateral bands', fontsize=9.5)
     fig.tight_layout(rect=[0, 0.01, 1, 0.95])
     fig.savefig(outp, dpi=135)
     plt.close(fig)
