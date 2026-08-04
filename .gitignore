@@ -113,3 +113,13 @@ precip_check/cds_sfc.log
 /scoring_ab_*/
 /scoring_jan9*/
 /*.npy
+
+# CONUS404 frame sets and the invariant arrays they are built from (2026-08-04).
+# Regenerable: pod/fetch_c404_invariant.py then conus404_to_bin.py, but the
+# fetch is ~70 min of OPeNDAP, so treat what is on disk as primary data.
+/pod_data_A_3km/
+/pod_data_A_3km_tail/
+/pod_data_A_run30h/
+/c404_invariant/
+/_archive/
+/.codegraph/

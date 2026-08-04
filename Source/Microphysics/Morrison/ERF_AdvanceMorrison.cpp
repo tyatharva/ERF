@@ -412,7 +412,16 @@ namespace MORRInd {
 
           // Set microphysics control parameters
           m_inum = 1;           // Use constant droplet number concentration
-          m_ndcnst = Real(250.0);     // Droplet number concentration (cm^-3)
+          // NOTE: the unconditional `m_ndcnst = 250.0` that used to sit here
+          // assigned to the SAME variable that
+          //     pp.query("morrison_ndcnst", m_ndcnst)
+          // fills ~230 lines above, so erf.morrison_ndcnst was a DEAD KNOB:
+          // settable in the deck, read into the variable, then silently
+          // overwritten before any use. 250 cm^-3 is Morrison's continental
+          // default and is 2.5-5x the maritime value on a domain that is
+          // 70-85% ocean. Removing the assignment is behaviour-preserving when
+          // the knob is unset (it still defaults to 250 at the declaration) and
+          // makes it live when it is set.
           // Mathematical constants
           m_pi = Real(3.1415926535897932384626434);
 

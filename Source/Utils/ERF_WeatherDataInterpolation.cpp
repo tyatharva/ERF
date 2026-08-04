@@ -795,6 +795,43 @@ ERF::fill_bdy_data_from_hindcast ()
 
     // The first .bin frame corresponds to start_datetime by construction
     // (WeatherDataInterpolation indexes frames by elapsed time/interval).
+    //
+    // GUARD: on restart this function runs AFTER ReadCheckpointFile, which has
+    // already restored the start_bdy_time the checkpoint was written with. The
+    // deck's start_datetime is re-read on restart (ERF.cpp:2830) while model
+    // time CONTINUES from the checkpoint, so changing start_datetime between a
+    // run and its restart silently reinterprets every frame index: a segmented
+    // run whose second leg advances start_datetime by 6 h would carry on with
+    // cur_time measured from the new origin and pull forcing 6 h out of date,
+    // with nothing in the log to show for it. Compare before overwriting.
+    // A remembered rule is not enough here -- see item 31a, "the failure is
+    // silent and a remembered rule fails at segment 7".
+    if (!restart_chkfile.empty()) {
+        // The anchor is the sidecar WriteCheckpointFile drops next to the
+        // Header -- NOT start_bdy_time, which looks like the natural choice and
+        // is not: bdy_H is never written on this path, so start_bdy_time is
+        // still its static zero here and a guard keyed on it is inert. That was
+        // measured, not assumed.
+        std::ifstream st_file(restart_chkfile + "/hindcast_start_time");
+        if (st_file.good()) {
+            double chk_start = 0.0;
+            st_file >> chk_start;
+            if (std::abs(chk_start - static_cast<double>(start_time)) > 1.0) {
+                Abort("HindCast restart: start_datetime does not match the checkpoint.\n"
+                      "   checkpoint was written with start_time = " + std::to_string(chk_start) +
+                      "\n   this deck gives start_time            = " + std::to_string(start_time) +
+                      "\n   difference " + std::to_string(chk_start - start_time) + " s.\n"
+                      "   Model time CONTINUES across a restart, so start_datetime must be\n"
+                      "   IDENTICAL between legs -- change only stop_datetime. Otherwise every\n"
+                      "   boundary frame is offset by that difference, silently.");
+            }
+        } else {
+            Warning("HindCast restart: no hindcast_start_time in the checkpoint "
+                    "(written before that guard existed) -- start_datetime consistency "
+                    "with the previous leg is NOT verified.");
+        }
+    }
+
     bdy_time_interval = solverChoice.hindcast_data_interval_in_hrs * Real(3600.0);
     start_bdy_time    = start_time;
     final_bdy_time    = start_time + (ntimes-1) * bdy_time_interval;
@@ -1269,6 +1306,90 @@ ERF::init_thermo_from_hindcast (const int lev)
             Abort("HindCast IC: non-positive layer pressure thickness after hydrostatic "
                   "integration -- the radiation driver cannot run on this state.");
         }
+    }
+
+    // ---- UPSTREAM_ISSUES item 64 ------------------------------------------
+    // Initialise the horizontal wind from the frames instead of from rest.
+    //
+    // Until now only theta and qv were set here, and ERF.cpp said so plainly:
+    // "Momenta remain zero (spin-up from rest)". On 192x96 at 3 km that leaves
+    // the wind field to be built entirely by lateral forcing propagating
+    // inward -- ~16 h to cross the short axis at 10 m/s -- so every 23 h arm in
+    // this campaign scored a domain that was still filling. Item 65 then
+    // measured that 48 h of spin-up LEAD does not remove the signature, which
+    // is what makes initialising the interior the remaining option rather than
+    // an alternative to a mitigation that works.
+    //
+    // No new reader is needed. WeatherDataInterpolation at the top of this
+    // function has already filled forecast_state_interp, and that is the
+    // TIME-INTERPOLATED state, so this stays correct for a start time that does
+    // not land on a frame boundary.
+    //
+    // Only vars_new is written: InitData_post copies new -> old for all four
+    // (ERF.cpp:1432-1437) before the first advance, and ERF_Advance.cpp:258
+    // forms the momenta from the velocities with VelocityToMomentum, so there
+    // is nothing else to keep in step.
+    //
+    // w is deliberately left at rest. forecast_state_interp carries no zvel --
+    // upstream comments out its LinComb -- and the frame's w belongs to
+    // CONUS404's terrain and vertical coordinate, not ours, so imposing it
+    // would seed a divergence the solver has to remove anyway. Unlike the
+    // horizontal wind, w re-establishes itself within a few steps through the
+    // pressure solve. It is not the 16-hour quantity.
+    //
+    // GATED (erf.hindcast_ic_frame_wind, default 0 = old behaviour), matching
+    // hindcast_ic_frame_theta above, so every other HindCast case in the tree
+    // is untouched and the A/B that tests item 64 is a one-line deck change.
+    static const int l_ic_frame_wind = [] {
+        int v=0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_ic_frame_wind", v); return v; }();
+
+    // Modes, to separate "initialise the interior" from "overwrite what the
+    // boundary scheme owns". Mode 1 destabilised NSCBC (density NaN at the xlo
+    // wall by step 260, while Davies was unaffected and mode 0 was clean), so
+    // the reach of the copy is the variable under test, not the copy itself.
+    //   1 = valid region + ghosts   (original)
+    //   2 = valid region only       (no exterior ghosts)
+    //   3 = interior only           (also skips the real_width boundary band)
+    if (l_ic_frame_wind) {
+        const int bw = (l_ic_frame_wind == 3 && real_width > 0) ? real_width : 0;
+
+        for (int vi : {Vars::xvel, Vars::yvel})
+        {
+            MultiFab& dst = vars_new[lev][vi];
+            const MultiFab& src = forecast_state_interp[lev][vi];
+
+            if (l_ic_frame_wind == 1) {
+                IntVect ng = src.nGrowVect();
+                ng.min(dst.nGrowVect());
+                MultiFab::Copy(dst, src, 0, 0, 1, ng);
+            } else {
+                // Restrict to the valid region, and for mode 3 shrink the
+                // domain by the relaxation band so the copy never lands on
+                // cells the lateral scheme is responsible for.
+                Box keep = geom[lev].Domain();
+                if (bw > 0) { keep.grow(0,-bw); keep.grow(1,-bw); }
+                keep.convert(dst.boxArray().ixType());
+
+                for (MFIter mfi(dst); mfi.isValid(); ++mfi) {
+                    const Box isect = mfi.validbox() & keep;
+                    if (!isect.ok()) { continue; }
+                    const Array4<Real>&       d = dst.array(mfi);
+                    const Array4<const Real>& s = src.const_array(mfi);
+                    ParallelFor(isect, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    { d(i,j,k) = s(i,j,k); });
+                }
+                Gpu::streamSynchronize();
+            }
+        }
+
+        Print() << "HindCast IC: horizontal wind initialised FROM THE FRAMES (mode "
+                << l_ic_frame_wind << ", band skipped " << bw << ") -- u "
+                << vars_new[lev][Vars::xvel].min(0) << " to "
+                << vars_new[lev][Vars::xvel].max(0) << " m/s, v "
+                << vars_new[lev][Vars::yvel].min(0) << " to "
+                << vars_new[lev][Vars::yvel].max(0)
+                << " m/s (w left at rest)" << std::endl;
     }
 
     hindcast_check_mass_consistency(lev);

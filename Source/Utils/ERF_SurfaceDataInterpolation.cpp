@@ -216,6 +216,40 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
             surf_arr(i, j, k, 0) = std::min(tmp_ls_mask, amrex::Real(1.0));
             surf_arr(i, j, k, 1) = tmp_sst;
 
+            // comp 3 = LAND skin temperature: the mirror of the stencil above.
+            // The frames carry TSK over land in this same field (write_frame
+            // stores sst = where(water & valid, SST, TSK)), but the water-only
+            // mask above throws it away, so it has to be interpolated a second
+            // time with the opposite mask. Without this, land cells of comp 1
+            // are the -1 no-valid-source flag, not a temperature.
+            //
+            // The physical band is wide (200-340 K), not the ocean's 271-305:
+            // real land skin temperature on this domain reaches 261 K on the
+            // high terrain, and an ocean band would reject exactly the cells
+            // that carry the signal. -1 means "no land source point in the
+            // stencil", handled downstream, never a fabricated value.
+            {
+                const Real fi = (x - xvec_d_ptr[0]) / dxvec;
+                const Real fj = (y - yvec_d_ptr[0]) / dyvec;
+                int i0 = static_cast<int>(std::floor(fi));
+                int j0 = static_cast<int>(std::floor(fj));
+                const Real wx = fi - static_cast<Real>(i0);
+                const Real wy = fj - static_cast<Real>(j0);
+                Real num = Real(0.0), den = Real(0.0);
+                for (int dj = 0; dj < 2; ++dj) {
+                for (int di = 0; di < 2; ++di) {
+                    const int ii = amrex::min(amrex::max(i0+di, 0), nx-1);
+                    const int jj = amrex::min(amrex::max(j0+dj, 0), ny-1);
+                    const Real sv = sst_d_ptr    [jj*nx + ii];
+                    const Real lv = ls_mask_d_ptr[jj*nx + ii];
+                    if (lv >= Real(0.5) && sv > Real(200.0) && sv < Real(340.0)) {
+                        const Real w = (di ? wx : Real(1.0)-wx) * (dj ? wy : Real(1.0)-wy);
+                        num += w*sv; den += w;
+                    }
+                }}
+                surf_arr(i, j, k, 3) = (den > Real(1.0e-8)) ? num/den : Real(-1.0);
+            }
+
             // comp 2 = surface albedo (fal); -1 marks "not in this file"
             // so downstream wiring can fall back to constants.
             if (alb_d_ptr) {
@@ -329,11 +363,29 @@ ERF::SurfaceDataInterpolation(const int lev,
                     surf_mf.boxArray(), surf_mf.DistributionMap(), 1,
                     surf_mf.nGrowVect());
             }
-            // TSK is not provided by the hindcast surface files: register an
-            // empty slot so the surface layer's m_tsk_lev[lev][0] check sees
-            // a null pointer instead of indexing an empty vector.
-            if (tsk_lev[lev].empty()) {
-                tsk_lev[lev].resize(1);
+            // TSK carries the COMPLETE surface temperature field: the land skin
+            // temperature AND, over water, the SST. That is upstream's contract,
+            // not a local convention -- ERF_ReadFromWRFLow.cpp:238 copies SST
+            // into TSK over water for the same reason, and SurfaceLayer sets
+            // m_ignore_sst as soon as TSK exists (ERF_SurfaceLayer.H:465) so
+            // EVERY cell reads it. conus404_to_bin.py's write_frame already
+            // performs that merge offline
+            //     sst = np.where(water & ~bad, SST, TSK)
+            // so frame field 1 is exactly the field TSK wants.
+            //
+            // Without this, land t_surf fell through to default_land_surf_temp
+            // (or, with an LSM registered, to get_lsm_tsurf's soil constant):
+            // one number for the whole run. Measured on the 2020-12-28 frames,
+            // the real land skin temperature swings 276.8-285.9 K in the domain
+            // mean over a day -- 261-296 K across individual cells -- minimum at
+            // dawn, maximum in early afternoon. RRTMGP takes its radiating skin
+            // temperature from the same t_surf, so the constant removed the land
+            // diurnal cycle from the longwave as well.
+            if (tsk_lev[lev].empty()) { tsk_lev[lev].resize(1); }
+            if (!tsk_lev[lev][0]) {
+                tsk_lev[lev][0] = std::make_unique<MultiFab>(
+                    surf_mf.boxArray(), surf_mf.DistributionMap(), 1,
+                    surf_mf.nGrowVect());
             }
             // The default all-land lmask is allocated later in init_stuff;
             // at the first (init-time) call here it does not exist yet, so
@@ -447,6 +499,77 @@ ERF::SurfaceDataInterpolation(const int lev,
                 Gpu::streamSynchronize();
             }
             sst_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+
+            // Build TSK: the COMPLETE surface temperature field, which is what
+            // SurfaceLayer reads for every cell once TSK exists (m_ignore_sst,
+            // ERF_SurfaceLayer.H:465). Two sources, because the two surfaces
+            // are interpolated with opposite masks:
+            //   water -> sst_lev, already clamped to 271-305 by the sweep above
+            //   land  -> comp 3, the land-masked skin temperature
+            //
+            // NOT comp 1 over land: that is the water-only interpolation, so
+            // its land cells are the -1 no-valid-source flag. Copying it here
+            // and clamping to a physical band turns -1 into the floor and
+            // yields a COLDER constant than the soil constant it replaced --
+            // measured 200 K domain-wide on the first attempt. The failure is
+            // silent in every log line except the field range itself.
+            //
+            // A coastal land cell whose 2x2 source stencil holds no land point
+            // falls back to sst_lev (288 K placeholder over land), i.e. the
+            // pre-existing behaviour, rather than to a fabricated value.
+            {
+                IntVect ng_tsk = surf_mf.nGrowVect();
+                ng_tsk.min(tsk_lev[lev][0]->nGrowVect());   // 29m: dest ghosts, not source
+                ng_tsk.min(sst_lev[lev][0]->nGrowVect());
+
+                auto const& sm_arrs = surf_mf.const_arrays();
+                auto const& ss_arrs = sst_lev[lev][0]->const_arrays();
+                auto const& t_arrs  = tsk_lev[lev][0]->arrays();
+                ParallelFor(*tsk_lev[lev][0], ng_tsk,
+                            [=] AMREX_GPU_DEVICE (int box_no, int i, int j, int k) noexcept
+                {
+                    const Real sea = ss_arrs[box_no](i,j,k);
+                    if (sm_arrs[box_no](i,j,0) >= myhalf) {
+                        const Real lnd = sm_arrs[box_no](i,j,0,3);
+                        t_arrs[box_no](i,j,k) = (lnd > Real(0.0))
+                            ? amrex::min(amrex::max(lnd, Real(200.0)), Real(340.0))
+                            : sea;
+                    } else {
+                        t_arrs[box_no](i,j,k) = sea;
+                    }
+                });
+                Gpu::streamSynchronize();
+                tsk_lev[lev][0]->FillBoundary(geom[lev].periodicity());
+
+                // Report land and sea separately: a single min/max over the
+                // field cannot distinguish "land is live" from "land fell back
+                // to the sea placeholder everywhere", which is the exact
+                // failure this block exists to avoid.
+                ReduceOps<ReduceOpMin,ReduceOpMax,ReduceOpMin,ReduceOpMax> rop;
+                ReduceData<Real,Real,Real,Real> rdat(rop);
+                using RT = typename decltype(rdat)::Type;
+                for (MFIter mfi(*tsk_lev[lev][0]); mfi.isValid(); ++mfi) {
+                    const Box& b = mfi.validbox();
+                    const auto& t = tsk_lev[lev][0]->const_array(mfi);
+                    const auto& m = surf_mf.const_array(mfi);
+                    rop.eval(b, rdat, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT {
+                        const bool L = (m(i,j,0) >= myhalf);
+                        const Real big = Real(1.e10);
+                        return { L ?  t(i,j,k) :  big, L ? t(i,j,k) : -big,
+                                 L ?  big : t(i,j,k),  L ? -big : t(i,j,k) };
+                    });
+                }
+                RT hv = rdat.value(rop);
+                Real lmin = get<0>(hv), lmax = get<1>(hv);
+                Real wmin = get<2>(hv), wmax = get<3>(hv);
+                ParallelDescriptor::ReduceRealMin(lmin);
+                ParallelDescriptor::ReduceRealMax(lmax);
+                ParallelDescriptor::ReduceRealMin(wmin);
+                ParallelDescriptor::ReduceRealMax(wmax);
+                Print() << "HindCast skin temperature -> tsk: land "
+                        << lmin << " - " << lmax << " K, sea "
+                        << wmin << " - " << wmax << " K" << std::endl;
+            }
 
             auto const& mask_arrs = surf_mf.const_arrays();
             auto const& lmsk_arrs = lmask_lev[lev][0]->arrays();

@@ -37,6 +37,15 @@ cp "$CI/$DECK" inputs_c404 || die "no deck $CI/$DECK"
 # falls back to the problem's custom terrain (see inputs_c404 line 203).
 grep -q "erf.terrain_file_name = \"$TERRAIN\"" inputs_c404 \
     || die "deck $DECK does not name the staged terrain $TERRAIN"
+# MOST roughness map. Read from the DECK rather than passed in, because it is
+# domain-specific and must match the deck that was just staged. Not optional
+# once the deck names it: a missing file leaves z0 at the erf.most.z0 constant
+# with only "Reading MOST roughness file" absent from the log to show for it.
+ROUGH=$(grep -oP '(?<=^erf.most.roughness_file_name = ")[^"]+' inputs_c404 || true)
+if [ -n "$ROUGH" ]; then
+    cp "$CI/$ROUGH" . || die "deck $DECK names roughness map $ROUGH but $CI/$ROUGH is missing"
+    echo "  staged roughness map $ROUGH"
+fi
 for t in rrtmgp-data-sw-g224-2018-12-04.nc rrtmgp-data-lw-g256-2018-12-04.nc; do
     cp "$ERF_ROOT/Submodules/RRTMGP/rrtmgp/data/$t" . || die "missing RRTMGP table $t"
 done

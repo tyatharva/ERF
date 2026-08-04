@@ -49,20 +49,32 @@ RD, CP, P0 = 287.0, 1004.5, 1.0e5
 # domain within 4 cells (12 km) of the frame edge
 # (ERF_WeatherDataInterpolation.cpp:312-323). build_mapping() hard-raises if the
 # target grid escapes the source subset, so an under-sized margin fails loudly.
+# C404_DX is the frame grid spacing. The 6000 m default is what every frame set
+# before 2026-08-03 was built at -- keep it to reproduce those byte for byte.
+#
+# 6 km was inherited from the ERA5 path and is WRONG for CONUS404: the source is
+# 4 km and the ERF domain is 3 km, so the default pipeline runs 4 km -> 6 km ->
+# 3 km, discarding source resolution at the intermediate step and then
+# interpolating back up. Set C404_DX=3000 to sample the 4 km source straight
+# onto the ERF spacing. The source subset and the frame EXTENT are unchanged by
+# this (MARGIN is in metres), so make_c404_bbox.py's answer is unaffected --
+# only the sampling density changes. Cost is ~4x the frame bytes.
+DX = float(os.environ.get('C404_DX', '6000.'))
+
 if 'C404_PROB' in os.environ:
     _pl = [float(v) for v in os.environ['C404_PROB'].split()]
     if len(_pl) != 4:
         raise SystemExit('C404_PROB must be "x_lo y_lo x_hi y_hi" in metres')
     MARGIN = float(os.environ.get('C404_MARGIN', '66000.'))
-    _snap = lambda v, up: (np.ceil(v / 6000.) if up else np.floor(v / 6000.)) * 6000.
-    XS = np.arange(_snap(_pl[0] - MARGIN, False), _snap(_pl[2] + MARGIN, True) + 1., 6000.)
-    YS = np.arange(_snap(_pl[1] - MARGIN, False), _snap(_pl[3] + MARGIN, True) + 1., 6000.)
+    _snap = lambda v, up: (np.ceil(v / DX) if up else np.floor(v / DX)) * DX
+    XS = np.arange(_snap(_pl[0] - MARGIN, False), _snap(_pl[2] + MARGIN, True) + 1., DX)
+    YS = np.arange(_snap(_pl[1] - MARGIN, False), _snap(_pl[3] + MARGIN, True) + 1., DX)
 else:
     # The 192x96 literals this file shipped with. The pod_data frames were built
     # from exactly these, so the unset path stays byte-for-byte identical rather
     # than being re-derived from a margin rule that would round differently.
-    XS = np.arange(-450000., 252001., 6000.)
-    YS = np.arange(-230000., 190001., 6000.)
+    XS = np.arange(-450000., 252001., DX)
+    YS = np.arange(-230000., 190001., DX)
 # stretched heights ASL; must exceed the ERF domain top (19003 m) with margin
 _s = np.arange(46) / 45.0
 ZS = (25000.0 * (np.exp(3.6 * _s) - 1.0) / (np.exp(3.6) - 1.0)).astype(np.float64)

@@ -51,6 +51,22 @@ ERF::WriteCheckpointFile () const
 
     int ncomp_cons = vars_new[0][Vars::cons].nComp();
 
+    // Record the run's start instant alongside the checkpoint.
+    //
+    // Model time CONTINUES across a restart while start_datetime is re-read
+    // from the deck (ERF.cpp:2830), so a segmented run whose second leg edits
+    // start_datetime reinterprets every hindcast frame index and pulls forcing
+    // from the wrong hours -- silently. The natural anchor would be
+    // start_bdy_time in the bdy_H file, but that file is NOT written on the
+    // HindCast path (its boundary planes are rebuilt on restart, not stored),
+    // so a sidecar is used instead. Additive: it changes no existing file, and
+    // a checkpoint written before this existed simply skips the check.
+    if (ParallelDescriptor::IOProcessor()) {
+        std::ofstream st_file(checkpointname + "/hindcast_start_time");
+        st_file.precision(17);
+        st_file << start_time << "\n";
+    }
+
     // write Header file
     if (ParallelDescriptor::IOProcessor()) {
 

@@ -28,9 +28,14 @@ def main():
     xl, yl, xh, yh = [float(v) for v in sys.argv[1:5]]
     out = sys.argv[5]
     margin = float(os.environ.get('C404_MARGIN', '66000.'))
-    snap = lambda v, up: (np.ceil(v / 6000.) if up else np.floor(v / 6000.)) * 6000.
-    XS = np.arange(snap(xl - margin, False), snap(xh + margin, True) + 1., 6000.)
-    YS = np.arange(snap(yl - margin, False), snap(yh + margin, True) + 1., 6000.)
+    # Must match conus404_to_bin.py's C404_DX, same default, same reason.
+    # The bbox itself is spacing-independent (the frame EXTENT is set by margin,
+    # not by dx) -- this is here so the dry-run below tests the grid that will
+    # actually be built rather than a 6 km stand-in for it.
+    dx = float(os.environ.get('C404_DX', '6000.'))
+    snap = lambda v, up: (np.ceil(v / dx) if up else np.floor(v / dx)) * dx
+    XS = np.arange(snap(xl - margin, False), snap(xh + margin, True) + 1., dx)
+    YS = np.arange(snap(yl - margin, False), snap(yh + margin, True) + 1., dx)
 
     la = np.load(os.environ['C404_LAT'])
     lo = np.load(os.environ['C404_LON'])

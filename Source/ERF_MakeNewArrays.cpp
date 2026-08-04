@@ -428,10 +428,18 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
         const amrex::DistributionMapping& dm_hc = src.DistributionMap();
 
         // comps: 0 = land-sea mask, 1 = SST, 2 = surface albedo (fal; -1 if
-        // the .bin frames predate the forecast-albedo field)
-        surface_state_1[lev].define(ba2d[lev], dm_hc, 3, src.nGrow());
-        surface_state_2[lev].define(ba2d[lev], dm_hc, 3, src.nGrow());
-        surface_state_interp[lev].define(ba2d[lev], dm_hc, 3, src.nGrow());
+        // the .bin frames predate the forecast-albedo field),
+        //        3 = LAND skin temperature (-1 where no land source point)
+        //
+        // comp 3 exists because comp 1 cannot carry it. comp 1 is interpolated
+        // with a WATER-ONLY stencil (ERF_SurfaceDataInterpolation.cpp, "MASKED
+        // bilinear for SST"), which is correct -- blending land into SST across
+        // the coastline is what that mask prevents -- but it means the land
+        // skin temperature the frames DO carry is discarded at interpolation.
+        // The two fields need opposite masks, so they need separate components.
+        surface_state_1[lev].define(ba2d[lev], dm_hc, 4, src.nGrow());
+        surface_state_2[lev].define(ba2d[lev], dm_hc, 4, src.nGrow());
+        surface_state_interp[lev].define(ba2d[lev], dm_hc, 4, src.nGrow());
 
         bool regrid_forces_file_read = true;
         SurfaceDataInterpolation(lev, t_new[0], z_phys_nd, regrid_forces_file_read);

@@ -24,6 +24,16 @@ erf.hindcast_boundary_data_dir    = "CONUS404Data_3D"
 erf.hindcast_data_interval_in_hrs = 3.0
 erf.hindcast_lateral_forcing      = true
 
+# [ADDED 2026-08-03, UPSTREAM_ISSUES item 64] Initialise the interior horizontal
+# wind from the frames instead of from rest. ERF's HindCast path sets only theta
+# and qv at t=0 and says so ("Momenta remain zero (spin-up from rest)"), which
+# left the wind to be built entirely by lateral forcing propagating inward.
+# Every 23 h arm in this campaign therefore scored a domain that was still
+# filling, and item 65 measured that 48 h of spin-up LEAD does not remove the
+# signature. w is left at rest on purpose (see the code comment). Set to 0 to
+# reproduce the old from-rest behaviour, which is the A/B that tests item 64.
+erf.hindcast_ic_frame_wind        = 1
+
 # [ADDED] Surface forcing from ERA5 (erftools Output/Surface). The domain is
 # mostly ocean; without this, water-surface temperatures have no data source.
 # RE-ENABLED after the theta/qv coupling + ERA5 init landed: the old
@@ -186,12 +196,36 @@ zhi.type = "SlipWall"
 # if absent), and fixed Cd/Ch/Cq with a fixed surface temperature is wrong for
 # a diurnal hindcast anyway. moeng is the standard MOST similarity closure and
 # takes its surface state from the land model / hindcast surface data.
+# [ADDED 2026-08-03] Real per-cell roughness instead of one constant for all
+# land. Built by pod/make_roughness_map.py from CONUS404 LU_INDEX
+# (MODIFIED_IGBP_MODIS_NOAH) through Noah-MP's own Z0MVT table
+# (Submodules/Noah-MP/parameters/NoahmpTable.TBL, &noahmp_modis_parameters,
+# PARSED not transcribed). This needs NO land surface model: z0 is a geometric
+# surface property from a land-use category, whereas NOAH-MP is a prognostic
+# soil/vegetation model and a separate question entirely.
+#
+# erf.most.z0 below remains the fallback for anything the file does not cover.
+# It is NOT a uniform scaling: the dominant land type here is open shrubland at
+# 0.06 m -- SMOOTHER than the 0.1 m constant -- while forest and urban are
+# 1.0-1.1 m, an order of magnitude rougher. Land mean n/a (all ocean) m.
+#
+# Independent cross-check: the land fraction implied by LU_INDEX (0.0%) matches
+# the land fraction the surface FRAMES produce through LANDMASK to better than
+# 0.5%, and those are two different CONUS404 fields on two different paths.
+erf.most.roughness_file_name = "roughness_3km_192x96_domB.txt"
 erf.most.z0             = 0.1     # LAND points only (chaparral/scrub). Ocean
                                   # roughness is computed dynamically from u*
                                   # via Charnock (verified: the surface layer
                                   # iterates land and sea separately; z0_const
                                   # never applies to sea points).
-erf.most.zref           = 25.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
+# [2026-08-03] 25.0 -> 30.0. zref is a height ABOVE THE LOCAL TERRAIN and the
+# terrain search uses STRICT inequalities (z_target > z_lo && z_target < z_hi,
+# ERF_MOSTAverage.cpp:565). With zref exactly equal to erf.initial_dz = 25.0 the
+# target lands precisely on the first cell FACE over every flat/ocean column, so
+# which cell wins is decided by floating-point rounding; if it ever falls the
+# wrong way the run aborts at startup with "zref not found with terrain!".
+# 30 m is still inside the surface layer and is not a knife-edge.
+erf.most.zref           = 30.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
 erf.most.average_policy = 1
 erf.surface_layer.flux_type = moeng
 erf.most.surf_temp      = 288.0   # fallback only; MM5/SST provide the live surface state
@@ -332,6 +366,24 @@ erf.variable_coriolis = true
 #   "SAM is not correct with variable dz -- choose another moisture model"
 # Morrison remains the baseline; WSM6 measured as the cheap alternative.
 erf.moisture_model = "Morrison"
+# [ADDED 2026-08-04] Prescribed cloud droplet number concentration.
+# Morrison here runs with INUM = 1 (constant droplet number,
+# ERF_AdvanceMorrison.cpp:414), so this value IS the cloud droplet
+# concentration everywhere -- it is not a fallback.
+#
+# 250 cm^-3 is Morrison's CONTINENTAL default and was what this deck used by
+# omission. This domain is 70-85% ocean and the storm arrives over water, where
+# maritime concentrations are 50-100 cm^-3. Too-high Nd gives smaller droplets,
+# suppressed warm-rain collision-coalescence, and condensate that survives over
+# the ocean to precipitate on the terrain instead -- the direction of this
+# campaign's orographic wet bias.
+#
+# NOTE this knob was DEAD until 2026-08-04: line 415 of ERF_AdvanceMorrison.cpp
+# reassigned the same variable to 250 after the ParmParse read, so any value set
+# here was silently discarded. Verified live by A/B (sum(qc) changes with the
+# value; repeated runs at a fixed value are bit-identical).
+erf.morrison_ndcnst = 100.0
+
 
 # ---------------------------------------------------------------------------
 #  LAND SURFACE  --  MM5 IS INERT IN THIS CONFIGURATION.  [MEASURED 2026-07-24]
@@ -363,8 +415,22 @@ erf.moisture_model = "Morrison"
 #  (NOAHMP, the only radiatively-live LSM in this fork, was dropped
 #  permanently 2026-07-24.)
 # ---------------------------------------------------------------------------
-erf.land_surface_model = "MM5"
-erf.mm5.soil_theta     = 286.5    # K -- December land-mean skt
+#  SUPERSEDED 2026-08-03. The land skin temperature now comes from the CONUS404
+#  frames (TSK). Everything above stays true of MM5 and is why it is switched
+#  OFF rather than tuned: MM5 receives no radiation and no MOST flux, so it
+#  could only ever write a constant, and get_lsm_tsurf ran LAST in update_fluxes
+#  -- after the SST/TSK fill -- so that constant overwrote the real field.
+#  "None" is the ERF default (ERF_DataStruct.H:260) and installs NullSurf.
+#
+#  The frames carry TSK merged with SST by conus404_to_bin.py's write_frame, but
+#  ERF's comp-1 interpolation is WATER-MASKED, so the land values were discarded
+#  at interpolation and had to be picked up by a second, land-masked pass
+#  (surface_state comp 3). Measured result on 2020-12-28: land skin temperature
+#  278.2-291.6 K across the domain, against the flat 286.5 K below -- which was
+#  itself a 2023 December CLIMATOLOGICAL mean, 5.8 K warmer than this event
+#  day's actual land mean of 280.7 K.
+erf.land_surface_model = "None"
+# erf.mm5.soil_theta   = 286.5    # unused with land_surface_model = None
 
 # ---------------------------------------------------------------------------
 #  RADIATION  (RRTMGP; tables copied into the run dir from Submodules/RRTMGP.
@@ -374,10 +440,11 @@ erf.radiation_model        = "RRTMGP"
 # Radiative surface temperature [CORRECTED 2026-07-24]: with zlo=surface_layer
 # active, radiation takes the per-column skin temperature from the surface
 # layer -- verified in Radiation::mf_to_kokkos_buffers. Over OCEAN that is the
-# live ERA5 SST. Over LAND it is the constant erf.mm5.soil_theta, because MM5
-# is inert (see the LAND SURFACE section above): there is no diurnal skin-
-# temperature cycle over land in this configuration. rad_t_sfc below is only
-# the fallback for columns with neither source and never fires here.
+# live SST. Over LAND it was the constant erf.mm5.soil_theta until 2026-08-03,
+# which meant the longwave saw no land diurnal cycle either; it is now the
+# CONUS404 skin temperature, refreshed every 3 h with the surface frames (see
+# the LAND SURFACE section above). rad_t_sfc below is only the fallback for
+# columns with neither source and never fires here.
 # Surface ALBEDO [ADDED 2026-07-24]: per-column, time-varying from the
 # ERA5 forecast-albedo field carried as field 6 of the surface frames
 # (erftools_fal_patch.py; MODIS climatological annual cycle + model
@@ -391,7 +458,26 @@ erf.rad_t_sfc              = 288.0
 # (domain tops at 20 km, largely below the O3 layer; the O3-sensitive upper
 # levels sit inside the damping layer). Refine to a 48-entry profile if
 # stratospheric SW heating ever matters for the application.
-erf.o3vmr                  = 5.0e-8
+# [REPLACED 2026-08-03] Was a single value, 5.0e-8, for the whole column. The
+# knob takes 1 OR nlay values (asserted, ERF_Radiation.cpp:261), so a profile is
+# a deck change, not a code change. The constant was 2x too HIGH at the surface
+# and 27x too LOW at the lid: this domain tops at 19 km / ~73 hPa, which is
+# inside the ozone layer, where the real VMR is ~1.4 ppm, not 0.05 ppm.
+# Source: the Garand atmospheres shipped with RRTMGP
+# (Submodules/RRTMGP/examples/all-sky/rrtmgp-allsky.nc, vmr_o3), median over the
+# 12 of 42 columns with near-surface T in 280-296 K (mid-latitude-like),
+# interpolated in log(p) onto this deck's 48 level centres via a US Standard
+# Atmosphere p(z). Rebuild with c404_invariant/o3_profile.txt if the vertical
+# grid changes -- the values are tied to dz0=25 m, ratio=1.09311734, 48 levels.
+# Sanity: 2.49e-8 at the surface, 1.13e-7 at 280 hPa, 1.37e-6 at 73 hPa.
+erf.o3vmr = 2.4874e-08 2.4906e-08 2.5054e-08 2.5217e-08 2.5394e-08 2.5586e-08 2.5795e-08 2.6023e-08 2.6272e-08 2.6545e-08 2.6836e-08 2.7077e-08 2.7340e-08 2.7629e-08 2.7949e-08 2.8301e-08 2.8685e-08 2.9107e-08 2.9569e-08 3.0075e-08 3.0617e-08 3.1181e-08 3.1801e-08 3.2431e-08 3.3102e-08 3.3824e-08 3.4599e-08 3.5455e-08 3.6400e-08 3.7564e-08 3.8925e-08 4.0785e-08 4.3096e-08 4.5998e-08 5.0411e-08 6.0819e-08 7.3347e-08 8.2539e-08 9.0598e-08 9.5803e-08 1.1333e-07 1.4015e-07 1.6740e-07 2.1737e-07 2.9756e-07 5.3471e-07 7.9719e-07 1.3660e-06
+
+# [ADDED 2026-08-03] ERF's built-in defaults are ~2010 values (CO2 388.7 ppm,
+# CH4 1808 ppb, N2O 323.1 ppb). This is a hindcast of a specific date, so use
+# that date's values. Radiatively small over 23 h, but free and factual.
+erf.co2vmr                 = 414.0e-6    # Dec 2020
+erf.ch4vmr                 = 1879.0e-9   # Dec 2020
+erf.n2ovmr                 = 333.0e-9    # Dec 2020
 # Recalibrated at 2 km (after the low-temp printf fix exposed true step
 # cost): rad is 0.38 s/call vs ~0.035 s dycore steps, i.e. HALF of wall at
 # freq 10. 30 steps = ~80-135 s model time at dt 2.6-4.5, matching standard
@@ -401,7 +487,11 @@ erf.o3vmr                  = 5.0e-8
 # silently changes the radiative timescale whenever dt changes, and at
 # dt ~ 1.66 s the 30-step cadence fired every 50 s of model time and consumed
 # 21.8% of wall clock (505 calls in 15,149 steps, each ~9x the median step).
-erf.rad_freq_in_time       = 180.0
+erf.rad_freq_in_time       = 300.0   # [2026-08-03] 180 -> 300 s; still well
+                                      # inside WRF practice (radt ~1 min per km
+                                      # of dx = 3 min here) and cuts the measured
+                                      # radiation cost (3.6% compressible /
+                                      # 6.0% anelastic at cfl 0.1) by ~40%.
 erf.rrtmgp_file_path       = "."
 erf.rrtmgp_coeffs_sw       = rrtmgp-data-sw-g224-2018-12-04.nc
 erf.rrtmgp_coeffs_lw       = rrtmgp-data-lw-g256-2018-12-04.nc
@@ -413,6 +503,12 @@ erf.rrtmgp_cloud_optics_lw = rrtmgp-cloud-optics-coeffs-lw.nc
 # ---------------------------------------------------------------------------
 amr.max_level       = 0
 amr.max_grid_size   = 64
+# [ADDED 2026-08-03] State the z coupling instead of relying on 48 < 64.
+# init_thermo_from_hindcast HARD-ABORTS if a column is split across boxes
+# ("the hydrostatic integration needs a whole column on one box"), so the
+# vertical must never be decomposed. Raising amr.n_cell[2] above max_grid_size
+# without this line would abort at init.
+amr.max_grid_size_z = 48
 amr.blocking_factor = 16
 
 # ---------------------------------------------------------------------------
@@ -454,14 +550,23 @@ amrex.max_gpu_streams = 1
 # the radiation columns; without these the first radiation call OOMs.
 amrex.the_arena_init_size = 4000000000
 # Swept at 2 km: 512/2048/5000 within noise; 18432 (single chunk) OOMs.
-erf.rad_ncol_chunk        = 5000
+# [2026-08-03] 5000 -> 1024, ERF's own default. UPSTREAM_ISSUES 6f measured that
+# anelastic + RRTMGP needs ~1024 on a 16 GB card; the 2-km sweep that chose 5000
+# was compressible-only. 512/2048/5000 were within noise there, so this costs
+# nothing and removes a live suspect for the anelastic+NSCBC+radiation segfault.
+erf.rad_ncol_chunk        = 1024
 
 # ---------------------------------------------------------------------------
 #  CHECKPOINTS  (time-based to match adaptive dt; every 6 h of sim time)
 #  (amr.check_per verified accepted -- ERF reads both erf.* and amr.*)
 # ---------------------------------------------------------------------------
 erf.check_file = chk
-amr.check_per  = 21600.0           # checkpoint every 21600 s (6 h)
+# [2026-08-03] 21600 -> 3600. UPSTREAM_ISSUES item 66: the Davies FPE at h9 was
+# reproduced exactly by restarting from the checkpoint written AT the failure and
+# CLEARED by restarting from one hour earlier. Recovery therefore needs an EARLIER
+# checkpoint, not the latest one, and a 6-h cadence leaves nothing to fall back to
+# within a 6-h spin-up segment. Checkpoints are tens of MB.
+amr.check_per  = 3600.0           # checkpoint every 21600 s (6 h)
 
 # ---------------------------------------------------------------------------
 #  PLOTFILES  (native AMReX; convert to NetCDF afterward)

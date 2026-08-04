@@ -164,6 +164,51 @@ SurfaceLayer::update_fluxes (const int& lev,
 
     } // MOENG -- SEA
 
+    // ---- UPSTREAM_ISSUES item 60, roughness consequence -------------------
+    // One-shot control that the land/sea split in compute_fluxes actually
+    // separates the two roughness models. Both passes above are gated on
+    //     (is_land && lmask==1) || (!is_land && lmask==0)
+    // so while lmask was identically 0 -- which it was for EVERY run in this
+    // campaign before the item-60 fix -- the land pass matched no cells and
+    // every column, mountains included, took the Charnock SEA branch. That is
+    // z0 ~ 1e-4 m over terrain the deck intends to be 0.1 m: 100-1000x too
+    // smooth, and the direct explanation for item 63's Cd 9-17x below physical.
+    //
+    // Printed once because the failure is silent otherwise: a single domain
+    // min/max cannot distinguish "land is on the constant" from "land is on
+    // Charnock", which is exactly the distinction that was wrong.
+    {
+        static bool s_z0_reported = false;
+        if (!s_z0_reported && m_lmask_lev[lev][0]) {
+            s_z0_reported = true;
+            const int klo = m_geom[lev].Domain().smallEnd(2);
+            ReduceOps<ReduceOpMin,ReduceOpMax,ReduceOpMin,ReduceOpMax> rop;
+            ReduceData<Real,Real,Real,Real> rdat(rop);
+            using RT = typename decltype(rdat)::Type;
+            for (MFIter mfi(z_0[lev]); mfi.isValid(); ++mfi) {
+                Box b = mfi.validbox(); b.setRange(2, klo, 1);
+                if (!b.ok()) { continue; }
+                const auto& z0a = z_0[lev].const_array(mfi);
+                const auto& lma = m_lmask_lev[lev][0]->const_array(mfi);
+                rop.eval(b, rdat, [=] AMREX_GPU_DEVICE (int i,int j,int k) -> RT {
+                    const bool L = (lma(i,j,0) == 1);
+                    const Real big = Real(1.e10);
+                    return { L ? z0a(i,j,0) :  big, L ? z0a(i,j,0) : -big,
+                             L ? big : z0a(i,j,0),  L ? -big : z0a(i,j,0) };
+                });
+            }
+            RT hv = rdat.value(rop);
+            Real lmin=get<0>(hv), lmax=get<1>(hv), smin=get<2>(hv), smax=get<3>(hv);
+            ParallelDescriptor::ReduceRealMin(lmin);
+            ParallelDescriptor::ReduceRealMax(lmax);
+            ParallelDescriptor::ReduceRealMin(smin);
+            ParallelDescriptor::ReduceRealMax(smax);
+            Print() << "SurfaceLayer roughness: land z0 " << lmin << " - " << lmax
+                    << " m (constant), sea z0 " << smin << " - " << smax
+                    << " m (Charnock)" << std::endl;
+        }
+    }
+
     if (flux_type == FluxCalcType::CUSTOM || flux_type == FluxCalcType::RICO) {
         if (custom_rhosurf > 0) {
             specified_rho_surf = true;
@@ -1117,8 +1162,21 @@ SurfaceLayer::read_custom_roughness (const int& lev,
             if (gtbx.smallEnd(2) != klo) { continue; }
 
             // Populate z_phys data
-            Real tol = Real(1.0e-4);
             auto dx = m_geom[lev].CellSizeArray();
+            // The absolute 1e-4 m tolerance this used to carry is UNREACHABLE in
+            // single precision: domain coordinates here are O(4e5) m, where the
+            // float32 spacing is ~0.023 m -- 230x the tolerance. Every node
+            // therefore failed the fast path AND the brute-force search, and the
+            // assert below was AMREX_ASSERT (compiled out in Release), so every
+            // land cell silently received z0 = 0. z0 = 0 is not merely wrong, it
+            // is undefined: MOST evaluates log(z/z0). Measured before this fix:
+            // "land z0 0 - 0 m" with a correct map on disk.
+            //
+            // Scale the tolerance to the grid instead. 1e-3 of a cell is 3 m at
+            // dx = 3 km -- far below any real node spacing, so a genuinely
+            // mis-ordered file is still caught, and far above float32 resolution.
+            Real tol = Real(1.0e-3) * amrex::min(dx[0], dx[1]);
+
             auto ProbLoArr = m_geom[lev].ProbLoArray();
             int ilo = m_geom[lev].Domain().smallEnd(0);
             int jlo = m_geom[lev].Domain().smallEnd(1);
@@ -1150,7 +1208,13 @@ SurfaceLayer::read_custom_roughness (const int& lev,
                             break;
                         }
                     }
-                    AMREX_ASSERT_WITH_MESSAGE(found, "Location read from terrain file does not match the grid!");
+                    // ALWAYS_ASSERT, not ASSERT: the Release build compiles
+                    // ASSERT out, and the fall-through writes z0loc = 0, which
+                    // is undefined in MOST rather than merely inaccurate. A
+                    // roughness file that does not match the grid must stop the
+                    // run, not silently zero the surface.
+                    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(found,
+                        "Location read from the MOST roughness file does not match the grid!");
                     amrex::ignore_unused(found);
                     z0_arr(i,j,klo) = z0loc;
                 }
