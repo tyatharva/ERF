@@ -125,6 +125,10 @@ precip_check/cds_sfc.log
 /pod_data_A_3km/
 /pod_data_A_3km_tail/
 /pod_data_A_run30h/
+# 10 hourly 11-field (ice-bearing) CONUS404 frames, 12/27 22Z .. 12/28 07Z.
+# ~666 MB of float32 binaries, regenerable with conus404_to_bin.py -- see the
+# invocation recorded in UPSTREAM_ISSUES. Never commit frames.
+/pod_data_hourly_ice/
 /c404_invariant/
 /_archive/
 /.codegraph/

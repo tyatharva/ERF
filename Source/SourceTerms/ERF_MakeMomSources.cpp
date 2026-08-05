@@ -3,6 +3,7 @@
 #include <AMReX_BCRec.H>
 #include <AMReX_TableData.H>
 #include <AMReX_GpuContainers.H>
+#include <AMReX_ParmParse.H>
 
 #include "ERF_NumericalDiffusion.H"
 #include "ERF_PlaneAverage.H"
@@ -672,7 +673,25 @@ void make_mom_sources (Real time,
                                            rho_u_forecast_state, rho_v_forecast_state, rho_w_forecast_state,
                                            cons_forecast_state);
             }
-            if(solverChoice.init_type == InitType::HindCast and solverChoice.hindcast_surface_bcs) {
+            // DOUBLE-COUNTED SURFACE DRAG. This bulk-coefficient momentum sink is
+            // applied at k<=1 on top of the MOST surface stress, which is already
+            // the complete surface momentum flux whenever zlo.type = surface_layer.
+            // With both active the surface sees Cd_MOST + Cd_bulk, and any tuning of
+            // most.z0 is contaminated by a second drag the MOST diagnostics (u_star,
+            // z0, Cd) cannot see. Measured on the ocean domain: ERF's 0-3 km wind
+            // starts at 0.74-0.81x the driver, i.e. too SLOW, which is the signature
+            // of excess drag; it then runs away for an unrelated reason (item 88).
+            //
+            // The thermodynamic half (ApplySurfaceTreatment_BulkCoeff_CC: sea-surface
+            // sensible/latent flux toward the real SST) is NOT affected by this gate
+            // and still runs -- only the momentum duplication is removed.
+            //
+            // erf.hindcast_surface_drag_mom = 1 restores the old behaviour exactly.
+            static const int l_bulk_drag_mom = [] {
+                int v = 0; ParmParse pp("erf");
+                pp.query("hindcast_surface_drag_mom", v); return v; }();
+            if(solverChoice.init_type == InitType::HindCast and solverChoice.hindcast_surface_bcs
+               and l_bulk_drag_mom) {
                 const Array4<const Real>& surface_state_arr = (*surface_state_at_lev).array(mfi);
                 ApplySurfaceTreatment_BulkCoeff_Mom(tbx, tby,
                                                     xmom_src_arr, ymom_src_arr,

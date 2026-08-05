@@ -9292,3 +9292,110 @@ and predictable, and matches upstream's real-data decks (`WPS_Test` uses
 
 Measured rate: **647 model s per wall minute** at dt 0.75 (1 model hour in 333 s
 wall), so 6 h ~ 33 min, 30 h ~ 2.8 h, 6 h spin-up + 30 h ~ 3.3 h.
+
+## 86. nscbc_sigma IS INERT -- the incoming-characteristic weight cannot reach the interior error
+
+Ocean domain, 2.5 h arms, scored h1-h2 against MRMS over the whole interior with
+the 10-cell forcing band excluded. Every arm `Blended_5th6th` moist advection,
+`fixed_dt = 0.75`, one variable changed:
+
+| sigma | mean mm | vs MRMS | corr MRMS | corr d02 |
+|---|---|---|---|---|
+| 0.00 | 2.404 | 1.71x | **+0.464** | +0.385 |
+| 0.25 | 2.405 | 1.71x | **+0.465** | +0.386 |
+| 2.00 | 2.405 | 1.71x | **+0.464** | +0.385 |
+| MRMS | 1.406 | 1.00x | +1.000 | +0.708 |
+| d02  | 1.381 | 0.98x | +0.708 | +1.000 |
+
+`sigma` is the weight in a CONVEX blend of the incoming LODI characteristic
+(`ERF_BoundaryConditionsRealbdy.cpp:652`):
+
+    Jin = sigma*Jin_far + (1-sigma)*Jin_int
+
+so sigma = 1 imposes the driver's invariant outright and sigma = 0 uses pure
+interior extrapolation -- **no driver information whatsoever**. Those two
+endpoints give the same interior precipitation to 0.001 mm and the same pattern
+correlation to 0.001. sigma = 2.0 (an over-extrapolation past the far field,
+outside the convex range) also lands in the same place.
+
+The knob is genuinely wired: the runs are not bit-identical (means differ in the
+4th digit), so the parameter reaches the solver and changes the boundary
+solution. It just cannot reach the scored region. It modifies one characteristic
+in the wall-adjacent CELL, and every scored number here already excludes 10 cells
+from each lateral edge.
+
+**This closes the "tune the NSCBC relaxation" line.** It joins three other levers
+measured inert on this same domain and window:
+
+| lever | range tested | corr vs MRMS |
+|---|---|---|
+| moist advection | Upwind_3rd / Blended_5th6th / WENOZ5 | +0.458 .. +0.465 |
+| nscbc_sigma | 0.0 .. 2.0 | +0.464 .. +0.465 |
+| turbulence closure | full MYNN .. none (item 75) | unchanged |
+| vertical levels | 48 -> 96 (item 77) | ~5% |
+
+What survives all four is the **1.71x wet bias** at a correlation of +0.465
+against an achievable +0.708 (d02 vs MRMS on this window). Neither the dynamics,
+the lateral boundary treatment, nor the turbulence closure moves it, which points
+the remaining effort at the MOISTURE BUDGET rather than at any of them.
+
+The specific untested candidate: frames are `ndata = 8` (rho,u,v,w,theta,qv,qc,qr),
+so **qi/qs/qg start at zero in every run**. The model spins the cold-rain path up
+from nothing over exactly the h1-h2 window being scored, which is a coherent
+mechanism for an early wet bias. `ERF_ReadCustomBinaryIC.H:71` hard-rejects
+`ndata > 8`, so testing it requires the reader change tracked separately.
+
+CAUTION on the arm labelled `run_weno` in earlier notes: it was run with
+**WENOZ5**, not `Blended_5th6th`, so it is NOT a sigma-sweep point (it differs in
+two variables) and was briefly mislabelled as the sigma = 1.0 baseline. It
+remains a valid third data point for the advection row above.
+
+## 87. THE HINDCAST IC LOADED RAIN INTO THE CLOUD-ICE FIELD -- every Morrison run in this campaign
+
+Found while adding the ice-phase initial conditions, by reading what the
+microphysics actually indexes rather than trusting the slot names.
+
+**Moisture component order is SCHEME-DEPENDENT** (`ERF_DataStruct.H:174-227`):
+
+| scheme | RhoQ1 | RhoQ2 | RhoQ3 | RhoQ4 | RhoQ5 | RhoQ6 |
+|---|---|---|---|---|---|---|
+| Kessler, SuperDroplets | qv | qc | **qr** | -- | -- | -- |
+| Morrison, WSM6, SAM | qv | qc | **qi** | **qr** | qs | qg |
+
+Morrison's own code confirms it: `ERF_InitMorrison.cpp:113` reads `RhoQ3_comp`
+into `qi_array` and `:117` reads `RhoQ4_comp` into `qpr_array`.
+
+The hindcast path hardcoded the **Kessler** order in two places:
+
+* `ERF_WeatherDataInterpolation.cpp` (IC): `cons_arr(RhoQ3_comp) = rho_d *
+  f_arr(RhoQ3_comp)` where the frame's slot 3 is RAIN.
+* `ERF_BoundaryConditionsRealbdy.cpp` (lateral forcing): `cons_read[RhoQ3_comp]
+  = 1` and `cons_map[6] = HindcastBdyVars::QR`.
+
+So under Morrison -- the model **every** ChannelIslands hindcast has run -- the
+driver's rain water was written into the CLOUD ICE field at initialisation, the
+rain field was left at zero, and (with `erf.hindcast_bdy_hydrometeors = 1`, which
+the ocean deck sets) the boundary relaxed the cloud-ice field toward the frame's
+rain on every frame transition, for the whole run.
+
+Consequences: initial rain mass is handed to the ice category, so it does not
+sediment as rain, and Morrison must melt/convert it -- with the associated latent
+heating in the wrong sign at the wrong level. This is live in every scored
+precipitation number in this campaign.
+
+**Fixed** by mapping through `solverChoice.moisture_indices` -- by SPECIES, never
+by slot -- in both files. `forecast_state` keeps FRAME order
+(Q1 qv, Q2 qc, Q3 qr, Q4 qi, Q5 qs, Q6 qg) and the translation happens where it
+is copied into the conserved state; that convention is now stated at both ends.
+A `-1` index means the active scheme does not carry the species and it is skipped.
+
+Note the defect was INVISIBLE to every diagnostic used so far: total column water
+is unchanged (the mass is present, in the wrong category), `rain_accum` is a
+surface flux that recovers once the microphysics has cycled, and the campaign
+never ran Kessler and Morrison back to back on the same case. It only shows up by
+reading the index tables.
+
+**Not yet quantified.** The fix is in, but no A/B has been run, so the size of
+its effect on the +0.465 / 1.71x numbers is unknown. Do not assume it explains
+them -- item 86 showed the error is a propagation-speed/position problem, and a
+species mis-assignment is not an obvious cause of that.

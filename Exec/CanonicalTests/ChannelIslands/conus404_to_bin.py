@@ -30,6 +30,9 @@ import numpy as np, pyproj
 from scipy.ndimage import map_coordinates
 
 BASE = "https://thredds.rda.ucar.edu/thredds/dodsC/files/g/d559000"
+# ERF_ICE=0 reproduces the old 8-field frames exactly; default 1 adds qi/qs/qg
+# (ndata=11). ERF reads ndata from the header, so both are valid frames.
+ICE = os.environ.get('ERF_ICE', '1') != '0'
 OURS = ("+proj=lcc +lat_1=32.041667 +lat_2=35.208333 +lat_0=33.625000 "
         "+lon_0=-119.250000 +datum=WGS84 +units=m +no_defs")
 C404 = ("+proj=lcc +lat_1=30.0 +lat_2=50.0 +lat_0=39.100006103515625 "
@@ -189,9 +192,19 @@ def main():
     # the interior initialises at rest, so the analysis window must sit AFTER
     # the wind field has spun up from the boundaries). Default is the event day,
     # so the existing frame sets reproduce byte-for-byte.
+    # Accepts YYYY-MM-DD (midnight, the original behaviour, so existing frame
+    # sets reproduce byte for byte) or YYYY-MM-DDTHH. The hour form exists
+    # because the production pool starts at 18Z the previous day for the spin-up
+    # lead: without it the only way to reach 18Z is to start at 00Z and pull 18
+    # frames nobody wants.
     _s = os.environ.get('C404_START', '2020-12-28')
-    _y, _m, _d = [int(v) for v in _s.split('-')]
-    times = [dt.datetime(_y, _m, _d) + dt.timedelta(hours=NH * k) for k in range(NF)]
+    _date, _, _hh = _s.partition('T')
+    _y, _m, _d = [int(v) for v in _date.split('-')]
+    _h = int(_hh) if _hh else 0
+    if not 0 <= _h <= 23:
+        raise SystemExit(f'C404_START hour out of range: {_s}')
+    times = [dt.datetime(_y, _m, _d, _h) + dt.timedelta(hours=NH * k)
+             for k in range(NF)]
     S3 = f'[{j0}:1:{j1}][{i0}:1:{i1}]'
     for t in times:
         wy = 'wy2021'; mo = t.strftime('%Y%m')
@@ -200,6 +213,21 @@ def main():
         g = lambda v, extra='': dods(u3 + f'{v}[0:1:0][0:1:{NLEV_SRC-1}]' + (extra or S3),
                                      (1, NLEV_SRC, j1-j0+1, i1-i0+1))[0]
         TK = g('TK'); P = g('P'); QV = g('QVAPOR'); QC = g('QCLOUD'); QR = g('QRAIN')
+        # ICE PHASE (ERF_ICE=1, default on). CONUS404 is a WRF run, so QICE /
+        # QSNOW / QGRAUP sit on the same grid and levels as the warm species.
+        #
+        # WHY: frames carried ndata=8 (rho,u,v,w,theta,qv,qc,qr) and every ice
+        # species started at ZERO. That is a partial initial condition for any
+        # 6-class scheme, in a December Pacific storm whose tops are well above
+        # the freezing level -- warm-rain runs unopposed while ice spins up, and
+        # ERF scored 1.6-1.7x too wet against both MRMS and d02.
+        #
+        # WSM6 is single-moment with exactly these 6 masses and ZERO number
+        # concentrations, so these frames initialise its ENTIRE prognostic state.
+        # Morrison would still leave 5 number concentrations uninitialised, which
+        # is why the scheme was switched alongside this change.
+        if ICE:
+            QI = g('QICE'); QS = g('QSNOW'); QG = g('QGRAUP')
         U = dods(u3 + f'U[0:1:0][0:1:{NLEV_SRC-1}][{j0}:1:{j1}][{i0}:1:{i1+1}]',
                  (1, NLEV_SRC, j1-j0+1, i1-i0+2))[0]
         V = dods(u3 + f'V[0:1:0][0:1:{NLEV_SRC-1}][{j0}:1:{j1+1}][{i0}:1:{i1}]',
@@ -240,9 +268,11 @@ def main():
         TH = TK * (P0 / P) ** (RD / CP)
         RHO = P / (RD * TK * (1.0 + 0.608 * QV))
 
+        warm = (('th', TH), ('qv', QV), ('qc', QC), ('qr', QR), ('z', ZC))
+        cold = (('qi', QI), ('qs', QS), ('qg', QG)) if ICE else ()
         H = {k: hinterp(v, fj, fi) for k, v in
              (('rho', RHO), ('u', U), ('v', V), ('w', W),
-              ('th', TH), ('qv', QV), ('qc', QC), ('qr', QR), ('z', ZC))}
+              *warm, *cold)}
         nx, ny = len(XS), len(YS)
         out = {k: np.empty((nx, ny, len(ZS))) for k in H if k != 'z'}
         for a in range(nx):
@@ -253,7 +283,8 @@ def main():
         fn = os.path.join(outdir3, 'ERF_IC_' + t.strftime('%Y_%m_%d_%H_%M') + '.bin')
         write_frame(fn, tlat, tlon, XS, YS, ZS,
                     [out['rho'], out['u'], out['v'], out['w'],
-                     out['th'], out['qv'], out['qc'], out['qr']])
+                     out['th'], out['qv'], out['qc'], out['qr']]
+                    + ([out['qi'], out['qs'], out['qg']] if ICE else []))
         print(f'  wrote {os.path.basename(fn)}  rho {out["rho"].mean():.4f} '
               f'th {out["th"].mean():.1f} qv {out["qv"].mean():.5f}', flush=True)
 

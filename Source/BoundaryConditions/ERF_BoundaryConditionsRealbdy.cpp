@@ -120,7 +120,16 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
         pp.query("hindcast_bdy_hydrometeors", b); return b; }();
     const bool l_have_hydro = l_bdy_hydro && (!bdy_data_xlo.empty()) &&
         (static_cast<int>(bdy_data_xlo[0].size()) > HindcastBdyVars::QR);
-    if (l_have_hydro) { cons_read[RhoQ2_comp] = 1; cons_read[RhoQ3_comp] = 1; }
+    // Which CONS components the cloud/rain planes belong to depends on the ACTIVE
+    // SCHEME, not on the plane order. Kessler puts rain in RhoQ3; Morrison and
+    // WSM6 put CLOUD ICE there and rain in RhoQ4. Hardcoding RhoQ2/RhoQ3 relaxed
+    // the frame's rain into the cloud-ice field under both of those.
+    const int bdy_qc = solverChoice.moisture_indices.qc;
+    const int bdy_qr = solverChoice.moisture_indices.qr;
+    if (l_have_hydro) {
+        if (bdy_qc >= 0 && bdy_qc < static_cast<int>(cons_read.size())) { cons_read[bdy_qc] = 1; }
+        if (bdy_qr >= 0 && bdy_qr < static_cast<int>(cons_read.size())) { cons_read[bdy_qr] = 1; }
+    }
 
     Vector<Vector<int>> is_read;
     is_read.push_back( cons_read );
@@ -128,12 +137,22 @@ ERF::fill_from_realbdy (const Vector<MultiFab*>& mfs,
     is_read.push_back( {1} ); // yvel
     is_read.push_back( {0} ); // zvel
 
-    // Real BC mapping (WRF/MetGrid)
+    // Real BC mapping (WRF/MetGrid). Entry i is the boundary-plane index that
+    // feeds cons component i, so the hydrometeor entries must be placed by
+    // SPECIES (see above), not left at the Kessler-ordered defaults.
     Vector<int> cons_map = {HindcastBdyVars::RHO, RealBdyVars::T, RhoKE_comp, RhoScalar_comp,
-                            RealBdyVars::QV, HindcastBdyVars::QC, HindcastBdyVars::QR,
+                            RealBdyVars::QV, RhoQ2_comp, RhoQ3_comp,
                             RhoQ4_comp, RhoQ5_comp, RhoQ6_comp,
                             RhoQ7_comp, RhoQ8_comp, RhoQ9_comp,
                             RhoQ10_comp, RhoQ11_comp};
+    if (l_have_hydro) {
+        if (bdy_qc >= 0 && bdy_qc < static_cast<int>(cons_map.size())) {
+            cons_map[bdy_qc] = HindcastBdyVars::QC;
+        }
+        if (bdy_qr >= 0 && bdy_qr < static_cast<int>(cons_map.size())) {
+            cons_map[bdy_qr] = HindcastBdyVars::QR;
+        }
+    }
     Vector<Vector<int>> ind_map;
     ind_map.push_back( cons_map );
     ind_map.push_back( {RealBdyVars::U} ); // xvel

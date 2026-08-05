@@ -304,11 +304,18 @@ ERF::FillForecastStateMultiFabs(const int lev,
 
     Vector<Real> latvec_h, lonvec_h, xvec_h, yvec_h, zvec_h;
     Vector<Real> rho_h, uvel_h, vvel_h, wvel_h, theta_h, qv_h, qc_h, qr_h;
+    // Ice species. EMPTY for an 8-field (warm-phase) frame; see ReadCustomBinaryIC.
+    Vector<Real> qi_h, qs_h, qg_h;
 
     ReadCustomBinaryIC(filename, latvec_h, lonvec_h,
                        xvec_h, yvec_h, zvec_h, rho_h,
                        uvel_h, vvel_h, wvel_h,
-                       theta_h, qv_h, qc_h, qr_h);
+                       theta_h, qv_h, qc_h, qr_h,
+                       qi_h, qs_h, qg_h);
+
+    // One flag for every ice-aware branch below, so a frame that carries only
+    // some of the three cannot half-initialise the cold-rain species.
+    const bool have_ice = !qi_h.empty() && !qs_h.empty() && !qg_h.empty();
 
     // ------------------------------------------------------------------
     // Drop the fabricated bottom level.
@@ -337,6 +344,7 @@ ERF::FillForecastStateMultiFabs(const int lev,
         const Long nxy = Long(xvec_h.size()) * Long(yvec_h.size());
         Vector<Vector<Real>*> flds = {&rho_h, &uvel_h, &vvel_h, &wvel_h,
                                       &theta_h, &qv_h, &qc_h, &qr_h};
+        if (have_ice) { flds.push_back(&qi_h); flds.push_back(&qs_h); flds.push_back(&qg_h); }
         bool dup = true;
         for (auto* f : flds) {
             if (Long(f->size()) < 2*nxy) { dup = false; break; }
@@ -416,6 +424,11 @@ ERF::FillForecastStateMultiFabs(const int lev,
     amrex::Gpu::DeviceVector<Real> xvec_d(nx*ny*nz), yvec_d(nx*ny*nz);
     amrex::Gpu::DeviceVector<Real> rho_d(nx*ny*nz), uvel_d(nx*ny*nz), vvel_d(nx*ny*nz), wvel_d(nx*ny*nz),
                                    theta_d(nx*ny*nz), qv_d(nx*ny*nz), qc_d(nx*ny*nz), qr_d(nx*ny*nz);
+    // Always allocated so the device pointers below are always valid; left at
+    // zero when the frame is warm-phase, which is exactly the old behaviour.
+    amrex::Gpu::DeviceVector<Real> qi_d(nx*ny*nz, Real(0.0)),
+                                   qs_d(nx*ny*nz, Real(0.0)),
+                                   qg_d(nx*ny*nz, Real(0.0));
 
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, latvec_h.begin(), latvec_h.end(), latvec_d.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, lonvec_h.begin(), lonvec_h.end(), lonvec_d.begin());
@@ -431,6 +444,11 @@ ERF::FillForecastStateMultiFabs(const int lev,
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qv_h.begin(), qv_h.end(), qv_d.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qc_h.begin(), qc_h.end(), qc_d.begin());
     amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qr_h.begin(), qr_h.end(), qr_d.begin());
+    if (have_ice) {
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qi_h.begin(), qi_h.end(), qi_d.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qs_h.begin(), qs_h.end(), qs_d.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, qg_h.begin(), qg_h.end(), qg_d.begin());
+    }
 
     amrex::Gpu::streamSynchronize();
 
@@ -447,6 +465,10 @@ ERF::FillForecastStateMultiFabs(const int lev,
     Real* qv_d_ptr = qv_d.data();
     Real* qc_d_ptr = qc_d.data();
     Real* qr_d_ptr = qr_d.data();
+    Real* qi_d_ptr = qi_d.data();
+    Real* qs_d_ptr = qs_d.data();
+    Real* qg_d_ptr = qg_d.data();
+    const bool l_have_ice = have_ice;   // plain local for device-lambda capture
 
     MultiFab& erf_mf_cons   = forecast_state[lev][Vars::cons];
     MultiFab& erf_mf_xvel   = forecast_state[lev][Vars::xvel];
@@ -491,6 +513,7 @@ ERF::FillForecastStateMultiFabs(const int lev,
 
             // First interpolate where the weather data is available from
             Real tmp_rho, tmp_theta, tmp_qv, tmp_qc, tmp_qr, tmp_lat, tmp_lon;
+            Real tmp_qi = Real(0.0), tmp_qs = Real(0.0), tmp_qg = Real(0.0);
             bilinear_interpolation(xvec_d_ptr, yvec_d_ptr, zvec_d_ptr,
                                    dxvec, dyvec,
                                    nx, ny, nz,
@@ -521,6 +544,18 @@ ERF::FillForecastStateMultiFabs(const int lev,
                                    x, y, z,
                                    qr_d_ptr, tmp_qr);
 
+            if (l_have_ice) {
+                bilinear_interpolation(xvec_d_ptr, yvec_d_ptr, zvec_d_ptr,
+                                       dxvec, dyvec, nx, ny, nz, x, y, z,
+                                       qi_d_ptr, tmp_qi);
+                bilinear_interpolation(xvec_d_ptr, yvec_d_ptr, zvec_d_ptr,
+                                       dxvec, dyvec, nx, ny, nz, x, y, z,
+                                       qs_d_ptr, tmp_qs);
+                bilinear_interpolation(xvec_d_ptr, yvec_d_ptr, zvec_d_ptr,
+                                       dxvec, dyvec, nx, ny, nz, x, y, z,
+                                       qg_d_ptr, tmp_qg);
+            }
+
             bilinear_interpolation(xvec_d_ptr, yvec_d_ptr, zvec_d_ptr,
                                    dxvec, dyvec,
                                    nx, ny, 1,
@@ -539,6 +574,13 @@ ERF::FillForecastStateMultiFabs(const int lev,
             // rho_f*qv_f at application time. Slots beyond Rho_comp were
             // previously discarded (momenta-only coupling gap).
             fine_cons_arr(i,j,k,RhoTheta_comp) = tmp_theta;
+            // NOTE -- forecast_state carries moisture in FRAME order, which is
+            // NOT the active scheme's component order:
+            //     Q1 qv   Q2 qc   Q3 qr   Q4 qi   Q5 qs   Q6 qg
+            // init_thermo_from_hindcast translates to the scheme's order via
+            // solverChoice.moisture_indices. Do not copy these slots into a
+            // conserved state directly -- under Morrison and WSM6 that puts rain
+            // in the cloud-ice field. See the species mapping there.
             if (ncomp_cons > RhoQ1_comp) {
                 fine_cons_arr(i,j,k,RhoQ1_comp) = tmp_qv;
             }
@@ -550,6 +592,22 @@ ERF::FillForecastStateMultiFabs(const int lev,
             if (ncomp_cons > RhoQ3_comp) {
                 fine_cons_arr(i,j,k,RhoQ2_comp) = tmp_qc;
                 fine_cons_arr(i,j,k,RhoQ3_comp) = tmp_qr;
+            }
+            // Ice species, for a 6-class scheme (WSM6, Morrison) driven by an
+            // 11-field frame. Without these the cold-rain path starts from zero
+            // and has to spin up over the first hours of every run -- which is
+            // exactly the window this campaign scores. Guarded on BOTH the frame
+            // carrying them and the state having the slots, so a warm-phase
+            // frame or a 3-class scheme is untouched.
+            // NOT gated on l_have_ice: tmp_qi/qs/qg are zero for a warm-phase
+            // frame, and writing them unconditionally guarantees these slots are
+            // INITIALISED. Gating the write would leave RhoQ4-6 as uninitialised
+            // memory whenever an 8-field frame drives a 6-class scheme, and every
+            // consumer downstream tests nComp(), not whether ice was supplied.
+            if (ncomp_cons > RhoQ6_comp) {
+                fine_cons_arr(i,j,k,RhoQ4_comp) = tmp_qi;
+                fine_cons_arr(i,j,k,RhoQ5_comp) = tmp_qs;
+                fine_cons_arr(i,j,k,RhoQ6_comp) = tmp_qg;
             }
             fine_latlon_arr(i,j,k,0) = tmp_lat;
             fine_latlon_arr(i,j,k,1) = tmp_lon;
@@ -1256,6 +1314,12 @@ ERF::init_thermo_from_hindcast (const int lev)
                     if (lmoist && f_arr.nComp() > RhoQ3_comp) {
                         qt_k += f_arr(i,j,k,RhoQ2_comp) + f_arr(i,j,k,RhoQ3_comp);
                     }
+                    // ... and the ice species when the frame carries them, for the
+                    // same reason: this loading must match the one the state uses.
+                    if (lmoist && f_arr.nComp() > RhoQ6_comp) {
+                        qt_k += f_arr(i,j,k,RhoQ4_comp) + f_arr(i,j,k,RhoQ5_comp)
+                              + f_arr(i,j,k,RhoQ6_comp);
+                    }
                     const Real load = l_moist_base ? (one + qt_k) : one;
 
                     const Real dz_loc = z_c - z_prev;
@@ -1326,6 +1390,16 @@ ERF::init_thermo_from_hindcast (const int lev)
         const Array4<Real const>& r_arr    = r_hse.const_array(mfi);
         const Array4<Real const>& th_arr   = th_hse.const_array(mfi);
         const Array4<Real const>& f_arr    = fcons.const_array(mfi);
+        // TWO DIFFERENT CONVENTIONS MEET HERE -- see the species mapping below.
+        // fcons is in FRAME order; cons is in the ACTIVE SCHEME's order.
+        const int mi_qv = solverChoice.moisture_indices.qv;
+        const int mi_qc = solverChoice.moisture_indices.qc;
+        const int mi_qi = solverChoice.moisture_indices.qi;
+        const int mi_qr = solverChoice.moisture_indices.qr;
+        const int mi_qs = solverChoice.moisture_indices.qs;
+        const int mi_qg = solverChoice.moisture_indices.qg;
+        const int ncc   = cons.nComp();
+        const int nfc   = fcons.nComp();
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             // r_arr is the BASE STATE. With erf.hindcast_moist_base_state it holds
@@ -1337,6 +1411,13 @@ ERF::init_thermo_from_hindcast (const int lev)
                 qt_c = f_arr(i,j,k,RhoQ1_comp);
                 if (f_arr.nComp() > RhoQ3_comp) {
                     qt_c += f_arr(i,j,k,RhoQ2_comp) + f_arr(i,j,k,RhoQ3_comp);
+                }
+                // Ice counts toward the water loading exactly as cloud and rain
+                // do. Omitting it once the frame carries ice would understate
+                // the loading and put rho_d back out of step with the base state.
+                if (f_arr.nComp() > RhoQ6_comp) {
+                    qt_c += f_arr(i,j,k,RhoQ4_comp) + f_arr(i,j,k,RhoQ5_comp)
+                          + f_arr(i,j,k,RhoQ6_comp);
                 }
             }
             const Real rho_d = r_arr(i,j,k) / (one + qt_c);
@@ -1374,12 +1455,43 @@ ERF::init_thermo_from_hindcast (const int lev)
                                           ? rho_d * f_arr(i,j,k,RhoTheta_comp)
                                           : rho_d * th_arr(i,j,k);
             if (l_has_moist) {
-                cons_arr(i,j,k,RhoQ1_comp) = rho_d * f_arr(i,j,k,RhoQ1_comp);
-                // Seed cloud and rain water too, so the interior does not have to
-                // grow condensate the frame already knows about.
-                if (cons_arr.nComp() > RhoQ3_comp && f_arr.nComp() > RhoQ3_comp) {
-                    cons_arr(i,j,k,RhoQ2_comp) = rho_d * f_arr(i,j,k,RhoQ2_comp);
-                    cons_arr(i,j,k,RhoQ3_comp) = rho_d * f_arr(i,j,k,RhoQ3_comp);
+                // SPECIES MAPPING -- fcons is in FRAME order, cons is in the
+                // ACTIVE SCHEME's order, and THEY ARE NOT THE SAME.
+                //
+                //   frame  (fcons):  Q1 qv  Q2 qc  Q3 qr  Q4 qi  Q5 qs  Q6 qg
+                //   Kessler (cons):  Q1 qv  Q2 qc  Q3 qr
+                //   Morrison/WSM6 :  Q1 qv  Q2 qc  Q3 qi  Q4 qr  Q5 qs  Q6 qg
+                //
+                // This used to write fcons slot-for-slot into cons, which is
+                // right for Kessler and WRONG for Morrison and WSM6: it put the
+                // frame's RAIN into the CLOUD ICE field (Morrison reads RhoQ3 as
+                // qi and RhoQ4 as qr -- ERF_InitMorrison.cpp:113,117) and left
+                // the rain field empty. Every Morrison run in this campaign
+                // initialised rain as ice. Map by SPECIES, never by slot; a -1
+                // index means the active scheme does not carry that species.
+                if (mi_qv >= 0 && ncc > mi_qv) {
+                    cons_arr(i,j,k,mi_qv) = rho_d * f_arr(i,j,k,RhoQ1_comp);
+                }
+                if (nfc > RhoQ3_comp) {
+                    if (mi_qc >= 0 && ncc > mi_qc) {
+                        cons_arr(i,j,k,mi_qc) = rho_d * f_arr(i,j,k,RhoQ2_comp);
+                    }
+                    if (mi_qr >= 0 && ncc > mi_qr) {
+                        cons_arr(i,j,k,mi_qr) = rho_d * f_arr(i,j,k,RhoQ3_comp);
+                    }
+                }
+                // Ice species. Zero in fcons unless an 11-field frame supplied
+                // them, so this is a no-op on warm-phase frames.
+                if (nfc > RhoQ6_comp) {
+                    if (mi_qi >= 0 && ncc > mi_qi) {
+                        cons_arr(i,j,k,mi_qi) = rho_d * f_arr(i,j,k,RhoQ4_comp);
+                    }
+                    if (mi_qs >= 0 && ncc > mi_qs) {
+                        cons_arr(i,j,k,mi_qs) = rho_d * f_arr(i,j,k,RhoQ5_comp);
+                    }
+                    if (mi_qg >= 0 && ncc > mi_qg) {
+                        cons_arr(i,j,k,mi_qg) = rho_d * f_arr(i,j,k,RhoQ6_comp);
+                    }
                 }
             }
         });

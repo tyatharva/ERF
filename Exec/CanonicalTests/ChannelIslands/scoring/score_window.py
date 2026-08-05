@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Score one or more arms over an ARBITRARY model-hour window.
 
-  score_window.py <out.png> <h0> <h1> <ref_tag> <label>=<rundir> [...]
+  score_window.py <out.png> <h0> <h1> <ref_tag> [--lead H] <label>=<rundir> [...]
+
+<h0>/<h1> are WALL-CLOCK hours from 00Z and name the reference files. --lead H
+is the spin-up length, added to those to reach MODEL hours when reading
+plotfiles: a run starting 12/27 22Z scores wall 00Z-06Z as model hours 2-8, so
+    score_window.py out.png 0 6 ocean --lead 2 'ERF'=run_x
 
 <ref_tag> selects refs/<tag>_{d02,mrms}_h<h0>_h<h1>.npy ("domA", "ocean", ...).
 
@@ -60,12 +65,28 @@ def window(label, rundir, h0, h1):
 
 
 def main():
-    if len(sys.argv) < 6:
+    argv = list(sys.argv[1:])
+    # --lead H separates WALL-CLOCK hours from MODEL hours. With a spin-up the
+    # two stop being the same number: a run starting 12/27 22Z reaches 00Z at
+    # model hour 2, so the 00Z-06Z window is model hours 2-8. h0/h1 stay
+    # WALL-CLOCK (they name the reference files); the lead is added only when
+    # looking up plotfiles. Getting this backwards silently scores the wrong
+    # hours against the right references, which is item 83's failure mode.
+    lead = 0.0
+    for i, a in enumerate(argv):
+        if a == '--lead':
+            lead = float(argv[i+1]); del argv[i:i+2]; break
+        if a.startswith('--lead='):
+            lead = float(a.split('=', 1)[1]); del argv[i]; break
+    if len(argv) < 5:
         sys.exit(__doc__)
-    outp = sys.argv[1]
-    h0, h1 = float(sys.argv[2]), float(sys.argv[3])
-    ref_tag = sys.argv[4]
-    arms = [a.split('=', 1) for a in sys.argv[5:]]
+    outp = argv[0]
+    h0, h1 = float(argv[1]), float(argv[2])
+    ref_tag = argv[3]
+    arms = [a.split('=', 1) for a in argv[4:]]
+    m0, m1 = h0 + lead, h1 + lead
+    if lead:
+        print(f'lead {lead:g} h: wall {h0:g}Z-{h1:g}Z = MODEL hours {m0:g}-{m1:g}')
 
     tag = f'h{h0:g}_h{h1:g}'
     d02 = np.load(f'{REFS}/{ref_tag}_d02_{tag}.npy')
@@ -76,13 +97,15 @@ def main():
     tp = f'{REFS}/{ref_tag}_terrain.npy'
     if os.path.exists(tp):
         LAND = np.load(tp) > 20.0
+        scored_set = 'interior land (terrain > 20 m)'
         print(f'scoring over LAND (terrain > 20 m) from {ref_tag}_terrain.npy')
     else:
         LAND = np.ones_like(d02, dtype=bool)
+        scored_set = 'whole interior (no land in this domain)'
         print(f'no {ref_tag}_terrain.npy -- scoring the WHOLE interior '
               f'(all-ocean domain)')
 
-    panels = [(lab, window(lab, rd, h0, h1)) for lab, rd in arms]
+    panels = [(lab, window(lab, rd, m0, m1)) for lab, rd in arms]
     panels += [('MRMS  (observed)', mrms), ('WRF d02  (1.5 km)', d02)]
 
     NX, NY = d02.shape
@@ -108,13 +131,13 @@ def main():
         fig.colorbar(im, ax=a, shrink=0.85)
     for a in ax.flat[n:]:
         a.axis('off')
-    fig.suptitle(f'Domain A, 2020-12-28 {h0:g}Z-{h1:g}Z; dashed = '
+    fig.suptitle(f'{ref_tag}, 2020-12-28 {h0:g}Z-{h1:g}Z; dashed = '
                  f'{BAND}-cell forcing-dominated band, excluded', fontsize=11)
     fig.tight_layout()
     fig.savefig(outp, dpi=130)
     print(f'wrote {outp}')
 
-    print(f'\nScored over interior land, {int(M.sum())} cells\n')
+    print(f'\nScored over {scored_set}, {int(M.sum())} cells\n')
     hdr = f'{"field":26s} {"mean mm":>9s} {"vs MRMS":>9s} {"vs d02":>9s} ' \
           f'{"corr MRMS":>10s} {"corr d02":>9s}'
     print(hdr)
@@ -126,8 +149,11 @@ def main():
               f'{np.nanmean(a)/md:9.2f} '
               f'{np.corrcoef(a, mrms[M])[0,1]:+10.3f} '
               f'{np.corrcoef(a, d02[M])[0,1]:+9.3f}')
-    print('\nReference points from this campaign, 23-h window: CONUS404 driver '
-          '+0.709 vs MRMS,\nWRF d02 +0.910, ERF Davies +0.061, ERF NSCBC +0.487.')
+    print('\nReference points, 23-h Domain A window: CONUS404 driver +0.709 vs '
+          'MRMS, WRF d02 +0.910.\nThe ERF numbers from that window (Davies '
+          '+0.061, NSCBC +0.487) are VOID -- they were\nmeasured before item 83, '
+          'when frame indexing ignored start_datetime. Do not compare\nagainst '
+          'them. Ocean h1-h2 references: MRMS vs d02 +0.708.')
 
 
 if __name__ == '__main__':

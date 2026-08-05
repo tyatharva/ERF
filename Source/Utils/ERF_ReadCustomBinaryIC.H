@@ -25,7 +25,10 @@ ReadCustomBinaryIC(const std::string filename,
                    amrex::Vector<amrex::Real>& theta_h,
                    amrex::Vector<amrex::Real>& qv_h,
                    amrex::Vector<amrex::Real>& qc_h,
-                   amrex::Vector<amrex::Real>& qr_h)
+                   amrex::Vector<amrex::Real>& qr_h,
+                   amrex::Vector<amrex::Real>& qi_h,
+                   amrex::Vector<amrex::Real>& qs_h,
+                   amrex::Vector<amrex::Real>& qg_h)
 {
     int nx = 0, ny = 0, nz = 0, ndata = 0;
     float value;
@@ -68,7 +71,12 @@ ReadCustomBinaryIC(const std::string filename,
         amrex::Abort("Error: invalid custom binary dimensions in " + filename);
     }
 
-    if (ndata < 0 || ndata > 8) {
+    // 8 = the warm-phase frame (rho,u,v,w,theta,qv,qc,qr) that erftools and the
+    // original conus404_to_bin.py emit. 11 adds the ice species (qi,qs,qg) that
+    // a 6-class scheme (WSM6, Morrison) carries. Frames with 8 leave the ice
+    // vectors EMPTY -- every consumer must treat empty as "not present", not as
+    // an error, or old frames stop working.
+    if (ndata < 0 || ndata > 11) {
         amrex::Abort("Error: unsupported number of data fields in " + filename);
     }
 
@@ -78,8 +86,9 @@ ReadCustomBinaryIC(const std::string filename,
     read_float_vector(yvec_h, ny, "y coordinates");
     read_float_vector(zvec_h, nz, "z coordinates");
 
-    std::array<amrex::Vector<amrex::Real>*, 8> data_fields = {
-        &rho_h, &uvel_h, &vvel_h, &wvel_h, &theta_h, &qv_h, &qc_h, &qr_h
+    std::array<amrex::Vector<amrex::Real>*, 11> data_fields = {
+        &rho_h, &uvel_h, &vvel_h, &wvel_h, &theta_h, &qv_h, &qc_h, &qr_h,
+        &qi_h, &qs_h, &qg_h
     };
 
     // Read the file
