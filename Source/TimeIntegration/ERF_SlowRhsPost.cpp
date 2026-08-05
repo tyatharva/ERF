@@ -110,7 +110,9 @@ void erf_slow_rhs_post (int level, int finest_level,
     TurbChoice tc = solverChoice.turbChoice[level];
 
     const MultiFab*  t_mean_mf = nullptr;
-    if (SurfLayer) { t_mean_mf = SurfLayer->get_mac_avg(level,2); }
+    const MultiFab*  u_star_mf = nullptr;   // surface TKE production needs u*
+    if (SurfLayer) { t_mean_mf  = SurfLayer->get_mac_avg(level,2);
+                     u_star_mf = SurfLayer->get_u_star(level); }
 
     const bool l_use_terrain      = (solverChoice.mesh_type != MeshType::ConstantDz);
     const bool l_moving_terrain   = (solverChoice.terrain_type == TerrainType::MovingFittedMesh);
@@ -463,6 +465,7 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                      solverChoice.vert_implicit_fac[nrk] : zero;
 
                     const Array4<const Real> tm_arr = t_mean_mf ? t_mean_mf->const_array(mfi) : Array4<const Real>{};
+                    const Array4<const Real> u_star_arr = u_star_mf ? u_star_mf->const_array(mfi) : Array4<const Real>{};
 
                     if (solverChoice.mesh_type == MeshType::StretchedDz && solverChoice.terrain_type != TerrainType::EB) {
                         DiffusionSrcForState_S(tbx, domain, start_comp, num_comp, u, v,
@@ -473,7 +476,7 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                mf_my, mf_uy, mf_vy,
                                                hfx_z, q1fx_z, q2fx_z, diss,
                                                mu_turb, solverChoice, level,
-                                               tm_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
+                                               tm_arr, u_star_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
                     } else if (l_use_terrain) {
                         DiffusionSrcForState_T(tbx, domain, start_comp, num_comp, l_rotate, u, v,
                                                new_cons, cur_prim, cell_rhs,
@@ -484,7 +487,7 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                mf_my, mf_uy, mf_vy,
                                                hfx_x, hfx_y, hfx_z, q1fx_x, q1fx_y, q1fx_z,q2fx_z, diss,
                                                mu_turb, solverChoice, level,
-                                               tm_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
+                                               tm_arr, u_star_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
                     } else {
                         DiffusionSrcForState_N(tbx, domain, start_comp, num_comp, u, v,
                                                new_cons, cur_prim, cell_rhs,
@@ -493,7 +496,7 @@ void erf_slow_rhs_post (int level, int finest_level,
                                                mf_my, mf_uy, mf_vy,
                                                hfx_z, q1fx_z, q2fx_z, diss,
                                                mu_turb, solverChoice, level,
-                                               tm_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
+                                               tm_arr, u_star_arr, grav_gpu, bc_ptr_d, use_SurfLayer, l_vert_implicit_fac);
                     }
                 } // use_diff
             } // valid slow var
@@ -527,7 +530,7 @@ void erf_slow_rhs_post (int level, int finest_level,
         {
         BL_PROFILE("rhs_post_8");
 
-        const Real eps = std::numeric_limits<Real>::epsilon();
+        const Real l_tke_min = tc.tke_min;
 
         auto const& src_arr = source.const_array(mfi);
 
@@ -552,7 +555,19 @@ void erf_slow_rhs_post (int level, int finest_level,
                         Real temp_val = detJ_arr(i,j,k) * old_cons(i,j,k,n) + dt * detJ_arr(i,j,k) * cell_rhs(i,j,k,n);
                         cur_cons(i,j,k,n) = temp_val / detJ_new_arr(i,j,k);
                         if (ivar == RhoKE_comp) {
-                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n), eps);
+                            // Floor at rho*tke_min, NOT at machine epsilon. The
+                            // dissipation sink is explicit forward Euler with
+                            // timescale B1*L/q, which at small L is comparable to
+                            // dt, so it overshoots negative and the clamp then
+                            // pins the cell. Clamping at eps pinned it at 1.19e-7
+                            // in single precision -- measured as exactly the TKE
+                            // this hindcast sat at -- which is indistinguishable
+                            // from zero, and zero TKE is an absorbing state for
+                            // MYNN. turbChoice.tke_min is the documented floor
+                            // (1e-6, WRF 4.5's value) and until now it applied
+                            // only on the custom-init path.
+                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n),
+                                                           cur_cons(i,j,k,Rho_comp)*l_tke_min);
                         }
                     });
 
@@ -570,7 +585,19 @@ void erf_slow_rhs_post (int level, int finest_level,
                         cur_cons(i,j,k,n) = old_cons(i,j,k,n) + myhalf * (dt_times_old_cell_rhs + dt * cell_rhs(i,j,k,n));
 
                         if (ivar == RhoKE_comp) {
-                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n), eps);
+                            // Floor at rho*tke_min, NOT at machine epsilon. The
+                            // dissipation sink is explicit forward Euler with
+                            // timescale B1*L/q, which at small L is comparable to
+                            // dt, so it overshoots negative and the clamp then
+                            // pins the cell. Clamping at eps pinned it at 1.19e-7
+                            // in single precision -- measured as exactly the TKE
+                            // this hindcast sat at -- which is indistinguishable
+                            // from zero, and zero TKE is an absorbing state for
+                            // MYNN. turbChoice.tke_min is the documented floor
+                            // (1e-6, WRF 4.5's value) and until now it applied
+                            // only on the custom-init path.
+                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n),
+                                                           cur_cons(i,j,k,Rho_comp)*l_tke_min);
                         } else if (ivar >= RhoQ1_comp) {
                             cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n), amrex::Real(0));
                         }
@@ -584,7 +611,19 @@ void erf_slow_rhs_post (int level, int finest_level,
                         cell_rhs(i,j,k,n) += src_arr(i,j,k,n);
                         cur_cons(i,j,k,n) = old_cons(i,j,k,n) + dt * cell_rhs(i,j,k,n);
                         if (ivar == RhoKE_comp) {
-                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n), eps);
+                            // Floor at rho*tke_min, NOT at machine epsilon. The
+                            // dissipation sink is explicit forward Euler with
+                            // timescale B1*L/q, which at small L is comparable to
+                            // dt, so it overshoots negative and the clamp then
+                            // pins the cell. Clamping at eps pinned it at 1.19e-7
+                            // in single precision -- measured as exactly the TKE
+                            // this hindcast sat at -- which is indistinguishable
+                            // from zero, and zero TKE is an absorbing state for
+                            // MYNN. turbChoice.tke_min is the documented floor
+                            // (1e-6, WRF 4.5's value) and until now it applied
+                            // only on the custom-init path.
+                            cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n),
+                                                           cur_cons(i,j,k,Rho_comp)*l_tke_min);
                         } else if (ivar >= RhoQ1_comp) {
                             cur_cons(i,j,k,n) = amrex::max(cur_cons(i,j,k,n), amrex::Real(0));
                         }

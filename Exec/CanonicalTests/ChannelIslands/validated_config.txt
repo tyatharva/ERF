@@ -161,7 +161,12 @@ MUST erf.dryscal_vert_adv_type         "WENOZ5"
 #   frame transition). Re-tested on the corrected IC + Upwind_5th, finding 24a:
 #   runs the full 24 h clean, and every skill metric moves under 1% (FSS 5mm@3km
 #   0.399 vs 0.395). No skill basis either way; false retained as the incumbent.
-MUST erf.advect_tke                    false
+MUST erf.advect_tke                    true
+# prov: [2026-08-04] flipped to true. The provenance above already recorded that
+#   the original failure does not reproduce and that false was retained only as
+#   the incumbent. EddyDiff::KE_h is never populated (LES/RANS write the _h
+#   slots; erf.les_type = None here), so advection is TKE's only horizontal
+#   transport. Re-verified clean over a 1 h Domain A test.
 
 # --- physics ------------------------------------------------------------------
 # prov: campaign spec. Morrison is the only two-moment scheme wired in this fork
@@ -169,6 +174,18 @@ MUST erf.advect_tke                    false
 MUST erf.moisture_model                "Morrison"
 # prov: campaign spec; MYNNEDMF carries its own TKE closure.
 MUST erf.pbl_type                      "MYNNEDMF"
+# prov: [2026-08-04] seeds TKE from u* at t=0. Necessary but NOT sufficient on
+#   its own -- without the surface source below the seeded field collapses to
+#   the positivity clamp within 15 min. Staging could not catch its absence
+#   before this line existed.
+MUST erf.init_tke_from_ustar           true
+# prov: [2026-08-04] WRF-MYNN surface TKE production at k=klo, in ERF's TKE (not
+#   QKE) convention. Without it the surface layer has no path into the TKE
+#   budget at all and TKE pins at float32 eps/rho = 1.06e-7 through the whole
+#   boundary layer. Measured effect over 1 h: TKE at k=0 1.06e-7 -> 9.8e-2,
+#   Kmv 0.0003 -> 0.072, Lturb 2.1 -> 5.1 m (= kappa*z1, correct). See
+#   UPSTREAM_ISSUES item 70; the remaining Kmv shortfall is NOT this term.
+MUST erf.pbl_surface_tke_source        true
 # prov: [OPEN, flagged in audit item 4] no LES closure at 3 km, on the argument
 #   that MYNNEDMF is doing the sub-grid work. 3 km is grey-zone: neither fully
 #   parameterised nor resolved. Flagged 2026-07-26, deliberately NOT changed

@@ -147,6 +147,36 @@ erf.hindcast_zhi_sponge_length   = 5000.0         # m (top 5 km)
 erf.anelastic = 0
 
 # ---------------------------------------------------------------------------
+# [2026-08-05] erf.buoyancy_type = 2 (was the default 1). ROOT CAUSE, item 78.
+#
+# buoyancy_type 1 (buoyancy_rhopert) forms
+#     rho_dry*(1 + qt) - r0
+# but r0 is the DRY base-state density (getRhogivenThetaPress returns
+# p/(R_d*th*(1 + R_v/R_d*qv))), so it differences a MOIST density against a DRY
+# one and counts the water vapour as a buoyancy perturbation when that vapour is
+# already in the base state. At t = 0 every state field equals its base-state
+# counterpart by construction (rho == r0, qv == qv0, theta == th0, p == p0), so
+# dp'/dz = 0, and the term still returns g*rho*qt -- a permanent DOWNWARD
+# acceleration of 0.069 m/s^2 at the surface on this case.
+#
+# buoyancy_type 2 (buoyancy_moist_Tpert) forms
+#     0.61*(qv - qv0) - (qt - qv) + dT/T0
+# which at t = 0 collapses to -(qc + qr), the condensate loading alone. It
+# subtracts the base-state vapour; type 1 does not.
+#
+# Measured, 1 h Domain A, full physics, 26 m wind ratio against the driver's
+# 1.24: type 1 = 3.12, type 2 = 1.76. On the common ASL axis over 0-3 km the
+# mean |ratio-1| falls 1.263 -> 0.439 and its spread 0.889 -> 0.280, i.e. the
+# profile moves toward the driver's SHAPE rather than merely being damped.
+#
+# NOT a complete fix: ~+42% wind error remains at 26 m and the |w| tail is
+# untouched (p99 6.90 -> 7.11). See item 78 for the deeper fix (integrate p0
+# with the total density and store r0 moist), not attempted here because r0 is
+# consumed elsewhere as a reference density.
+erf.buoyancy_type = 2
+
+
+# ---------------------------------------------------------------------------
 #  PROBLEM SIZE & GEOMETRY
 #  Domain: 576 x 288 km @ exactly 3 km, anchored at NE corner (34.7, -117.2).
 #  [3-km OPERATING POINT] 192x96x48 = 1.77M cells (6.75x the 128x64x32 domain).
@@ -218,14 +248,30 @@ erf.most.z0             = 0.1     # LAND points only (chaparral/scrub). Ocean
                                   # via Charnock (verified: the surface layer
                                   # iterates land and sea separately; z0_const
                                   # never applies to sea points).
-# [2026-08-03] 25.0 -> 30.0. zref is a height ABOVE THE LOCAL TERRAIN and the
-# terrain search uses STRICT inequalities (z_target > z_lo && z_target < z_hi,
-# ERF_MOSTAverage.cpp:565). With zref exactly equal to erf.initial_dz = 25.0 the
-# target lands precisely on the first cell FACE over every flat/ocean column, so
-# which cell wins is decided by floating-point rounding; if it ever falls the
-# wrong way the run aborts at startup with "zref not found with terrain!".
-# 30 m is still inside the surface layer and is not a knife-edge.
-erf.most.zref           = 30.0    # first-cell-center-safe (>= 0.5*dz1 = 12.5 m)
+# [2026-08-04] 30.0 -> 12.5. THE 30.0 SETTING WAS A DEFECT I INTRODUCED YESTERDAY
+# AND IT BROKE THE SURFACE STRESS. zref is a height above the local terrain; with
+# zref = 30 > erf.initial_dz = 25 the MOST reference level resolves to k=1
+# (ERF_MOSTAverage.cpp:565-578), while the Moeng stress form evaluates the local
+# velocity at k=0 (ERF_MOSTStress.H:1888-1908):
+#     num1 = wsp*umean;  num2 = wsp_mean*(velx - umean)
+# Moeng assumes all four sit at the SAME level, so num2 stopped being a
+# perturbation about the mean and became the k=0 -> k=1 shear. Writing s = u0/u1,
+# the delivered stress collapses to |U1|*u1*(2s - 1): ZERO at s = 0.5, and it
+# REVERSES SIGN below that. Measured on the 1 h test, interior land median u0/u1:
+#   t=0s 0.9867 | 900s 0.4784 | 1800s 0.4505 | 2700s 0.4503 | 3584s 0.4328
+# i.e. the flow equilibrated exactly where the applied drag vanishes, which is
+# the low-level wind runaway (3.45 -> 13.8 m/s in one hour). u* is computed
+# separately from the k=1 wind (ERF_MOSTStress.H:560-566) and kept reporting a
+# healthy 1.36 m/s throughout, so the "surface drag is correct" check was blind
+# to it.
+#
+# 12.5 m is the FIRST CELL CENTRE = 0.5*erf.initial_dz, which is also ERF's own
+# default when zref is unset (ERF_MOSTAverage.cpp:416). It lies strictly INSIDE
+# cell 0, so k_indx = 0 and the Moeng form is self-consistent again. It is not on
+# a cell face, so the floating-point knife-edge that prompted the 30.0 change
+# (zref exactly == initial_dz sits on a face and the terrain search uses strict
+# inequalities, aborting with "zref not found with terrain!") does not return.
+erf.most.zref           = 12.5    # first cell CENTRE (0.5*dz1); must be < dz1
 erf.most.average_policy = 1
 erf.surface_layer.flux_type = moeng
 erf.most.surf_temp      = 288.0   # fallback only; MM5/SST provide the live surface state
@@ -335,18 +381,49 @@ erf.dryscal_vert_adv_type    = "WENOZ5"
 # see UPSTREAM_ISSUES.md).
 erf.moistscal_horiz_adv_type = "Upwind_3rd"
 erf.moistscal_vert_adv_type  = "Upwind_3rd"
-# [SEGMENT CONFIG 2026-07-24] Do not advect the MYNN TKE field. With it on,
-# RhoKE goes Inf in the xhi lateral relaxation band ~380 s after the first
-# boundary-frame transition (measured at cell (126,56,6)): the advected TKE
-# has no consistent boundary value to relax toward. MYNN still evolves TKE
-# locally through its own source/sink terms.
-erf.advect_tke = false
+# [2026-08-04] false -> true. The original failure (RhoKE -> Inf in the xhi
+# relaxation band ~380 s after the first frame transition, cell (126,56,6)) was
+# already recorded as NOT REPRODUCING on the corrected IC -- see the provenance
+# note in validated_config.txt, which retained false only as the incumbent.
+# It matters now: EddyDiff::KE_h is never populated (only LES/RANS write the _h
+# slots and erf.les_type = None here), so advection is the ONLY horizontal
+# transport TKE has. Re-verified clean over a 1 h test at this setting.
+erf.advect_tke = true
+
+# [2026-08-04] Surface TKE production, 2*u*^3*pmz/(kappa*z1) in WRF-MYNN terms,
+# halved to ERF's TKE (rather than QKE) convention. Default is true; this line
+# is here so the A/B is one edit away. Without it the surface layer has NO path
+# into the TKE budget -- the RhoKE bottom-face diffusive flux is hard-zeroed --
+# and TKE sits at the positivity clamp (measured 1.06e-7, i.e. float32 eps/rho)
+# through the entire boundary layer. See UPSTREAM_ISSUES item 70.
+erf.pbl_surface_tke_source = true
 
 # ---------------------------------------------------------------------------
 #  TURBULENCE / PBL
 # ---------------------------------------------------------------------------
 erf.les_type = "None"
 erf.pbl_type = "MYNNEDMF"
+# [ADDED 2026-08-04] SEEDS THE TURBULENCE. Without this the run has NO boundary
+# layer at all, and everything downstream is wrong.
+#
+# MYNN carries prognostic TKE, and ERF's default initialises it to ZERO
+# (init_tke_from_ustar defaults false, ERF_TurbStruct.H:476). Zero TKE is a
+# FIXED POINT of the closure:
+#     TKE=0 -> qvel=sqrt(2 TKE)=0 -> Km = rho*Lm*qvel*SM = 0
+#           -> shear production = Km*(du/dz)^2 = 0 -> TKE stays 0
+# There is no path back, and nothing in the log says so. Measured on the 29 h
+# compressible Davies arm: TKE identically 0.0000 and Lturb 0.04-0.09 m through
+# the whole boundary layer, hence Kmv = 0.000 at 50-3000 m AGL.
+#
+# The consequence is not subtle. With no vertical mixing the surface stress
+# (u* = 1.36 m/s, Cd = 1.7e-2, both physical) acts only on the lowest cell, the
+# column never decelerates, and the correctly-initialised sheared profile
+# collapses within ONE hour:
+#     50 m AGL   h0 3.45 -> h1 13.84 -> h12 20.19 m/s   (d02: 4.88)
+# i.e. 3.8x too fast at 50 m, which drives spurious orographic ascent and is why
+# ERF turns a driver with +0.71 correlation against MRMS into +0.06.
+erf.init_tke_from_ustar = true
+
 
 # ---------------------------------------------------------------------------
 #  FORCINGS

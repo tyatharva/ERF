@@ -21,7 +21,7 @@ erf.prob_name = "HindCast"
 # ---------------------------------------------------------------------------
 erf.init_type = "HindCast"
 erf.hindcast_boundary_data_dir    = "CONUS404Data_3D"
-erf.hindcast_data_interval_in_hrs = 1.0
+erf.hindcast_data_interval_in_hrs = 3.0
 erf.hindcast_lateral_forcing      = true
 
 # [ADDED 2026-08-03, UPSTREAM_ISSUES item 64] Initialise the interior horizontal
@@ -144,6 +144,24 @@ erf.hindcast_zhi_sponge_length   = 5000.0         # m (top 5 km)
 # ---------------------------------------------------------------------------
 #  GOVERNING EQUATIONS  (compressible)
 # ---------------------------------------------------------------------------
+# [2026-08-04] ANELASTIC for the Davies-vs-NSCBC pair. Measured on this deck at
+# cfl 0.1 with radiation on: 15.9 model-s/wall-s (Davies) and 13.6 (NSCBC)
+# against 9.6 / 9.3 compressible -- 1.5-1.7x, with everything else held equal.
+# REQUIRES amrex.fpe_trap_invalid = 0 (see there) and cfl <= 0.10 (see there).
+# [2026-08-04] 1 -> 0. ANELASTIC + NSCBC IS NOT A VALID COMBINATION, so the
+# pair cannot be anelastic and still differ only in the boundary scheme.
+#
+# NSCBC is a COMPRESSIBLE-equations boundary treatment: it forms an acoustic
+# sound speed and builds Riemann invariants from it
+#     c_i   = sqrt(Gamma * p_i / rho_i)      ERF_BoundaryConditionsRealbdy.cpp:632
+#     rho_s = (c_s^2/(Gamma*Kent))^(1/gm1)                                   :659
+# and its LODI relations assume characteristics travelling at +-c. Anelastic has
+# no acoustic modes and freezes rho, so that decomposition does not apply. ERF
+# has NO guard against the pair, so it runs and then fails at a lateral wall:
+# RhoTheta NaN at (159,95,36) -- the yhi wall -- on 3 of 3 attempts, all within
+# 3 model seconds of t = 1367 s. Reproducible, not a dt margin.
+# Anelastic + Davies is fine and completed a full 29 h; only the pairing fails.
+# Compressible verified here: NSCBC clean to 6000 steps / t = 2892 s.
 erf.anelastic = 0
 
 # ---------------------------------------------------------------------------
@@ -305,7 +323,13 @@ erf.terrain_smoothing = 1         # STF -- best for 3D real terrain
 #  init_shrink eases the first (violent) step; change_max caps dt growth.)
 # ---------------------------------------------------------------------------
 erf.substepping_type = "Implicit"
-erf.cfl              = 0.2        # slow-step CFL target (auto dt).
+# [2026-08-04] 0.2 -> 0.1. TWO independent reasons, both measured on this deck:
+#   * anelastic is unstable above ~0.10 -- NaN at step 380 (cfl 0.125), 340
+#     (0.15), 270 (0.2), all near t = 500-520 s; clean 1200+ steps at 0.10.
+#   * compressible NSCBC at 0.2 failed 3 of 6 runs; 3 of 3 clean at 0.1.
+# A Davies-vs-NSCBC comparison must hold numerics identical, so Davies runs at
+# the CFL NSCBC needs even though it tolerates more.
+erf.cfl              = 0.1        # slow-step CFL target (auto dt).
 # [LOWERED 0.3 -> 0.2, 2026-07-24] Set by the most violent day in the target
 # year, Hurricane Hilary (2023-08-20). At cfl 0.3 that case blows up ~9 model
 # minutes in: a grid-scale w dipole (+48.9 / -29.5 m/s) in the lowest three
@@ -340,7 +364,25 @@ erf.change_max       = 1.1        # dt may grow at most 10% per step
 # stiffness that actually breaks first. 2.5 s is just above the dt the storm
 # regimes self-select, so it is inert on active days and only binds on calm
 # ones. Do not raise it without re-running a calm-start segment.
-erf.max_dt           = 2.5
+# [2026-08-04] 2.5 -> 0.7, REQUIRED by erf.anelastic = 1.
+# The anelastic instability is a dt threshold, not a CFL threshold -- cfl alone
+# does not bound dt when the flow is calm, and this run starts pre-storm. At
+# cfl 0.1 the 12/27 18Z start self-selects dt = 1.28 s and NaNs at t = 450-590 s
+# in 3 of 3 runs (both schemes). Measured: dt 1.12-1.85 fails, dt <= 0.75 does
+# not. Capping dt directly is what makes anelastic usable here; the cap, not the
+# CFL, is the load-bearing setting.
+# Cost is small: 12.2 model-s/wall-s at 0.7 against 6.8 compressible, so
+# anelastic is still 1.8x faster with everything else held equal.
+# [2026-08-04] 0.7 -> 0.5 after a PRODUCTION failure at 0.7: leg 1 NaN'd at step
+# 607 (one cell, RhoTheta at (50,55,2), an OCEAN cell -- not the new roughness),
+# even though a 15000-step validation at 0.7 with the identical deck and flags
+# had run clean. So 0.7 is nondeterministic here.
+# 0.5 is not merely clean but BIT-REPRODUCIBLE: two runs to 3000 steps landed on
+# TIME = 1492.417355 exactly. Determinism returning at the lower cap says the
+# nondeterminism at 0.7 was the marginal instability amplifying round-off, not
+# GPU atomics. Costs ~27% throughput (8.9 vs 12.2 model-s/wall-s); still faster
+# than compressible.
+erf.max_dt           = 0.5
 erf.w_damping        = true
 erf.w_damping_const  = 0.3
 
@@ -348,8 +390,29 @@ erf.w_damping_const  = 0.3
 #  RUN LENGTH  (24-hour hindcast: 2023-01-09 00Z -> 2023-01-10 00Z, aligned
 #  to the 3-hourly ERA5 frames produced by erftools.)
 # ---------------------------------------------------------------------------
+# [2026-08-04] 30-hour Domain A run, in TWO LEGS from ONE deck.
+#   leg 1  12/27 18Z -> 12/28 00Z   6 h spin-up, ends on a frame instant
+#   leg 2  restart          -> 12/29 00Z   24 h scored
+# Run leg 1 by overriding stop_datetime in the STAGED copy (sed the run dir's
+# inputs_c404); leg 2 restores this value and adds amr.restart=<chk>.
+#
+# start_datetime MUST NOT CHANGE between legs. Model time continues across a
+# restart while start_datetime is re-read from the deck, so advancing it would
+# reinterpret every frame index and pull forcing from the wrong hours. That is
+# now enforced, not remembered: WriteCheckpointFile stores the start instant
+# beside the Header and fill_bdy_data_from_hindcast aborts on a mismatch.
+#
+# Frame set: pod_data_A_run30h, 13 frames 12/27 18Z .. 12/29 06Z. ERF indexes
+# frames BY POSITION, not by filename date, so the directory must begin at
+# start_datetime. Sizing: t_end = 108032 s (30 h + the 32 s float32 stop error),
+# idx2 = int(t/10800)+1 = 11, and 11 < 13, so there are two frames of margin.
+# [2026-08-05] 6 h scoring window, item 78 verification. Scored hours are 03Z-06Z
+# (refs/domA_{d02,mrms}_h3_h6.npy); 00Z-03Z is spin-up and is NOT scored.
 start_datetime = "2020-12-28 00:00:00"
-stop_datetime  = "2020-12-28 23:00:00"
+# 23Z, not 12/29 00Z: BOTH references (wrf_d02_on_grid.npy, mrms_..._on_grid.npy)
+# are 23-h accumulations ending 12/28 23Z, so anything past that is unscoreable.
+# 29 h total also leaves 3 spare frames of the 13 instead of 2.
+stop_datetime  = "2020-12-28 06:00:00"
 # [AUDIT 2026-07-24] max_step MUST be -1 (= unlimited) for production:
 # ERF stops at min(max_step, stop_datetime) with a CLEAN exit, and istep
 # continues across restarts, so any positive cap silently truncates a
@@ -606,12 +669,19 @@ erf.check_for_nans     = 1
 # [AUDIT 2026-07-26] was 100. Every failure this campaign was diagnosed
 # post-hoc from plotfiles because a NaN could propagate 100 steps before the
 # scan noticed. 10 costs more scans; catching the origin is worth it.
-erf.check_for_nans_int = 10
+# [2026-08-04] 10 -> 1. This is the ONLY NaN detector once fpe_trap is off for
+# anelastic. Measured cost over 1200 steps: 82 s vs 81 s, i.e. ~1%.
+erf.check_for_nans_int = 1
 erf.v = 1
 amr.v = 1
 # [AUDIT 2026-07-26] was 0. Trapping the FP operation that produces the NaN is
 # the difference between a stack trace at the source and a plotfile autopsy.
-amrex.fpe_trap_invalid = 1
+# [2026-08-04] MUST be 0 with erf.anelastic = 1. The trap fires inside
+# libnvidia-ptxjitcompiler.so before step 1 -- NVIDIA's own JIT compiler raising
+# FP exceptions while generating kernels for the Poisson preconditioner, not our
+# arithmetic. Verified from the backtrace. erf.check_for_nans below replaces it
+# and is strictly more informative (component + cell indices + count).
+amrex.fpe_trap_invalid = 0
 
 # --- REQUIRED runtime settings on the 16 GB RTX 4080 -----------------------
 # Single GPU stream: the hindcast step path has a cross-stream execution race

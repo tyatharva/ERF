@@ -1186,15 +1186,29 @@ struct surface_temp
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
+        //
+        // Use the LIMITED denominators num/den computed above, not a bare
+        // (C - psi_x). num/den already hold exactly these expressions floored at
+        // 1.0; recomputing them unfloored here let (C - psi_h) go NEGATIVE and
+        // silently flipped the sign of t_star, so the surface cooled the air it
+        // should have warmed. Measured on the ChannelIslands 3 km hindcast with
+        // erf.most.zref = 12.5 (first cell centre) and the Noah-MP-derived
+        // roughness map: 80 of 5555 land columns had C - psi_h <= 0 at t = 0,
+        // and the worst of them ran theta(k=0) from 289 K to 147 K in 82 s
+        // before the run aborted on a non-finite RhoTheta. C = ln(zref/z0) is
+        // only 2.53 where z0 = 1.0 m (forest/urban) and zref = 12.5 m, while
+        // psi_h reaches ~2.6 under the strongly unstable conditions this case
+        // starts in -- so the cancellation is not exotic, it is the normal
+        // consequence of a rough surface with a thin first cell.
         olen_arr(i,j,k)   = zref / zeta;
-        u_star_arr(i,j,k) = mdata.kappa * umm / (C - psi_m);
-        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / (C - psi_h);
+        u_star_arr(i,j,k) = mdata.kappa * umm / num;
+        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / den;
         if (spec_qflux) {
-            q_surf_arr(i,j,k) = mdata.surf_moist_flux * (C - psi_h) /
+            q_surf_arr(i,j,k) = mdata.surf_moist_flux * den /
                                 (u_star_arr(i,j,k) * mdata.kappa) + qvm_arr(i,j,k);
             q_star_arr(i,j,k) = -mdata.surf_moist_flux / u_star_arr(i,j,k);
         } else {
-            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / (C - psi_h);
+            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / den;
         }
     }
 
@@ -1350,16 +1364,30 @@ struct surface_temp_charnock
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
+        //
+        // Use the LIMITED denominators num/den computed above, not a bare
+        // (C - psi_x). num/den already hold exactly these expressions floored at
+        // 1.0; recomputing them unfloored here let (C - psi_h) go NEGATIVE and
+        // silently flipped the sign of t_star, so the surface cooled the air it
+        // should have warmed. Measured on the ChannelIslands 3 km hindcast with
+        // erf.most.zref = 12.5 (first cell centre) and the Noah-MP-derived
+        // roughness map: 80 of 5555 land columns had C - psi_h <= 0 at t = 0,
+        // and the worst of them ran theta(k=0) from 289 K to 147 K in 82 s
+        // before the run aborted on a non-finite RhoTheta. C = ln(zref/z0) is
+        // only 2.53 where z0 = 1.0 m (forest/urban) and zref = 12.5 m, while
+        // psi_h reaches ~2.6 under the strongly unstable conditions this case
+        // starts in -- so the cancellation is not exotic, it is the normal
+        // consequence of a rough surface with a thin first cell.
         z0_arr(i,j,k)     = z0;
         olen_arr(i,j,k)   = zref / zeta;
-        u_star_arr(i,j,k) = mdata.kappa * umm / (C - psi_m);
-        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / (C - psi_h);
+        u_star_arr(i,j,k) = mdata.kappa * umm / num;
+        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / den;
         if (spec_qflux) {
-            q_surf_arr(i,j,k) = mdata.surf_moist_flux * (C - psi_h) /
+            q_surf_arr(i,j,k) = mdata.surf_moist_flux * den /
                                 (u_star_arr(i,j,k) * mdata.kappa) + qvm_arr(i,j,k);
             q_star_arr(i,j,k) = -mdata.surf_moist_flux / u_star_arr(i,j,k);
         } else {
-            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / (C - psi_h);
+            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / den;
         }
     }
 
@@ -1512,16 +1540,30 @@ struct surface_temp_mod_charnock
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
+        //
+        // Use the LIMITED denominators num/den computed above, not a bare
+        // (C - psi_x). num/den already hold exactly these expressions floored at
+        // 1.0; recomputing them unfloored here let (C - psi_h) go NEGATIVE and
+        // silently flipped the sign of t_star, so the surface cooled the air it
+        // should have warmed. Measured on the ChannelIslands 3 km hindcast with
+        // erf.most.zref = 12.5 (first cell centre) and the Noah-MP-derived
+        // roughness map: 80 of 5555 land columns had C - psi_h <= 0 at t = 0,
+        // and the worst of them ran theta(k=0) from 289 K to 147 K in 82 s
+        // before the run aborted on a non-finite RhoTheta. C = ln(zref/z0) is
+        // only 2.53 where z0 = 1.0 m (forest/urban) and zref = 12.5 m, while
+        // psi_h reaches ~2.6 under the strongly unstable conditions this case
+        // starts in -- so the cancellation is not exotic, it is the normal
+        // consequence of a rough surface with a thin first cell.
         z0_arr(i,j,k)     = z0;
         olen_arr(i,j,k)   = zref / zeta;
-        u_star_arr(i,j,k) = mdata.kappa * umm / (C - psi_m);
-        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / (C - psi_h);
+        u_star_arr(i,j,k) = mdata.kappa * umm / num;
+        t_star_arr(i,j,k) = mdata.kappa * (tm_arr(i,j,k) - t_surf_arr(i,j,k)) / den;
         if (spec_qflux) {
-            q_surf_arr(i,j,k) = mdata.surf_moist_flux * (C - psi_h) /
+            q_surf_arr(i,j,k) = mdata.surf_moist_flux * den /
                                 (u_star_arr(i,j,k) * mdata.kappa) + qvm_arr(i,j,k);
             q_star_arr(i,j,k) = -mdata.surf_moist_flux / u_star_arr(i,j,k);
         } else {
-            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / (C - psi_h);
+            q_star_arr(i,j,k) = mdata.kappa * (qvm_arr(i,j,k) - q_surf_arr(i,j,k)) / den;
         }
     }
 

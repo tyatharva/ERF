@@ -8172,3 +8172,1123 @@ readable, unpoisoned and NaN-free. (c) NSCBC paid ~4x in timestep (item 67),
 which is a real cost -- though the dt limiter is interior, not boundary. (d)
 This is ONE case, one domain, one 23-h scoring window. It is a strong result
 for this configuration and not yet a general claim about the schemes.
+
+## 69. MOST STORES ITS *_star OUTPUTS WITH AN UNLIMITED DENOMINATOR THAT THE SAME FUNCTION ALREADY FLOORS -- t_star flips sign and the surface cools the air it should warm
+
+**Where.** `Source/BoundaryConditions/ERF_MOSTStress.H`, in `surface_temp`,
+`surface_temp_charnock` and `surface_temp_mod_charnock` (identical code in all
+three; `surface_temp_charnock` is the one this campaign runs, since
+`theta_type = SURFACE_TEMPERATURE` and `rough_type_sea = CHARNOCK` are both
+defaults for our deck).
+
+**The defect, in the same function, twenty lines apart.** Inside the fixed-point
+iteration on zeta, the code floors the similarity denominator:
+
+```cpp
+// Limiting
+num = std::max(C - psi_m, amrex::Real(1.0));
+den = std::max(C - psi_h, amrex::Real(1.0));
+zeta = (one - alpha)*zeta_old + alpha * Rib * num*num/den;
+```
+
+and then, after the loop, recomputes the *same expressions unfloored* for the
+three quantities that actually leave the routine:
+
+```cpp
+u_star_arr(i,j,k) = mdata.kappa * umm / (C - psi_m);
+t_star_arr(i,j,k) = mdata.kappa * (tm_arr - t_surf_arr) / (C - psi_h);
+q_star_arr(i,j,k) = mdata.kappa * (qvm_arr - q_surf_arr) / (C - psi_h);
+```
+
+`num` and `den` are still in scope and still hold exactly those expressions from
+the final iterate. So this is not a missing limiter -- the limiter exists, is
+declared by the code itself, and is simply not applied where it matters.
+
+**Consequence.** `C = ln(zref/z0)` and `psi_h` are independent, so `C - psi_h`
+can and does pass through zero. When it goes negative, `t_star` inverts sign
+while `theta_air - theta_surf` does not, so the modelled surface *cools* air
+that is colder than the surface. That is a positive feedback and it diverges.
+
+**Measured, ChannelIslands Domain A 3 km, 2020-12-27 18Z, single precision.**
+Column counts are evaluated with `calc_psi_h2` (Jimenez 2012), which is the
+stability function these variants actually call -- not the Businger-Dyer
+`calc_psi_h` in the same header, which is used by other variants and gives
+different counts:
+
+| | `erf.most.zref = 12.5` | `erf.most.zref = 30.0` |
+|---|---|---|
+| land columns with `C - psi_h <= 0` at t=0 | **64 of 5555** | 0 of 5555 |
+| min `C - psi_h` over land | **-0.454** | +0.259 |
+| `t_star` at (181,32), t=0 | **+2.38** (wrong sign) | -1.29 |
+| `theta(k=0)` at (181,32), t=82 s | **147.3 K** (from 289.1) | 289.18 K |
+| outcome | abort, non-finite RhoTheta at step 187 | runs |
+
+Both arms have `theta - t_surf = -0.3516 K` at t=0, i.e. identical physical
+state; only the sign of the denominator differs. Bit-reproducible: two runs of
+the failing config aborted at the same step, same cell, same component.
+
+**Why zref=12.5 exposes it and zref=30 does not.** `C = ln(12.5/1.0) = 2.53`
+where the Noah-MP-derived roughness map gives forest/urban `z0 = 1.0-1.1 m`,
+while `psi_h2` reaches 2.585 at the `zeta = -2.53` this column starts in. At
+`zref = 37.5` (where 30.0 snaps, being the k=1 cell centre) `C = 3.53` and the
+margin survives -- but only just: 351 land columns still sit below `C - psi_h
+< 0.5`, so that configuration is one stability excursion from the same failure.
+It is a latent bug there, not an absent one.
+
+**This is not "MOST is invalid at 12.5 m."** `zref/z0 = 11` is genuinely inside
+the roughness sublayer and MOST is stretched there, but that argues for a
+capped roughness or a thicker first cell, not for an unfloored divide. WRF makes
+the same guard explicit and unconditional (`module_sf_sfclayrev.F`:
+`PSIH = MIN(PSIH, 0.9*GZ1OZ0)`), which is a *harder* floor than ERF's 1.0 at
+this `C`. ERF already agreed with WRF here; it just did not carry the agreement
+to the outputs.
+
+**Fixed locally** by substituting `num`/`den` for the bare `(C - psi_m)` /
+`(C - psi_h)` in the stored outputs of all three `surface_temp*` variants. Values
+are unchanged wherever the floor is not active, so this cannot alter any column
+that was already well conditioned.
+
+**Left alone deliberately** (recorded, not fixed): (a) the pre-loop Beljaars
+`w_star` block in the same three variants divides unlimited, but it is inert
+unless `erf.most.include_wstar` is set, which defaults false; (b) the inner
+Charnock roughness iteration divides unlimited, but it runs over sea where `z0`
+is O(1e-4 m) and `C` is O(10); (c) `adiabatic_charnock` and
+`adiabatic_mod_charnock` have no limiter at all, in the iteration or the output
+-- a different and larger gap, and neither is exercised here.
+
+**Class.** Same family as items 55b and 60: a guard that exists, is correct, and
+is bypassed on the path that actually reaches the solver. The tell was that
+`u_star` kept reporting a healthy 1.36 m/s the whole time -- the diagnostic and
+the delivered quantity were computed by different expressions.
+
+## 70. THE SURFACE LAYER HAS NO PATH INTO THE TKE BUDGET, AND THE POSITIVITY CLAMP SITS BELOW THE BOOTSTRAP THRESHOLD -- both fixed, and the wind runaway SURVIVES both
+
+**Two defects, both real, both fixed, and the headline result is negative:**
+neither one, nor both together, fixes the low-level wind. Recording that
+plainly because the plan this work came from predicted otherwise.
+
+### 70a. No surface TKE source
+
+`Source/Diffusion/ERF_DiffusionSrcForState_T.cpp:712-717` hard-zeros the bottom-
+face diffusive flux for every scalar except `RhoTheta` and `RhoQ1`, which
+includes `RhoKE`. WRF's MYNN instead injects surface production
+`pdk1 = 2 u*^3 pmz / (kappa z1)`. In ERF that formula exists only inside the
+`#if 0` block at `ERF_ComputeDiffusivityMYNNEDMF.cpp:1097,1130`, which has zero
+call sites. So the surface layer injected no TKE at all.
+
+Worse, the only live source is self-extinguishing: `ERF_PBLModels.H:296` computes
+shear production as `K_turb(Mom_v)*(dudz^2+dvdz^2)`, and `K_turb(Mom_v) =
+rho*Lm*qvel*SM` is itself proportional to `qvel`. As TKE -> 0 the production
+-> 0. **Zero TKE is an absorbing state.**
+
+Fixed by adding the WRF term at `k == klo`, gated `erf.pbl_surface_tke_source`
+(default true), halved to ERF's TKE-rather-than-QKE convention. Required
+threading `u*` from `SurfaceLayer::get_u_star` through
+`DiffusionSrcForState_{N,S,T}` into `ERF_AddQKESources.H`.
+
+### 70b. The positivity clamp was machine epsilon, not tke_min
+
+`ERF_SlowRhsPost.cpp` clamped `RhoKE` to `std::numeric_limits<Real>::epsilon()`
+at three sites. `turbChoice.tke_min` (1e-6, WRF 4.5's value) was applied ONLY at
+`ERF_InitCustomPertState.cpp:127`, i.e. never on the real-data path. In single
+precision that clamp is 1.19e-7, and the measured TKE across the entire boundary
+layer was **1.06e-7 = eps/rho, an exact match** -- the field was pinned at the
+clamp, not at a physical value. Fixed by clamping at `rho * turbChoice.tke_min`.
+
+The 10x lift matters far more than 10x suggests, because it is the difference
+between being above and below the bootstrap threshold: at 1e-6 the closure's own
+shear production is large enough to grow against dissipation, at 1e-7 it is not.
+
+### Measured, 1 h Domain A test, interior land, medians
+
+All three arms carry the item-69 `zref` and MOST fixes, so this table isolates
+the TKE work alone.
+
+| arm | clamp | advect_tke | 70a source | TKE (k=0) | Kmv | Lturb | **50 m wind** |
+|---|---|---|---|---|---|---|---|
+| `fix_` | eps | off | off | 1.05e-7 | 0.0003 | 2.1 m | **12.39** |
+| `tkeoff_` | rho*tke_min | on | off | 1.31e-2 | 0.081 | 18.8 m | **12.31** |
+| `tkeon_` | rho*tke_min | on | **on** | 2.35e-2 | 0.130 | 19.9 m | **12.18** |
+| WRF d02 | -- | -- | -- | -- | 1-10 | -- | **4.88** |
+
+**Attribution, stated honestly.** The gated A/B (`tkeon_` vs `tkeoff_`, at
+t=2700 s, everything else identical) isolates 70a alone: TKE x1.80, Kmv x1.60.
+The much larger jump from `fix_` to `tkeoff_` -- TKE x125,000, Kmv x20 -- is
+70b **and** `advect_tke=true` together, and those two were changed in the same
+build, so they are NOT separated from each other. An earlier draft of this entry
+credited the whole five-order-of-magnitude recovery to 70a; that was wrong.
+
+Independent corroboration that the mixing is real and not a diagnostic artifact:
+the timestep fell from dt=0.397 to dt=0.174 s between the OFF and ON arms. Real
+vertical diffusion tightens the diffusive stability limit; a cosmetic change to a
+plotted field would not.
+
+`Lturb` at k=0 is now 5.07 m against `kappa*z1 = 0.41*12.5 = 5.125 m` -- the
+surface length scale is correct to 1%, which it was not before (2.1 m).
+
+### What did NOT change: the wind
+
+**50 m AGL: 2.70 -> 12.18 m/s in one hour, against d02's 4.88.** Essentially
+identical in all three arms (12.18 / 12.31 / 12.39). The vertical profile shows
+why, and it is unambiguous:
+
+| k | z AGL | \|V\| |
+|---|---|---|
+| 0 | 0 m | **3.65** |
+| 1 | 26 m | **11.99** |
+| 2 | 55 m | 12.18 |
+| 9 | 344 m | 11.59 |
+
+The drag is delivered and it brakes **cell 0 alone** -- a 3.3x velocity jump
+across one cell -- then the profile is flat. `Kmv ~ 0.05-0.13` is 10-100x too
+small to carry that stress upward, so the surface never communicates with the
+flow above 26 m.
+
+`Kmv = rho*Lm*qvel*SM`. With Lm = 5.07 and qvel = 0.443 at k=0, the measured
+Kmv = 0.072 implies **SM ~ 0.029**, against ~0.39 for near-neutral MYNN. Lm is
+correct and qvel is now non-trivial, so the residual shortfall is in the
+stability function, not in the length scale and not in the TKE source. That is a
+distinct question and is NOT pursued here.
+
+### Class
+
+Same family as items 55b, 60 and 69: a guard or a term that exists in the tree,
+is correct, and is not on the path that reaches the solver. Three of the four
+were found only because a diagnostic and a delivered quantity were computed by
+different expressions and disagreed.
+
+## 71. RECORDED, NOT ACTED ON: two independent momentum sources that contaminate any surface-drag tuning
+
+Logged per the plan's step 3b so that they are not silently confounding the
+items 69/70 A/Bs. Neither was touched, deliberately -- changing them in the same
+build would have made those comparisons uninterpretable.
+
+**(a) Double-counted surface drag.** `erf.hindcast_surface_bcs = true` applies a
+SECOND, hardcoded `Cd_land = 0.01` bulk drag in cell k=0, on top of MOST
+(`Source/SourceTerms/ERF_ApplySurfaceTreatment_BulkCoeff.cpp:19-56`, called from
+`ERF_MakeMomSources.cpp:677`). It is a deceleration, so it cannot cause the wind
+runaway -- if anything it masks part of it. But it means any tuning of
+`erf.most.z0` or the roughness map is contaminated by an independent drag that
+none of the MOST diagnostics (`u_star`, `z0`, `Olen`) reveal.
+
+**(b) The global mass controller is railed.** `hindcast_global_mass_tau`
+saturates against its own +/-2 m/s clamp
+(`ERF_BoundaryConditionsRealbdy.cpp:1039-1063`), so it applies a persistent,
+depth-uniform +/-2 m/s on every outflow wall face. Wall-confined, so not the
+interior runaway, but it is real momentum injection and it is running at its
+limit rather than as a small correction.
+
+## 72. RECORDED: MOST variants with no denominator limiter at all
+
+Found while fixing item 69. `adiabatic_charnock` and `adiabatic_mod_charnock`
+divide by `(C - psi_m)` in both the iteration and the stored `u_star`, with no
+`std::max(..., 1.0)` anywhere -- so they have item 69's failure mode with no
+guard even in the zeta update. Neither is exercised by this campaign
+(`theta_type = SURFACE_TEMPERATURE` selects the `surface_temp*` family), so they
+were left alone. Also unlimited but harmless in our configuration: the pre-loop
+Beljaars `w_star` block in the `surface_temp*` variants (inert unless
+`erf.most.include_wstar`, default false), and the inner Charnock roughness
+iteration (runs over sea, where z0 is O(1e-4 m) and C is O(10)).
+
+## 73. THE WIND RUNAWAY IS AN INTERIOR BODY FORCE, NOT A BOUNDARY-LAYER PROBLEM -- items 69/70 fixed real defects that were not the cause
+
+This closes the SM question and, in doing so, falsifies the premise the whole
+items 69-72 line of work was built on. Recording the chain in order, because
+each step was measured and each one redirected the next.
+
+### The SM chain is real, validated, and is an AMPLIFIER not an origin
+
+MYNN's SM was reconstructed from run data, transcribed from `ERF_MYNNStruct.H`
+and the live block at `ERF_ComputeDiffusivityMYNNEDMF.cpp:4418-4445`, and
+validated against the model's own plotted `Kmv`: **0.0720 predicted vs 0.0721
+plotted at k=0, t=3584 s** (0.1277 vs 0.1262 at t=1800; 0.8412 vs 0.8510 at
+t=300). The reconstruction is correct, so what it says can be believed.
+
+| | k=0 shear | GM | alphac | SM | Kmv | \|V\| at k=1 |
+|---|---|---|---|---|---|---|
+| t=300 s | 0.0203 | 0.29 | 0.419 | 0.201 | 0.85 | **4.55** |
+| t=1800 s | 0.0054 | 13.6 | 0.089 | 0.033 | 0.126 | 10.46 |
+| t=3584 s | 0.164 | 19.2 | 0.078 | 0.028 | 0.072 | 12.00 |
+
+At **t=300 s the boundary layer is correct** -- 4.55-4.98 m/s against d02's
+4.88, and Kmv 0.85-5.7, inside the 1-10 target. SM then collapses because GM
+rises 66x, and GM rises because the wind ran away. `alphac` is Helfand & Labraga
+(1988) limiting, `alphac = min(1, q/qe)`, and it is **faithful to WRF**: the dead
+WRF port in the same file computes `qdiv = sqrt(q3sq/q2sq)`, which is
+algebraically the same factor applied to the same NN09 forms. ERF is correctly
+applying a correct limiter to a state it should never have reached.
+
+(One genuine difference: WRF floors `q3sq` at `-dlsq*gh`, which ERF's live path
+lacks. It binds only where `GH < -1`, i.e. stable layers aloft, not at k=0 where
+`GH = -0.018`. Recorded, not acted on.)
+
+### Flooring Kmv to a physical value does NOT arrest the wind
+
+`erf.pbl_mynn_SMmin = erf.pbl_mynn_SHmin = 0.2` (an existing knob, no code
+change) lifted **Kmv from 0.05-0.13 to 0.83-3.26**, squarely in the target band,
+raised TKE 4-6x, and produced a genuinely well-mixed profile (9.55 / 10.47 /
+10.73 / 10.67 m/s from k=1 to k=12; the 3.3x jump across cell 0->1 is gone).
+
+**The 26 m wind moved only 12.00 -> 9.55 m/s, against the driver's ~5.5.**
+
+The arithmetic says no surface scheme could have done better: the maximum
+deceleration surface drag can apply to a 1 km mixed layer is
+`rho*u*^2 / mass = 1.1*0.34^2 / 1100 = 1.2e-4 m/s^2`, while the observed
+acceleration is ~2e-3 m/s^2 -- **16x larger than the entire available drag.**
+
+### Where the momentum actually comes from
+
+Median |V| at 500 m AGL over water, by distance from the nearest lateral wall
+(`erf.real_width = 10`, so the first two bins ARE the relaxation zone):
+
+| dist | 0-15 km | 15-30 km | 30-45 km | 45-60 km | 60-90 km | 90-120 km | 120-144 km |
+|---|---|---|---|---|---|---|---|
+| t=0 | 3.18 | 3.21 | 3.52 | 3.59 | 3.42 | 2.86 | 2.66 |
+| t=1h | **3.63** | **4.75** | 13.77 | 13.19 | 13.77 | 15.14 | 14.55 |
+| ratio | **1.14** | **1.48** | 3.92 | 3.67 | 4.02 | 5.29 | **5.48** |
+
+**Inside the relaxation zone the wind is right. Outside it the interior runs
+away, monotonically worse with distance from the wall.** The Davies scheme is
+the only thing holding any part of the domain correct -- the error grows with
+how long a parcel has been free of it. That is a body force acting everywhere in
+the interior, locally overpowered by relaxation near the walls.
+
+### What this rules out, by measurement
+
+* **Not the PBL.** Kmv forced to 1-3 leaves the wind at 9.55 (above).
+* **Not terrain-following pressure-gradient error.** Stratified by slope at
+  500 m AGL, the runaway is **worst over flat water (4.43x)** and *smaller* over
+  steep terrain (2.47x). Terrain reaches 2355 m with slopes to 0.202, so the
+  test had range; the signature is inverted from the hypothesis.
+* **Not the boundary scheme.** It is the only thing suppressing the error.
+* **Not Coriolis, by magnitude.** f = 8.07e-5 at 33.6N, so 3e-3 m/s^2 would
+  need a 37 m/s perpendicular wind at 500 m; there is 3-14. `use_coriolis`,
+  `coriolis_3d`, `variable_coriolis` are all true.
+* **Not the initial condition.** On a common ASL axis (the frame's z and ERF's
+  z_phys are both ASL, `ERF_WeatherDataInterpolation.cpp:426`), ERF at t=0 is
+  **0.88-1.28x the driver through the entire column**. An earlier reading that
+  the IC was wrong compared ERF's AGL profile against the frame's ASL levels and
+  was an artifact of that mismatch.
+* **Not the free troposphere.** After 1 h, ERF/driver is 0.90-0.99 above 2.7 km
+  and 2.1-2.4 through 60-630 m. The error is created during the run, in the
+  lowest ~1 km, and the acceleration ratio by height is
+  1.41 / 4.55 / 4.51 / 4.06 / 3.02 / 2.25 / 1.40 / 0.67 / 0.86 / 0.92 from
+  0 m to 8942 m.
+
+### What items 69 and 70 were worth
+
+Both fixed genuine defects -- a sign-inverting unfloored MOST denominator, and a
+TKE field pinned at machine epsilon with no surface source. Both are real bugs
+and both should stay fixed. **Neither was the cause of the precipitation error**,
+and the plan that motivated them predicted otherwise. The honest summary is that
+three days of surface-layer work removed three real defects and moved the 50 m
+wind from 12.39 to 12.18 m/s.
+
+### Next measurement, not yet made
+
+Compute the geostrophic wind implied by ERF's own pressure field at 500 m and
+compare it with the driver's. A ~3e-3 m/s^2 acceleration corresponds to
+3.3 hPa/100 km, which would be geostrophically balanced by ~37 m/s -- far above
+the driver's 5.5 m/s in the boundary layer and 10-15 m/s at 2-3 km. If ERF's
+implied geostrophic wind is that large, the interior pressure/density structure
+is the defect and every surface-layer lever is downstream of it. `pressure` was
+not in the test deck's `plot_vars`, so this needs one more run.
+
+## 74. THE INTERIOR DRIFT IS SCHEME-INDEPENDENT: NSCBC has it too, and worse -- Davies was only masking it near the wall
+
+Direct test of item 73's prediction. Davies relaxes over `erf.real_width = 10`
+cells; NSCBC is a characteristic condition applied AT the wall with no
+relaxation zone. If the interior drifts on its own, NSCBC should run away at
+every distance including the first bin. It does.
+
+Median |V| at 500 m AGL over water, by distance from the nearest lateral wall,
+1 h runs identical except for the boundary scheme:
+
+| dist (cells) | 0-5 | 5-10 | 10-15 | 15-20 | 20-30 | 30-40 | 40-48 |
+|---|---|---|---|---|---|---|---|
+| t=0 (both) | 3.18 | 3.21 | 3.52 | 3.59 | 3.42 | 2.86 | 2.66 |
+| **Davies** t=1h | **3.63** | **4.75** | 13.78 | 13.19 | 13.77 | 15.14 | 14.55 |
+| Davies ratio | **1.14** | **1.48** | 3.92 | 3.67 | 4.02 | 5.29 | 5.48 |
+| **NSCBC** t=1h | **20.29** | **21.33** | 17.95 | 15.96 | 15.20 | 17.29 | 19.11 |
+| NSCBC ratio | **6.37** | **6.64** | 5.10 | 4.44 | 4.44 | 6.04 | 7.19 |
+
+**Davies holds only the two bins inside its own relaxation zone (1.14, 1.48) and
+its interior drifts anyway** -- at t=1800 s the interior is already 10.8-13.2
+while the near-wall bins sit at 3.2-6.0, so the interior drift is not
+propagating in from the wall under Davies. **NSCBC holds nothing**: it runs away
+at all distances and ends ~40% faster than Davies overall (20-21 vs 13-15 m/s).
+
+So the drift is a property of the interior solution, not of either boundary
+treatment. Davies partially masks it over 10 cells; NSCBC does not mask it and
+additionally injects its own error at the wall (near-wall is its WORST bin at
+t=1800: 12.21 against 3.66-5.92 in the interior, i.e. the wall leads early and
+the interior catches up later).
+
+**Consequence for the campaign:** the Davies-vs-NSCBC comparison that has run
+through items 66-68 was comparing two arms that share a dominant common error.
+NSCBC's better precipitation correlation (+0.487 vs +0.061) was measured on top
+of this, not independently of it.
+
+**Explicit interior body forces are all ruled out by inspection of
+`ERF_MakeMomSources.cpp:90-101`, the complete list:** Coriolis (ruled out by
+magnitude, item 73), Rayleigh damping (a sink; deck has only a zhi sponge over
+the top 5 km), constant/height-dependent geostrophic forcing
+(`abl_geo_forcing` is unset, i.e. {0,0,0}, and `abl_driver_type` is not set),
+subsidence, sounding nudging, numerical diffusion, sponge
+(`hindcast_lateral_sponge_strength = 0.0`), forest canopy, immersed forcing,
+constant mass flux. The `hindcast_global_mass_tau` controller was re-checked
+against source and is confirmed **one cell wide** at the walls
+(`realbdy_bc_bxs_xy(gbx, domv, 1, ...)`, outflow faces only), so item 71b's
+assessment stands and it is not this.
+
+**Nothing is pushing the interior. It is drifting.** The IC is faithful to the
+driver (0.88-1.28x through the column, item 73), so the most likely reading is
+that the interpolated CONUS404 state is in balance on WRF's grid, terrain and
+discretisation but NOT on ERF's, and the resulting adjustment is what the
+boundary layer is doing.
+
+Supporting evidence that the end state is unphysical rather than merely early:
+**ERF's 500 m wind (14 m/s Davies, 20 m/s NSCBC) exceeds its own 2800 m wind
+(12.7 m/s).** A frictional boundary layer cannot be faster than the free
+troposphere above it in any steady state, so this is a super-geostrophic
+overshoot, not a slow approach to a balanced profile.
+
+**A geostrophic-balance diagnosis was ATTEMPTED AND DISCARDED.** Interpolating p
+to fixed ASL levels and taking horizontal gradients gave |Vg| = 77-114 m/s at
+500-2800 m, but the built-in control failed: above the boundary layer |Vg| must
+track the actual wind and it missed by 9x. `dp/dz ~ -11 Pa/m`, so a 1 m error in
+the interpolated height injects ~3.7e-3 Pa/m across a 3 km cell -- the same size
+as the signal. The method is too fragile at this grid spacing and the numbers it
+produced must not be quoted. A valid version needs the perturbation pressure
+against ERF's own hydrostatic base state, not a re-interpolation.
+
+## 75. THE RUNAWAY SURVIVES REMOVING EVERY TURBULENCE SCHEME -- it is not the PBL, and no PBL scheme can fix it
+
+Decisive control run: `zlo.type=SlipWall`, `erf.pbl_type=None`, `erf.les_type=None`,
+`erf.molec_diff_type=None`, `erf.hindcast_surface_bcs=0`. No surface stress, no
+turbulence closure of any kind -- the bare dynamical core from the same IC.
+
+Median |V| over interior land, ratio t=3584 s / t=0:
+
+| height | 0 m | 26 m | 55 m | 291 m | 1338 m | 2181 m | 3455 m | 8942 m |
+|---|---|---|---|---|---|---|---|---|
+| **no physics at all** | 6.63 | **5.78** | 5.26 | 3.16 | 1.37 | 0.68 | 0.85 | 0.99 |
+| full MYNN + MOST | 1.41 | **4.55** | 4.51 | 3.02 | 1.40 | 0.67 | 0.86 | 0.92 |
+
+**The runaway is fully present with no turbulence scheme whatsoever, with the
+same vertical structure.** MOST does its job -- it brakes cell 0 from 6.63 to
+1.41 -- and everything above cell 0 runs away regardless.
+
+**This closes the "try a different PBL scheme" question by measurement, not
+argument.** MYNN2.5, MYJ, YSU, MRF, native SHOC and EAMxx SHOC all occupy the
+slot that was just emptied. A scheme cannot fix an error that is unchanged when
+the slot is empty.
+
+It also clears items 69/70 and the rest of the surface-layer work of having
+caused this: the drift is identical with all of it disabled.
+
+### Where it actually points
+
+ERF's own mass-consistency diagnostic, printed once at initialisation and
+**bit-identical (19.30414581) across the no-physics and full-physics runs**, so
+it is a property of the interpolated initial state:
+
+```
+[mass-consistency] target rho vs model (HSE-rebalanced) rho: max|drho| = 0 kg/m^3
+[mass-consistency] ERA5 target under ERF's discrete continuity operator, lev 0:
+    band (10 cells): max implied |w| = 990.42 m/s, max lid incompatibility = 990.42 m/s
+    interior        : max implied |w| =  19.30 m/s, max lid incompatibility =  19.30 m/s
+```
+
+HSE rebalancing is exonerated (`max|drho| = 0`). But the interpolated CONUS404
+state, evaluated under **ERF's discrete continuity operator on ERF's grid**, is
+mass-inconsistent in the interior by the equivalent of ~19 m/s of vertical
+velocity, and the column-integrated version ("lid incompatibility") is the same
+19.3 m/s -- flux the rigid SlipWall lid cannot pass, so it must be absorbed by
+pressure adjustment. Synoptic w is centimetres per second; a few m/s is deep
+convection. 19.3 m/s is not a physical vertical velocity.
+
+That is a mechanism that accelerates the interior, is present at t=0, is
+independent of every physics option, and decays with height the way the measured
+error does.
+
+**NOT YET VALIDATED, and it must be before it is acted on.** The band value in
+the same printout is 990 m/s, which is physically meaningless and is contaminated
+by the target's zero-initialised boundary ghosts (the routine's own comments say
+it clamps for this). A diagnostic that produces one absurd number has not earned
+trust on its other number. **The control to run: evaluate the same residual for
+CONUS404 on CONUS404's OWN grid.** If the driver is self-consistent there and
+only becomes inconsistent after interpolation onto ERF's grid and terrain, the
+defect is in the interpolation and the number can be believed. If the driver is
+already inconsistent on its own grid, the diagnostic is wrong.
+
+### Context: ERF has no real-data verification case
+
+`erf.readthedocs.io/en/latest/Verification.html` lists scalar advection, density
+current, Ekman spiral, potential flow over semi-cylinder and hemisphere, Stokes
+second problem, and dry/moist bubble rise. **All idealised; zero real-data
+hindcast or forecast verification.** `erf-model/ERF` has 11 open issues and none
+concern PBL behaviour or real-case forecast skill (searched MYNN, PBL, real
+initialisation). So the real-data path this campaign exercises is not covered by
+upstream's regression suite, and the absence of a matching upstream issue is not
+evidence that the path is sound -- nobody is testing it there.
+
+## 76. THE PROXIMATE CAUSE IS A SUSTAINED SPURIOUS w THAT THE DYNAMICS REGENERATE -- mass-consistency and w-initialisation both FALSIFIED as fixes
+
+Four hypotheses tested, three killed, one partial. Recorded in the order run.
+
+### 76a. Mass inconsistency -- FALSIFIED (the 19.3 m/s was a tail cell)
+
+Item 75 quoted ERF's own `interior: max implied |w| = 19.30 m/s` and flagged it
+as needing validation because the same printout emits a physically impossible
+990 m/s in the band. Validated by computing the distribution, and by the control
+of running the identical calculation on CONUS404's own grid against the driver's
+own w. Restricted to water columns so the terrain metrics are unity and plain
+differences are exact:
+
+| | median | p99 | max |
+|---|---|---|---|
+| ERF implied \|w\| at t=0 | **0.170** | 1.25 | 4.02 |
+| driver ACTUAL \|w\| | 0.023 | 0.346 | 1.54 |
+| driver IMPLIED \|w\| | 0.045 | 4.32 | 33.2 |
+
+**ERF's median implied w is 0.17 m/s, not 19.** The 19.3 was a single tail cell,
+exactly as suspected. 0.17 m/s cannot accelerate a boundary layer from 3 to
+14 m/s. **Item 75's leading hypothesis is dead.** (Side finding: the driver is
+itself mass-inconsistent at the tail on its own grid -- implied p99 4.32 against
+an actual p99 of 0.346 -- inherited from erftools' WRF-eta -> fixed-height
+regrid, not created by ERF.)
+
+### 76b. The proximate mechanism: a standing spurious w
+
+Pure dynamics (no PBL, no surface layer, no LES, no molecular diffusion),
+interior, 1 h. w is initialised to zero by design:
+
+| t (s) | 0 | 300 | 900 | 1800 | 2700 | 3584 |
+|---|---|---|---|---|---|---|
+| \|w\| med | 0.000 | 0.246 | 0.368 | 0.359 | 0.385 | **0.350** |
+| \|w\| p99 | 0.000 | 8.256 | 8.789 | 8.132 | 7.569 | **7.164** |
+| \|w\| max | 0.68 | 32.4 | 41.2 | 32.1 | 43.7 | **43.5** |
+
+Against the driver (median 0.023, p99 0.346, max 1.54): **15x too large at the
+median, 21x at p99, 28x at max, and it does not decay.** The momentum budget
+closes on it: `w du/dz = 0.35 * 1e-2 = 3.5e-3 m/s^2`, against a measured
+acceleration of 2-3e-3 m/s^2 and a maximum available surface drag of 1.2e-4.
+
+The in-code comment justifying `w` at rest -- "w re-establishes itself within a
+few steps through the pressure solve ... it is not the 16-hour quantity" -- is
+**false as written**. It re-establishes at 15x the driver and stays.
+
+### 76c. Diagnosing w from continuity -- IMPLEMENTED AND FALSIFIED
+
+Added `ERF::hindcast_ic_diagnose_w` (gated `erf.hindcast_ic_diagnose_w`,
+default 0): integrates the same residual `hindcast_check_mass_consistency`
+measures upward from a no-flux terrain surface and converts Fz -> Omega -> w
+through ERF's own `WFromOmega`. Interior only; the band is left at rest because
+writing the band residual into the state is the 990 m/s value and it NaNs the
+run at the xlo wall on step 1 (measured on the first attempt).
+
+The diagnosed field is good -- t=0 median 0.030, p99 1.45 m/s, close to the
+driver's 0.023 / 0.346, with only 2341 of ~884k cells hitting the +/-3 m/s guard.
+The run is markedly gentler: **dt rose from 0.038 to 0.204 s**.
+
+**And the wind is unchanged:**
+
+| ratio t=1h/t=0 | 0 m | 26 m | 55 m | 291 m | 1338 m | 3455 m |
+|---|---|---|---|---|---|---|
+| w at rest | 6.63 | 5.78 | 5.26 | 3.16 | 1.37 | 0.85 |
+| w diagnosed | 6.66 | 5.79 | 5.25 | 3.17 | 1.37 | 0.85 |
+
+Identical to three significant figures, and w is back to median 0.247 by t=300 s
+either way. **The dynamics regenerate the spurious w regardless of how it
+starts**, so it is being continuously produced, not left over from an impulsive
+start. The code is kept (default off) because it is correct, cheap and makes the
+start 5x gentler, but it is NOT the fix.
+
+### 76d. buoyancy_type -- PARTIAL, and the remaining lead
+
+The deck runs `buoyancy_type = 1` (`buoyancy_rhopert`, `-g(rho - r0)`).
+Switching to 2 (`buoyancy_moist_Tpert`) is a real but partial improvement:
+
+| ratio t=1h/t=0 | 0 m | 26 m | 55 m | 291 m | 1338 m | 2181 m |
+|---|---|---|---|---|---|---|
+| buoyancy_type 1 | 6.63 | 5.78 | 5.26 | 3.16 | 1.37 | 0.68 |
+| buoyancy_type 2 | 5.97 | **4.90** | 4.33 | 2.57 | 1.54 | **0.87** |
+
+15% better at 26 m and closer to 1.0 aloft, but nowhere near the ~1.3 the driver
+implies. That it moves AT ALL points at the vertical momentum equation: buoyancy
+and the vertical pressure gradient are two large terms that must cancel to
+produce a small w, and the residual of that cancellation is the spurious w.
+
+**The untested candidate is single precision.** Order of magnitude: dp/dz is
+~11 Pa/m on a base of ~1e5 Pa, so float32's ~6e-8 relative precision leaves
+~6e-3 Pa of noise on p, i.e. ~2.4e-4 Pa/m over a 25 m cell, i.e. ~2.2e-4 m/s^2
+of unbalanced vertical acceleration. Integrated over 3584 s that is ~0.8 m/s of
+spurious w -- **the right order for the measured 0.35 m/s median.** This whole
+campaign is single precision. Testing it needs a double-precision build, which
+is a standing ask-first item.
+
+## 77. FIVE IDEAS TESTED AGAINST THE SPURIOUS w: buoyancy_type IS THE LEVER, and it more than halves the wind error
+
+All arms are 1 h on the same IC. The two metrics move together throughout, which
+is the check that w is cause and not symptom. Driver target ratio, computed from
+the 18Z and 21Z frames interpolated to 19Z: **1.24 at the surface, 1.27 at
+500 m** (not the "1.3-1.7" estimate used while the runs were in flight).
+
+### Pure dynamics (no PBL, no surface layer, no LES, no molecular diffusion)
+
+| arm | \|w\| med | p99 | 26 m ratio | 500 m ratio |
+|---|---|---|---|---|
+| driver (target) | 0.023 | 0.35 | **1.24** | **1.27** |
+| baseline | 0.350 | 7.16 | 3.55 | 3.97 |
+| w diagnosed from continuity | 0.349 | 7.16 | 3.55 | 3.97 |
+| numerical diffusion 0.2 | 0.340 | 6.09 | 3.77 | 3.90 |
+| **anelastic** | 0.219 | 6.64 | **2.03** | 2.44 |
+| **buoyancy_type 2** | 0.251 | 7.48 | **1.95** | 2.24 |
+
+### Full physics (MOST + MYNN + the item 69/70 fixes)
+
+| arm | \|w\| med | 26 m ratio | 500 m ratio |
+|---|---|---|---|
+| buoyancy_type 1 (current deck) | 0.330 | 3.12 | 3.97 |
+| **buoyancy_type 2** | 0.237 | **1.76** | **2.24** |
+| buoyancy_type 4 | 0.254 | 2.04 | 2.65 |
+
+**buoyancy_type = 2 takes the 26 m error from +152% over target to +42%**, and
+cuts median |w| by 28%. It is a one-line deck change with no code and no cost.
+
+### What did NOT work, and why it is worth knowing
+
+* **w initialised from continuity (item 76c)** -- zero effect, twice confirmed.
+  Taking w from CONUS404 instead would behave the same: the diagnosed field
+  already matched the driver's statistics (median 0.030 vs 0.023) and the
+  dynamics regenerated median 0.247 within 300 s regardless. The IC is not the
+  lever; the ongoing vertical momentum balance is.
+* **Numerical diffusion** (`erf.num_diff_coeff = 0.2`) -- slightly WORSE at 26 m
+  (3.77 vs 3.55). It damps grid-scale noise, and this is not grid-scale noise.
+* **More vertical levels** -- tested properly with radiation off on all three
+  arms so the comparison is internally consistent (the ozone profile is pinned
+  to 48 levels and aborts otherwise):
+
+  | levels | stretching ratio | dz top | \|w\| med | 26 m ratio |
+  |---|---|---|---|---|
+  | 48 | 1.0931 | 1642 m | 0.348 | 3.54 |
+  | 64 | 1.0625 | 1142 m | 0.373 | 3.49 |
+  | 96 | 1.0352 | 671 m | 0.483 | 3.36 |
+
+  A 5% gain at 96 levels for 2x the cells, and **median |w| gets 39% WORSE**.
+  The aggressive 66x stretch was a good hypothesis and it is wrong: refining the
+  vertical grid does not fix this.
+* **anelastic** works about as well as buoyancy_type 2 (2.03 vs 1.95) but costs
+  2.4x the timestep (dt 0.083 vs 0.20) plus a Poisson solve per step, and
+  `anelastic = 1` with `buoyancy_type = 2` is **bit-identical** to anelastic
+  alone -- the anelastic path does not consult buoyancy_type, so the two are
+  alternative routes to the same place, not additive.
+
+### Reading
+
+`buoyancy_type = 1` is `buoyancy_rhopert`, `-g(rho - r0)`. Type 2 is
+`buoyancy_moist_Tpert`, which forms the perturbation from theta, qv and p
+against the base state instead of from rho directly. That the switch matters
+this much says the vertical momentum balance -- buoyancy against the vertical
+pressure gradient, two large nearly-cancelling terms -- is where the spurious w
+is produced, and that the rho-difference form conditions that cancellation
+worse in single precision. Consistent with, but not proof of, the
+single-precision estimate in item 76d (~0.8 m/s of spurious w per hour from
+float32 rounding on a 1e5 Pa pressure field).
+
+**Still +42% over target at 26 m.** This is a large improvement, not a
+resolution.
+
+## 78. ROOT CAUSE: buoyancy_type 1 differences a MOIST state density against a DRY base-state density -- a permanent g*qv body force, found by reading, not running
+
+Static analysis, no model run. This is the defect items 73-77 were circling.
+
+### The inconsistency, in four lines of source
+
+`Source/SourceTerms/ERF_BuoyancyUtils.H`, `buoyancy_rhopert` (used by
+`buoyancy_type = 1`, which is the DEFAULT and what every arm of this campaign
+has run):
+
+```cpp
+rhop_hi = cell_data(i,j,k  ,Rho_comp) * (one + qt_arr(i,j,k  )) - r0_arr(i,j,k  );
+rhop_lo = cell_data(i,j,k-1,Rho_comp) * (one + qt_arr(i,j,k-1)) - r0_arr(i,j,k-1);
+return( grav_gpu * myhalf * ( rhop_hi + rhop_lo ) );
+```
+
+* `Rho_comp` is the **DRY** density -- `make_qt` (`ERF_TI_utils.H:66`) ends with
+  `// Divide out the dry density`, so `qt` is a mixing ratio w.r.t. dry air and
+  `rho_d*(1+qt)` is correctly the TOTAL moist density.
+* `r0` is also the **DRY** density: the hindcast base state stores
+  `r_arr = getRhogivenThetaPress(th,p,rdOcp,qv)`, and that returns
+  `p/(R_d*th*(1 + R_v/R_d*qv))`, i.e. rho_dry
+  (`ERF_EOS.H`, `ERF_WeatherDataInterpolation.cpp` ~1146).
+
+So the term differences a **moist** density against a **dry** one. The water
+vapour is counted as a buoyancy perturbation when it is already part of the base
+state.
+
+### It is provably non-zero at t = 0
+
+Initialisation sets every state field equal to its base-state counterpart
+(`ERF_WeatherDataInterpolation.cpp` ~1209):
+
+```cpp
+cons_arr(i,j,k,Rho_comp)   = r_arr(i,j,k);          // rho_dry == r0
+cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k)*f_arr(i,j,k,RhoQ1_comp);
+qv_arr(i,j,k) = qv_k;                                // qv == qv0
+```
+
+with `p == p0` and `theta == th0` by construction, so `dp'/dz = 0`. Substituting:
+
+    buoyancy = g * rho_d * qt   != 0
+
+**A perfectly quiescent, perfectly matched initial state carries a net downward
+acceleration of g*qt.** The provenance comment written in an earlier session --
+"Base state and thermodynamic state are then the same field by construction, so
+buoyancy is exactly zero at init" -- is wrong by exactly the vapour term.
+
+### Magnitude and structure, from the CONUS404 frame
+
+| z (m) | qt median | g*qt median | g*qt p95 |
+|---|---|---|---|
+| 0.0 | 0.00699 | **0.0686** | 0.0865 |
+| 264.9 | 0.00663 | 0.0651 | 0.0795 |
+| 527.2 | 0.00479 | 0.0469 | 0.0649 |
+| 1131.9 | 0.00246 | 0.0242 | 0.0435 |
+| 1629.4 | 0.00231 | 0.0227 | 0.0344 |
+
+Column-integrated missing weight `int rho*qt*g dz`: median **142 Pa (1.42 hPa)**,
+p95 171 Pa. Its horizontal gradient -- the spurious horizontal PGF it converts
+into -- is median **4.3e-4**, p95 **1.4e-3 m/s^2**, against the **2-3e-3 m/s^2**
+measured. Same order, right sign, still a factor ~2 short at the median, so this
+is a dominant contributor and not provably the only one.
+
+### It explains every signature items 73-77 measured
+
+| observation | explained |
+|---|---|
+| error confined to the lowest ~1 km, gone above 2 km | qt falls 3x over that range |
+| **worst over flat WATER (4.43x), not steep terrain (2.47x)** | qv is highest over the ocean |
+| sustained, does not decay | qv does not decay |
+| unchanged by removing every PBL scheme | not a turbulence term |
+| unchanged by w initialisation | forcing is continuous, not initial |
+| unchanged by vertical refinement | not a resolution error |
+| **fixed substantially by buoyancy_type 2** | see below |
+
+### Why buoyancy_type 2 helped -- and it is the same bug seen from the other side
+
+`buoyancy_moist_Tpert` forms
+
+    q = 0.61*(qv - qv0) - (qt - qv) + dT/T0,    buoyancy = -r0avg*g*q
+
+At t = 0, `qv == qv0` and `T == T0`, so this collapses to `-(qc+qr)` -- the
+condensate loading ALONE, which is a real force. It subtracts the base-state
+vapour where type 1 does not. That is exactly why switching moved the 26 m wind
+error from +152% to +42% (item 77), and why the anelastic path -- which uses
+`buoyancy_moist_Thpert`, also `qv0`-aware -- gave the same improvement.
+
+### The fix, and why it is not a one-liner
+
+The clean fix is to make the base state hydrostatic for MOIST air: integrate
+`p0` with the total density `rho_d*(1+qt)` and store `r0` as that total density.
+Then `p0` is genuinely hydrostatic, `buoyancy_rhopert`'s difference is
+consistent, and the initial state is balanced. Note `erf_enforce_hse` takes `qv`
+as an argument and **never uses it** in the integration -- it only calls
+`FillBoundary` on it -- which is the same omission upstream.
+
+The risk is that `r0` is consumed elsewhere as a reference density (the anelastic
+projection, and as the scale factor in the type 2/4 forms), so redefining it is
+not local. The cheaper and already-measured route is to keep `r0` dry and set
+`erf.buoyancy_type = 2`, which sidesteps the term entirely.
+
+**Attribution: this is upstream ERF, not our fork.** `ERF_BuoyancyUtils.H` is
+untouched in our tree, `buoyancy_type = 1` is the default, and the assert at
+`ERF_MakeBuoyancy.cpp:166` FORCES type 1 for Kessler_NoRain/SAM/SAM_NoPrecip --
+so those moisture models cannot avoid it at all.
+
+## 79. buoyancy_type = 2 IS INCOMPATIBLE WITH NSCBC ON THIS DECK -- the 6 h scored window could not be produced
+
+Setup for the item 78 verification run: `erf.buoyancy_type = 2` in all five
+decks, new `inputs_c404_domA_6h` (00Z-06Z on 2020-12-28), references built for
+the scored 03Z-06Z window (`refs/domA_{d02,mrms}_h3_h6.npy`; d02 mean 1.955 mm,
+MRMS 1.421 mm, both 100% coverage), and `scoring/score_window.py` as a
+parameterized copy of `plot_pair_29h.py` keeping every scoring convention.
+
+**NSCBC + buoyancy_type 2 aborts DETERMINISTICALLY at t ~ 1655 s (27.6 model
+minutes)**, two runs from the same binary and inputs:
+
+| run | last step | model time | dt | first NaN |
+|---|---|---|---|---|
+| first | 3403 | 1654.68 s | 0.381 | (147,89,47) comp 1 |
+| retry | 3402 | 1654.35 s | 0.381 | (140,91,23) comp 0 |
+
+Same step to within one, same region: i = 138-147, j = 89-91 of 96, i.e. **5-7
+cells from the yhi wall, inside the 10-cell relaxation band**. This is NOT the
+nondeterministic NSCBC failure of item 66 (NaN@290 / clean / NaN@320 on
+identical inputs) -- it repeats.
+
+**Controlled A/B, same deck and window, only buoyancy_type differs:**
+
+| arm | reached | dt at that point |
+|---|---|---|
+| buoyancy_type 2 | t = 1655 s, ABORT | 0.381 |
+| buoyancy_type 1 | t = 5897 s, still running | 0.121 and falling |
+
+So type 2 does not merely fail to help NSCBC -- **it fails earlier than type 1
+does**. Type 1 survives longer but is in the documented dt-collapse (0.500 ->
+0.209 -> 0.168 -> 0.121 over the run), which the deck's own provenance note
+records as ending in an FPE at t = 17073 s (~4.7 h). Neither arm reaches the
+03Z-06Z scored window, so **NSCBC cannot produce this measurement on this deck
+under either buoyancy type**, and the control was stopped rather than burn the
+card reconfirming a documented failure.
+
+**Consequence.** The item 78 fix is verified only on 1 h wind diagnostics
+(item 77). Its effect on precipitation skill is still unmeasured. Davies is the
+validated lateral scheme on this deck per its own provenance note -- "the global
+constraint is applied under Davies dynamics instead (the validated baseline on
+this deck)" -- and is the available route to that number.
+
+**Also recorded:** the first attempt at this run passed the datetimes as
+command-line overrides. ParmParse split `start_datetime="2020-12-28 00:00:00"`
+at the space, took only `2020-12-28`, printed `format should be
+%Y-%m-%d %H:%M:%S`, aborted -- **and the process still exited 0**. Same
+failure-masking class as upstream #3491. Datetimes must be set in a deck, never
+on the command line, and an exit code of 0 is not sufficient evidence a hindcast
+run started.
+
+## 80. CORRECTION TO ITEM 78: the buoyancy inconsistency is OURS, not upstream's -- and that points at a better fix than buoyancy_type = 2
+
+Item 78 closed with "Attribution: this is upstream ERF, not our fork." **That is
+wrong.** Reading upstream's own real-data base-state construction shows why.
+
+### Upstream's base state is a DRY ANALYTIC REFERENCE, with qv0 = 0 by design
+
+`Source/Initialization/ERF_InitFromMetgrid.cpp:1216-1262`:
+
+```cpp
+Pd_lo = p_0 * std::exp( -T00/TLP + std::sqrt( (T00/TLP)*(T00/TLP)
+                        - two * grav * z_lo / (TLP * R_d) ) );   // WRF dry reference sounding
+...
+r_hse_arr(i,j,k)  = Rd_hi;               // dry reference density
+qv_hse_arr(i,j,k) = Real(0.);            // base state carries NO moisture
+p_hse_arr(i,j,k)  = Pd_hi;
+```
+
+The WRFInput path does the same (`ERF_InitFromWRFInput.cpp:1199`, dry Thd/Pd).
+So upstream's `r0` is a **reference profile**, not the actual state. The true
+total density departs from it substantially, `buoyancy_rhopert` measures exactly
+that departure, and `p' = p - p0` is correspondingly large and carries the
+balance. The two large terms cancel DYNAMICALLY. **Type 1 is self-consistent in
+upstream's design**, and the deliberate default of type 1 for Morrison
+(`ERF_DataStruct.H:236-250` -- note the condition is NEGATED, `if (!(...Morrison...))
+buoyancy_type = 2`, so Morrison keeps 1) is a coherent choice, not an oversight.
+
+### Our hindcast path changed the convention and not the density
+
+`ERF_WeatherDataInterpolation.cpp` sets the base state EQUAL to the actual state
+(`r0 = actual rho_dry`, `qv0 = actual qv`, `th0 = actual theta`, `p0 = actual p`),
+on the stated intent that "buoyancy is exactly zero at init." Under
+`buoyancy_rhopert` that intent fails by exactly the vapour term, `g*rho*qt`
+(item 78's 0.069 m/s^2), because the base state was made equal to the DRY
+density while the buoyancy term compares against the TOTAL.
+
+**The measurements in items 77-78 stand unchanged.** Only the attribution moves:
+this is a defect in our hindcast base-state construction, introduced when the
+base state was redefined to equal the state.
+
+### The better fix, which we have NOT yet implemented
+
+Store the base state as the TOTAL density and integrate p0 with it:
+
+```
+r_arr(i,j,k) = r_k * (1 + qt_k)             // qt = qv + qc + qr, currently r_k alone
+p_k = p_prev - dz*g*myhalf*(rtot_k + rtot_prev)   // currently uses dry densities
+```
+leaving the STATE's `Rho_comp` as rho_dry (ERF's convention). Then
+`buoyancy_rhopert = g*[rho_d*(1+qt) - r0] = 0` exactly at init -- the property the
+design intended -- **and** `p0` becomes genuinely hydrostatic for moist air,
+which it currently is not (`erf_enforce_hse` takes `qv` and never uses it).
+
+This is strictly better than `erf.buoyancy_type = 2`, which only sidesteps the
+term. It is local to our own initialization, needs a rebuild, and is untested.
+
+### Why this matters beyond correctness
+
+The deck's cfl provenance records that at cfl 0.3 a prior case "blows up ~9 model
+minutes in: a grid-scale w dipole (+48.9 / -29.5 m/s) in the lowest three"
+levels. A spurious buoyancy of g*qt, largest in the lowest levels and decaying
+with qt, is exactly that signature. The whole cfl ladder 0.3 -> 0.2 -> 0.1 may
+have been compensating for this defect -- and cfl 0.1 with sub_cfl 1.0 gives
+`dt_fast_ratio = max(cfl/sub_cfl, 4) = 4` substeps on a slow step 10x finer than
+the acoustic limit (`ERF_ComputeTimestep.cpp:288,391,446`), which is why every
+run in this campaign is slow.
+
+## 81. THE MOIST BASE STATE FIX WORKS AND CHANGES NOTHING -- item 78's MECHANISM is falsified, and buoyancy_type 2 helps for a different reason
+
+Implemented `erf.hindcast_moist_base_state` (default 0): the hindcast base state
+stores `r0 = rho_dry*(1+qt)` and integrates `p0` with the total density, so
+`buoyancy_rhopert` returns exactly zero at init and `p0` is genuinely hydrostatic
+for moist air. The conserved state's `Rho_comp` stays dry (the loading is divided
+back out at the copy) because `make_qt` depends on that convention.
+
+**The gate is confirmed ACTIVE**, not a no-op: `erf.hindcast_moist_base_state = 1`
+appears in the plotfile ParmParse table, the run took 8004 steps against the
+control's 8082, and the final dt differs by 5x (0.0456 vs 0.2179). It materially
+changed the trajectory.
+
+**And it does not help.** Full physics, 1 h, 26 m wind ratio against the driver's
+1.24:
+
+| arm | \|w\| med | 26 m ratio | 500 m ratio |
+|---|---|---|---|
+| buoyancy_type 1 + DRY base (old) | 0.330 | 3.12 | 3.97 |
+| buoyancy_type 1 + **MOIST base (new)** | 0.329 | **3.10** | 3.96 |
+| buoyancy_type 2 + dry base | 0.237 | **1.76** | 2.24 |
+
+3.10 against 3.12 is nothing.
+
+### What this falsifies
+
+Item 78 claimed the `g*qt` term is "a permanent DOWNWARD acceleration" and
+therefore the cause. **The magnitude was right and the mechanism was wrong.**
+`g*rho*qt` at t=0 is a HYDROSTATIC IMBALANCE, and in a compressible solver a
+hydrostatic imbalance is removed by an acoustic adjustment within seconds --
+the pressure field simply adjusts to carry the extra weight. It is an initial
+transient, not a sustained body force. Removing it at the source, which is
+exactly what this fix does, changes the first few seconds and nothing after.
+
+So the five signatures item 78 lined up (worst over water, decaying with height
+like qt, sustained, PBL-independent, fixed by type 2) are **still unexplained**.
+They were consistent with the qt story, but consistency is not causation, and the
+direct intervention settles it.
+
+### What buoyancy_type 2 is actually doing
+
+Not fixing the initial condition -- the moist base state does that, with no
+benefit. Type 2 uses a different formula at EVERY step:
+`0.61*(qv-qv0) - (qt-qv) + dT/T0` against type 1's `rho_d*(1+qt) - r0`. As the
+state departs from the base state, type 1 differences two O(1) densities while
+type 2 works in perturbation variables. **The benefit is ongoing numerical
+conditioning of the buoyancy term, not initialisation.** That is consistent with
+the single-precision estimate in item 76d and remains untestable without a
+double-precision build.
+
+### Disposition
+
+* `erf.hindcast_moist_base_state` stays **default 0**. It is more correct in
+  principle -- `p0` really should be hydrostatic for moist air, and
+  `erf_enforce_hse` really does accept `qv` and ignore it -- but it buys nothing
+  measurable and costs 5x in timestep on this case. Kept, gated, off, documented.
+* `erf.buoyancy_type = 2` stays in the decks: it is the only change that has
+  moved the wind error, and item 77's shape test showed it moves the profile
+  toward the driver rather than merely damping it.
+* Item 78's magnitude arithmetic and item 80's attribution correction stand. Only
+  the causal claim is withdrawn.
+
+## 82. ALL-OCEAN DIAGNOSTIC DOMAIN, 96 x 96 x 96 -- built to separate the two residual errors
+
+Item 77's land/sea stratification was measured with `buoyancy_type = 1` and does
+NOT survive the fix. Redone on `fpb2_` (type 2), |V| at 500 m AGL, ratio t=1h/t=0:
+
+| class | type 1 | type 2 |
+|---|---|---|
+| water (h < 20 m) | **4.43** | **2.30** |
+| land, gentle < 0.02 | 2.07 | 1.79 |
+| land, moderate 0.02-0.06 | 2.49 | 2.02 |
+| land, steep > 0.06 | 2.51 | **2.58** |
+
+**The water problem largely resolved; steep terrain did not move and is now the
+WORST class.** That implies TWO separable residual errors, and the earlier claim
+that "the runaway is worst over water, so an all-ocean domain selects the worst
+case" is withdrawn -- it was true only before the buoyancy fix.
+
+### The domain
+
+`Exec/CanonicalTests/ChannelIslands/inputs_c404_ocean`, 96 x 96 x 96 at 3 km:
+
+* centre 33.83 N, 122.20 W; lat 32.49-35.13, lon -123.82 to -120.66 (288 km sq)
+* `prob_lo = (-417000, -117000)`, `prob_hi = (-129000, 171000, 19002.6)`
+* **zero land**, verified against the CONUS404 surface landmask (ls_mask)
+* **>= 13 cells of frame margin on every side.** The first candidate had its
+  southern edge exactly on the frame's data edge; a domain boundary coincident
+  with the data boundary is a known way to manufacture relaxation artifacts, so
+  the box was reselected to maximise the SMALLEST margin. 146 all-ocean boxes
+  with >= 4 cells of margin exist in the pool; this is the safest.
+* terrain file all zeros, keeping the validated `StaticFittedMesh` code path
+  rather than exercising a flat-grid mode this case has never run
+* roughness file REMOVED -- no land, so Charnock governs and `most.z0` is inert
+* 96 levels, stretching 1.035236 to the same lid; ozone reinterpolated to 96
+  values in log(VMR) vs height (the array must be length 1 or nlay or radiation
+  aborts)
+
+**Cortes Bank is not reachable** as an all-ocean box in this frame pool: it sits
+~36 km from the frame's southern data edge and is hemmed in by San Clemente and
+San Nicolas. The nearest all-ocean box is 324 km northwest. A Cortes-centred
+domain needs a re-fetch extending south.
+
+### Why 96 levels, and why it is free
+
+The 48/64/96 sweep in item 77 found only 5% benefit with WORSE |w| -- but that
+was `buoyancy_type = 1` in pure dynamics, the same superseded configuration that
+invalidated the land/sea result, so it is not carried forward as settled.
+Two reasons to go to 96 here:
+
+* **Cost is identical.** 192 x 96 x 48 = 884,736 cells; 96 x 96 x 96 = 884,736.
+  Halving the horizontal exactly pays for doubling the vertical.
+* **The regime changed.** The marine boundary layer is shallow (~300-600 m) and
+  capped by a sharp subsidence inversion. At 48 levels dz near 500 m is 60-70 m,
+  marginal for that inversion; at 96 it is ~40 m. This argument is specific to
+  the ocean regime and was not tested by the earlier land-domain sweep.
+
+48 vs 96 should still be run as an explicit A/B on this domain -- in the right
+configuration and the right regime for the first time.
+
+### Relaxation band
+
+`real_width = 10` is retained, which is 21% of this domain against 10% of Domain
+A, leaving a 76-cell (228 km) interior. At 10 m/s that interior is not ventilated
+within a 1 h test, so interior drift there remains local and measurable.
+
+### Metric
+
+`scoring/wind_vs_driver.py` -- domain-agnostic, reads the grid from the plotfile,
+compares |V| against the time-interpolated CONUS404 frames on the common ASL
+axis. Number to beat: the water-class **2.30**, against a driver target of ~1.27.
+If the ocean domain lands near 2.30 the residual is terrain-independent; if it
+lands near 1.27 the remainder was terrain-driven and the two-error split is
+confirmed.
+
+## 83. FRAME INDEXING IGNORES start_datetime -- the item-79/Davies precipitation score is VOID, and the ocean IC is exact
+
+`Source/Utils/ERF_WeatherDataInterpolation.cpp:1839`:
+
+```cpp
+int idx1 = static_cast<int>(time / hindcast_data_interval);
+int idx2 = idx1 + 1;
+```
+
+`time` is MODEL time since run start, so at t=0 this always takes the **first two
+files in the sorted directory listing**, whatever `start_datetime` says. This is
+the position-not-date indexing recorded earlier in the campaign, and it was never
+propagated into the run design.
+
+The pool begins `ERF_IC_2020_12_27_18_00.bin`. Both the 6 h Domain A Davies run
+and the ocean runs declare `start_datetime = "2020-12-28 00:00:00"` and both log
+`Reading weather data 0 0 1 13` -- i.e. **they were initialised from 12/27 18Z
+while their clocks read 12/28 00Z. A 6-hour offset.**
+
+### Consequence: the Davies precipitation score is void
+
+The "03Z-06Z" window scored in the previous entry is really model hours 3-6 from
+an 18Z start, i.e. **12/27 21Z - 12/28 00Z**, compared against MRMS and d02 for
+**12/28 03Z-06Z**. Wrong times. The reported numbers -- 0.002 mm over interior
+land, corr -0.038, ocean corr -0.139 -- measure a six-hour mismatch and say
+nothing about model skill. **Withdrawn.** The band pathology (96.4% of
+accumulation inside the excluded band) is a separate observation and stands,
+since it is not time-referenced.
+
+### The same error inverted the ocean wind diagnostic
+
+Comparing ERF against the `start_datetime` frame made a faithful IC read as
+2.4x too slow. Against the frames ERF ACTUALLY uses:
+
+| z ASL | driver t0 | ERF t0 | **ratio** |
+|---|---|---|---|
+| 0.0 | 3.30 | 3.29 | **1.00** |
+| 58.5 | 3.33 | 3.31 | 0.99 |
+| 121.9 | 3.34 | 3.33 | 0.99 |
+| 432.7 | 3.11 | 3.12 | 1.00 |
+
+**The initial condition is exact.** The earlier alarm was entirely the frame
+mismatch.
+
+### And the real result: NSCBC over the ocean is close to correct
+
+t = 2490 s (41 model minutes), ocean domain, ratio ERF/driver:
+
+| z ASL | Davies | **NSCBC** |
+|---|---|---|
+| 0.0 | 0.48 | 0.83 |
+| 58.5 | 0.85 | **1.14** |
+| 121.9 | 0.86 | **1.09** |
+| 190.5 | 0.83 | **1.05** |
+| 264.9 | 0.79 | **1.01** |
+| 345.4 | 0.74 | 0.92 |
+| 432.7 | 0.71 | 0.84 |
+
+**NSCBC holds 1.01-1.14 through 60-265 m** against Domain A's 1.76-3.12 for the
+same metric. Davies over the ocean runs 15-30% TOO SLOW -- the opposite sign to
+every Domain A result, and a further sign the two schemes fail differently.
+
+NSCBC also showed no dt collapse here (0.5 flat vs Domain A's 0.50 -> 0.38 before
+a deterministic NaN at t=1655 s).
+
+### Required fixes before any further scoring
+
+1. Either make frame selection respect `start_datetime`, or trim the pool so
+   frame 0 IS the intended start. Until then **every scored window in this
+   campaign that used a non-first start time is suspect** and must be rechecked.
+2. Re-verify which earlier campaign scores used a start offset from frame 0.
+
+## 84. advect_tke IS REQUIRED on the ocean domain -- my reasoning said otherwise and the A/B corrected it
+
+I recommended `erf.advect_tke = false` for the ocean production run, reasoning
+that its only purpose is HORIZONTAL TKE transport (`EddyDiff::KE_h` is never
+populated with `les_type = None`), and a homogeneous ocean has no horizontal TKE
+gradients to transport. Prior campaign evidence agreed: `validated_config.txt`
+records an earlier Domain A test where every skill metric moved under 1%.
+
+**Both were wrong here.** 1 model hour, NSCBC, ocean domain, fixed_dt 0.75:
+
+| arm | \|V\| 26 m | TKE | **Kmv** | \|w\| p99 |
+|---|---|---|---|---|
+| advect_tke = true | 8.069 | 1.01e-1 | **0.942** | 2.572 |
+| advect_tke = false | 8.554 | 9.19e-3 | **0.060** | 2.440 |
+| difference | -5.7% | **+999%** | **+1477%** | +5.4% |
+
+Turning it off collapses TKE 11x and Kmv 16x. The absolute values decide it:
+with advection ON, `Kmv = 0.94`, inside the physically expected 1-10 band this
+campaign has been chasing since item 70. With it OFF, `Kmv = 0.06` -- back in the
+dead-boundary-layer regime. Running the production job with `false` would have
+silently reintroduced the exact defect the run is meant to demonstrate fixed.
+
+The mechanism is presumably domain SIZE rather than heterogeneity: 96 cells with
+a 10-cell relaxation band each side leaves a 76-cell interior, and the interior
+evidently depends on TKE being advected in rather than generated locally. The
+Domain A test that showed <1% was on a 192-cell domain, and does not transfer.
+
+**The instability risk did not materialise**: both arms ran a clean model hour at
+dt = 0.75 with no `RhoKE` blow-up in the band. That failure belongs to cfl = 0.3,
+not to `advect_tke`.
+
+**Kept true.** And the general lesson, now the third time this session: a
+conclusion measured under a different configuration is a hypothesis, not a
+result. The 6-minute A/B was worth more than the argument.
+
+## 85. Constant dt on the ocean domain: 0.75 s, one step from the edge
+
+Sweep at fixed dt, NSCBC, ocean 96x96x96, ~20 model min each, with `max_dt`
+lifted to 20 so `fixed_dt` is not silently clamped (the first attempt at this
+sweep ran everything at 0.5 because the deck's `max_dt = 0.5` overrode it, and
+was caught only by checking the reported DT):
+
+| dt | steps | result |
+|---|---|---|
+| 0.50 | 2400 | clean |
+| 0.60 | 2000 | clean |
+| 0.75 | 1600 | clean |
+| 1.00 | 325 | **NaN at (73,4,5) comp 1 -- the ylo relaxation band** |
+
+0.75 adopted; the failure is one step away in dt, so the margin is NOT wide.
+Note the failure is again in a relaxation band, as with the cfl sweep and the
+Domain A NSCBC failures: **the boundary treatment, not the interior physics, is
+what limits the timestep on every domain tested.**
+
+Adaptive dt bought nothing -- it pinned at `max_dt` on every stable run, so the
+CFL was computed each step only to be clamped. Fixed dt is equivalent, cheaper
+and predictable, and matches upstream's real-data decks (`WPS_Test` uses
+`fixed_dt = 0.5`).
+
+Measured rate: **647 model s per wall minute** at dt 0.75 (1 model hour in 333 s
+wall), so 6 h ~ 33 min, 30 h ~ 2.8 h, 6 h spin-up + 30 h ~ 3.3 h.

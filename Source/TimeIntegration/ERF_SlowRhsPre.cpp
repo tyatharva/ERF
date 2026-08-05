@@ -121,7 +121,9 @@ void erf_slow_rhs_pre (int level, int finest_level,
     TurbChoice tc = solverChoice.turbChoice[level];
 
     const MultiFab*  t_mean_mf = nullptr;
-    if (SurfLayer) { t_mean_mf = SurfLayer->get_mac_avg(level,2); }
+    const MultiFab*  u_star_mf = nullptr;   // surface TKE production needs u*
+    if (SurfLayer) { t_mean_mf  = SurfLayer->get_mac_avg(level,2);
+                     u_star_mf = SurfLayer->get_u_star(level); }
 
     const Box& domain = geom.Domain();
     int klo = domain.smallEnd(2);
@@ -611,6 +613,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
             Array4<Real> diss  = Diss->array(mfi);
 
             const Array4<const Real> tm_arr = t_mean_mf ? t_mean_mf->const_array(mfi) : Array4<const Real>{};
+                    const Array4<const Real> u_star_arr = u_star_mf ? u_star_mf->const_array(mfi) : Array4<const Real>{};
 
             // NOTE: No diffusion for continuity, so n starts at one
             int n_start = RhoTheta_comp;
@@ -628,7 +631,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                        mf_my, mf_uy, mf_vy,
                                        hfx_z, q1fx_z, q2fx_z, diss,
                                        mu_turb, solverChoice, level,
-                                       tm_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
+                                       tm_arr, u_star_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
             } else if (l_use_terrain_fitted_coords) {
                 DiffusionSrcForState_T(bx, domain, n_start, n_comp, l_rotate, u, v,
                                        cell_data, cell_prim, cell_rhs,
@@ -639,7 +642,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                        mf_my, mf_uy, mf_vy,
                                        hfx_x, hfx_y, hfx_z, q1fx_x, q1fx_y, q1fx_z, q2fx_z, diss,
                                        mu_turb, solverChoice, level,
-                                       tm_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
+                                       tm_arr, u_star_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
             } else if (l_use_eb) {
                 DiffusionSrcForState_EB(bx, domain, n_start, n_comp, u, v,
                                        cell_data, cell_prim, cell_rhs,
@@ -659,7 +662,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                        mf_my, mf_uy, mf_vy,
                                        hfx_z, q1fx_z, q2fx_z, diss,
                                        mu_turb, solverChoice, level,
-                                       tm_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
+                                       tm_arr, u_star_arr, grav_gpu, bc_ptr_d, l_use_SurfLayer, l_vert_implicit_fac);
             }
         }
 

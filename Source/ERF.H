@@ -515,6 +515,10 @@ public:
     // measured with ERF's own operator (see the definition for the identity).
     void hindcast_check_mass_consistency(const int lev);
 
+    // Diagnose the initial w from the discrete continuity operator instead of
+    // leaving it at rest (erf.hindcast_ic_diagnose_w, default 0).
+    void hindcast_ic_diagnose_w (const int lev);
+
 #ifdef ERF_USE_NETCDF
     // Fill the real-BC boundary planes (bdy_data_xlo/xhi/ylo/yhi) from the
     // interpolated hindcast frames so the specified/relaxation-zone

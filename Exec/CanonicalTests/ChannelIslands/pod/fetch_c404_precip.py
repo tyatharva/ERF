@@ -45,6 +45,12 @@ def main():
     xl, yl, xh, yh = [float(v) for v in sys.argv[1:5]]
     nx, ny = int(sys.argv[5]), int(sys.argv[6])
     out = sys.argv[7]
+    # Optional hour window [h0,h1] on 2020-12-28; default 0..23 keeps every
+    # existing caller byte-identical. Files hold the PRECEDING hour, so the
+    # window is files h0+1 .. h1 -- the same convention make_window_refs.py
+    # uses for MRMS, so a 6-h driver total lines up with the 6-h references.
+    H0 = int(sys.argv[8]) if len(sys.argv) > 8 else 0
+    H1 = int(sys.argv[9]) if len(sys.argv) > 9 else 23
     j0, j1, i0, i1 = [int(v) for v in np.load(os.environ['C404_BBOX'])]
     la = np.load(os.environ['C404_LAT'])[j0:j1+1, i0:i1+1]
     lo = np.load(os.environ['C404_LON'])[j0:j1+1, i0:i1+1]
@@ -52,7 +58,7 @@ def main():
     shape = (1, j1 - j0 + 1, i1 - i0 + 1)
 
     tot = np.zeros(shape[1:])
-    for h in range(1, 24):
+    for h in range(H0 + 1, H1 + 1):
         stamp = f'2020-12-28_{h:02d}:00:00'.replace(':', '%3A')
         u = f'{BASE}/wy2021/202012/wrf2d_d01_{stamp}.nc.dods?PREC_ACC_NC[0:1:0]{sub}'
         tot += dods(u, shape)[0]

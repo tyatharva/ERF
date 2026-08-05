@@ -231,6 +231,70 @@ void PlotMultiFab(const MultiFab& mf,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Epoch seconds (UTC) from a hindcast frame filename "..._YYYY_MM_DD_HH_MM.bin".
+// Returns -1 if the name does not carry a parseable stamp.
+//
+// Computed in DOUBLE and via timegm. start_time is amrex::Real, which in a
+// single-precision build holds ~1.6e9 with a 128 s ULP (UPSTREAM_ISSUES item
+// 32), so differencing two Real epochs would quantise the offset to multiples
+// of ~128 s. Both sides are parsed to double here instead.
+// ---------------------------------------------------------------------------
+static double hindcast_frame_epoch (const std::string& path)
+{
+    const std::string f = path.substr(path.find_last_of("/\\") + 1);
+    if (f.size() < 20 || f.substr(f.size() - 4) != ".bin") { return -1.0; }
+    const std::string s = f.substr(f.size() - 20, 16);   // YYYY_MM_DD_HH_MM
+    int Y, M, D, h, m;
+    if (std::sscanf(s.c_str(), "%4d_%2d_%2d_%2d_%2d", &Y, &M, &D, &h, &m) != 5) { return -1.0; }
+    std::tm tmv{};
+    tmv.tm_year = Y - 1900; tmv.tm_mon = M - 1; tmv.tm_mday = D;
+    tmv.tm_hour = h; tmv.tm_min = m; tmv.tm_sec = 0;
+    return static_cast<double>(timegm(&tmv));
+}
+
+// Seconds from the FIRST frame in the pool to the deck's start_datetime.
+// ERF selects frames as idx = time/interval with time measured from the run
+// start, which silently assumes frame 0 IS start_datetime. When the pool begins
+// earlier (e.g. a 6 h spin-up lead retained for a later long run) every frame is
+// then off by that lead: measured, a deck declaring 2020-12-28 00Z against a
+// pool starting 2020-12-27 18Z ran on 18Z data with a 00Z clock, a silent 6 h
+// error that invalidated a scored precipitation window (item 83).
+static double hindcast_frame_offset (const std::string& first_file)
+{
+    static double s_off = -1.0e30;
+    if (s_off > -1.0e29) { return s_off; }
+    s_off = 0.0;
+    std::string sdt;
+    amrex::ParmParse pp;
+    if (!pp.query("start_datetime", sdt)) { return s_off; }
+    int Y, M, D, h, m, sec;
+    if (std::sscanf(sdt.c_str(), "%4d-%2d-%2d %2d:%2d:%2d", &Y, &M, &D, &h, &m, &sec) != 6) {
+        amrex::Warning("HindCast: could not parse start_datetime; frame offset assumed 0");
+        return s_off;
+    }
+    std::tm tmv{};
+    tmv.tm_year = Y - 1900; tmv.tm_mon = M - 1; tmv.tm_mday = D;
+    tmv.tm_hour = h; tmv.tm_min = m; tmv.tm_sec = sec;
+    const double start_epoch = static_cast<double>(timegm(&tmv));
+    const double f0 = hindcast_frame_epoch(first_file);
+    if (f0 < 0.0) {
+        amrex::Warning("HindCast: first frame filename carries no timestamp; "
+                       "frame offset assumed 0");
+        return s_off;
+    }
+    s_off = start_epoch - f0;
+    if (s_off < 0.0) {
+        amrex::Abort("HindCast: start_datetime is EARLIER than the first frame in the pool "
+                     "(offset " + std::to_string(s_off) + " s). There is no data to start from.");
+    }
+    amrex::Print() << "HindCast frame offset: start_datetime is " << s_off
+                   << " s (" << s_off / 3600.0 << " h) after the first frame ("
+                   << first_file.substr(first_file.find_last_of("/\\") + 1) << ")"
+                   << std::endl;
+    return s_off;
+}
+
 void
 ERF::FillForecastStateMultiFabs(const int lev,
                                 const std::string& filename,
@@ -789,6 +853,26 @@ ERF::fill_bdy_data_from_hindcast ()
         }
     }
     std::sort(bin_files.begin(), bin_files.end());
+    const double bdy_interval_s = solverChoice.hindcast_data_interval_in_hrs * 3600.0;
+    // Drop any frames BEFORE start_datetime. The boundary planes are indexed
+    // start_bdy_time + itime*interval with start_bdy_time = start_time, so plane
+    // itime must be the frame AT start_datetime + itime*interval. Retaining a
+    // spin-up lead in the pool (kept deliberately for the later 6 h spin-up +
+    // 30 h run) otherwise offsets every boundary plane by that lead -- the same
+    // silent error as the IC path, item 83.
+    {
+        const double off = hindcast_frame_offset(bin_files[0]);
+        const int nskip = static_cast<int>(std::llround(off / bdy_interval_s));
+        if (nskip > 0) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(nskip < static_cast<int>(bin_files.size()) - 1,
+                "start_datetime leaves fewer than two frames in the pool");
+            Print() << "HindCast boundary frames: skipping " << nskip
+                    << " pre-start frame(s); plane 0 is now "
+                    << bin_files[nskip].substr(bin_files[nskip].find_last_of("/\\")+1)
+                    << std::endl;
+            bin_files.erase(bin_files.begin(), bin_files.begin() + nskip);
+        }
+    }
     const int ntimes = static_cast<int>(bin_files.size());
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(ntimes >= 2,
         "Need at least two hindcast frames for boundary data");
@@ -1032,6 +1116,27 @@ ERF::init_thermo_from_hindcast (const int lev)
 
     const bool have_anchor = ensure_sfc_anchor(nx_dom, ny_dom);
 
+    // erf.hindcast_moist_base_state (default 0 = previous behaviour).
+    //
+    // Store the base state as the TOTAL (moist) density and integrate p0
+    // with it, instead of the dry density. See UPSTREAM_ISSUES items 78/80.
+    // buoyancy_rhopert (buoyancy_type 1, the default for Morrison) forms
+    //     rho_dry*(1 + qt) - r0
+    // and this path sets the base state EQUAL to the state, so with r0 dry
+    // the term returns g*rho*qt at t=0 rather than zero -- a permanent
+    // downward acceleration of 0.069 m/s^2 at the surface on this case.
+    // Upstream does not have this problem because its base state is a dry
+    // analytic REFERENCE with qv0 = 0 (ERF_InitFromMetgrid.cpp:1216-1262),
+    // so its rho-difference is a genuine perturbation; ours is not.
+    // Storing r0 = rho_dry*(1+qt) makes buoyancy exactly zero at init (the
+    // property this path was designed for) AND makes p0 genuinely
+    // hydrostatic for moist air, which it currently is not.
+    static const int s_moist_base = [] {
+        int v=0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_moist_base_state", v); return v; }();
+    const int l_moist_base = s_moist_base;
+
+
     if (have_anchor && s_frame_zlow <= zero) {
         Abort("HindCast IC: the height of the lowest frame level is unset -- "
               "FillForecastStateMultiFabs must run before init_thermo_from_hindcast.");
@@ -1110,6 +1215,9 @@ ERF::init_thermo_from_hindcast (const int lev)
 
                 Real p_prev = p_orog;
                 Real r_prev = getRhogivenThetaPress(th_sfc, p_orog, rdOcp, qv_sfc);
+                // Seed with total density when the moist base state is on: the
+                // hydrostatic weight is rho_total*g, not rho_dry*g.
+                if (l_moist_base) { r_prev *= (one + qv_sfc); }
                 Real z_prev = z_orog;
 
                 for (int k = dlo_z; k <= dhi_z; ++k)
@@ -1141,14 +1249,23 @@ ERF::init_thermo_from_hindcast (const int lev)
                     // p is strictly decreasing with height by construction here
                     // (dz > 0, g > 0, rho > 0), which is what the layer-thickness
                     // requirement in the radiation driver actually needs.
+                    // Total water: qv + qc + qr, all PLAIN in the frame. This is
+                    // the loading buoyancy_rhopert applies via (1 + qt), so the
+                    // base state must carry the same one or the two disagree.
+                    Real qt_k = qv_k;
+                    if (lmoist && f_arr.nComp() > RhoQ3_comp) {
+                        qt_k += f_arr(i,j,k,RhoQ2_comp) + f_arr(i,j,k,RhoQ3_comp);
+                    }
+                    const Real load = l_moist_base ? (one + qt_k) : one;
+
                     const Real dz_loc = z_c - z_prev;
                     Real p_k = p_prev - dz_loc*l_gravity*r_prev;
                     Real r_k = r_prev;
                     for (int it = 0; it < 4; ++it) {
-                        r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                        r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k) * load;
                         p_k = p_prev - dz_loc*l_gravity*myhalf*(r_k + r_prev);
                     }
-                    r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                    r_k = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k) * load;
 
                     r_arr (i,j,k) = r_k;
                     p_arr (i,j,k) = p_k;
@@ -1169,12 +1286,16 @@ ERF::init_thermo_from_hindcast (const int lev)
                     const Real qv_k   = qv_arr(i,j,dlo_z);
                     const Real p_0z   = p_arr(i,j,dlo_z);
                     const Real r_0z   = r_arr(i,j,dlo_z);
+                    // Recover the loading actually applied at dlo_z rather than
+                    // recomputing qt: exact for both gate states, and 1 when off.
+                    const Real rd_0z  = getRhogivenThetaPress(th_k, p_0z, rdOcp, qv_k);
+                    const Real load0  = (rd_0z > Real(0.0)) ? r_0z / rd_0z : one;
                     Real p_k = p_0z + dz_loc*l_gravity*r_0z;
                     for (int it = 0; it < 4; ++it) {
-                        const Real rr = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                        const Real rr = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k) * load0;
                         p_k = p_0z + dz_loc*l_gravity*myhalf*(rr + r_0z);
                     }
-                    r_arr (i,j,km) = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k);
+                    r_arr (i,j,km) = getRhogivenThetaPress(th_k, p_k, rdOcp, qv_k) * load0;
                     p_arr (i,j,km) = p_k;
                     pi_arr(i,j,km) = getExnergivenP(p_k, rdOcp);
                     th_arr(i,j,km) = th_k;
@@ -1207,7 +1328,19 @@ ERF::init_thermo_from_hindcast (const int lev)
         const Array4<Real const>& f_arr    = fcons.const_array(mfi);
         ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
-            cons_arr(i,j,k,Rho_comp)      = r_arr(i,j,k);
+            // r_arr is the BASE STATE. With erf.hindcast_moist_base_state it holds
+            // the TOTAL density, but the conserved state's Rho_comp is ERF's DRY
+            // density throughout (make_qt divides by it), so divide the loading
+            // back out here. Every r_arr multiplier below uses this same rho_d.
+            Real qt_c = zero;
+            if (l_moist_base) {
+                qt_c = f_arr(i,j,k,RhoQ1_comp);
+                if (f_arr.nComp() > RhoQ3_comp) {
+                    qt_c += f_arr(i,j,k,RhoQ2_comp) + f_arr(i,j,k,RhoQ3_comp);
+                }
+            }
+            const Real rho_d = r_arr(i,j,k) / (one + qt_c);
+            cons_arr(i,j,k,Rho_comp)      = rho_d;
             // theta comes from the INTERPOLATED FRAME, not from the hydrostatic base
             // state. This previously read th_arr (= th_hse, the theta erf_enforce_hse
             // derives while integrating dp/dz from the interpolated rho), so the frame's
@@ -1238,15 +1371,15 @@ ERF::init_thermo_from_hindcast (const int lev)
             // the frame theta (specify the thermodynamic profile, solve for the mass
             // field), which is a restructure, not a substitution.
             cons_arr(i,j,k,RhoTheta_comp) = (ic_frame_theta)
-                                          ? r_arr(i,j,k) * f_arr(i,j,k,RhoTheta_comp)
-                                          : r_arr(i,j,k) * th_arr(i,j,k);
+                                          ? rho_d * f_arr(i,j,k,RhoTheta_comp)
+                                          : rho_d * th_arr(i,j,k);
             if (l_has_moist) {
-                cons_arr(i,j,k,RhoQ1_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ1_comp);
+                cons_arr(i,j,k,RhoQ1_comp) = rho_d * f_arr(i,j,k,RhoQ1_comp);
                 // Seed cloud and rain water too, so the interior does not have to
                 // grow condensate the frame already knows about.
                 if (cons_arr.nComp() > RhoQ3_comp && f_arr.nComp() > RhoQ3_comp) {
-                    cons_arr(i,j,k,RhoQ2_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ2_comp);
-                    cons_arr(i,j,k,RhoQ3_comp) = r_arr(i,j,k) * f_arr(i,j,k,RhoQ3_comp);
+                    cons_arr(i,j,k,RhoQ2_comp) = rho_d * f_arr(i,j,k,RhoQ2_comp);
+                    cons_arr(i,j,k,RhoQ3_comp) = rho_d * f_arr(i,j,k,RhoQ3_comp);
                 }
             }
         });
@@ -1392,7 +1525,186 @@ ERF::init_thermo_from_hindcast (const int lev)
                 << " m/s (w left at rest)" << std::endl;
     }
 
+    hindcast_ic_diagnose_w(lev);
+
     hindcast_check_mass_consistency(lev);
+}
+
+/**
+ * Diagnose the initial vertical velocity from ERF's OWN discrete continuity
+ * operator instead of starting it at rest.
+ *
+ * WHY. Leaving w = 0 was justified on the grounds that "w re-establishes itself
+ * within a few steps through the pressure solve." That is FALSE, measured on
+ * this case with every physics option disabled (no PBL, no surface layer, no
+ * LES, no molecular diffusion), interior columns, 1 h:
+ *
+ *     t (s)      0    300    900   1800   2700   3584
+ *     |w| med  0.000  0.246  0.368  0.359  0.385  0.350
+ *     |w| p99  0.000  8.256  8.789  8.132  7.569  7.164
+ *
+ * against the driver's own w (median 0.023, p99 0.346, max 1.54 m/s). It does
+ * not re-establish; it rings up to 15x the driver at the median and 21x at p99
+ * and STAYS there -- there is nothing in the interior to damp it. That standing
+ * w advects the initial vertical shear, w*du/dz ~ 0.35 * 1e-2 = 3.5e-3 m/s^2,
+ * which is the entire low-level wind runaway (measured 2-3e-3 m/s^2, and 16x
+ * larger than the surface drag that could oppose it).
+ *
+ * WHAT. Integrate the same residual hindcast_check_mass_consistency measures,
+ *
+ *     R_k = (detJ/m^2) drho/dt + dFx/dx + dFy/dy,
+ *     Fz_{k+1} = Fz_k - dzeta * R_k,     Fz(klo) = 0,
+ *
+ * upward from a no-flux terrain surface, convert Fz -> Omega -> w with ERF's
+ * own WFromOmega, and store it. This gives the w that ERF's discretisation,
+ * ERF's terrain metrics and the interpolated (rho, u, v) actually imply -- which
+ * is the objection the original comment raised against copying the frame's w
+ * ("it belongs to CONUS404's terrain and vertical coordinate, not ours").
+ * Diagnosing it sidesteps that objection entirely.
+ *
+ * KNOWN LIMITATION. The column integral does not close: the lid is a SlipWall
+ * but Fz(khi+1) != 0, because the interpolated horizontal wind is not mass
+ * consistent under this operator (measured implied lid |w|: median 0.170, p99
+ * 1.25 m/s over interior water). Closing it needs a divergence-cleaning
+ * projection of (u,v), which is a larger change. This is therefore a REDUCTION
+ * of the impulsive start, not a balanced initialisation, and the residual is
+ * reported so the gap is visible rather than assumed away.
+ *
+ * GATED erf.hindcast_ic_diagnose_w, default 0 = leave w at rest exactly as
+ * before, so this is one deck line to A/B.
+ */
+void
+ERF::hindcast_ic_diagnose_w (const int lev)
+{
+    static const int l_diag_w = [] {
+        int v=0; amrex::ParmParse pp("erf");
+        pp.query("hindcast_ic_diagnose_w", v); return v; }();
+    if (!l_diag_w) { return; }
+
+    const Real dT = solverChoice.hindcast_data_interval_in_hrs * Real(3600.0);
+    if (dT <= zero) { return; }
+
+    const MultiFab& fc1 = forecast_state_1[lev][Vars::cons];
+    const MultiFab& fc2 = forecast_state_2[lev][Vars::cons];
+    MultiFab& zvel       = vars_new[lev][Vars::zvel];
+    const MultiFab& cons = vars_new[lev][Vars::cons];
+    const MultiFab& xvel = vars_new[lev][Vars::xvel];
+    const MultiFab& yvel = vars_new[lev][Vars::yvel];
+
+    const auto dxInv  = geom[lev].InvCellSizeArray();
+    const Real dzeta  = geom[lev].CellSize(2);
+    const Box& domain = geom[lev].Domain();
+    const auto dom_lo = lbound(domain);
+    const auto dom_hi = ubound(domain);
+
+    // Restrict to the INTERIOR. The residual is meaningless inside the
+    // relaxation band: the forecast target's physical-boundary ghosts are
+    // zero-initialised, so the band fluxes are nonsense and the band value of
+    // this very residual is the 990 m/s hindcast_check_mass_consistency reports
+    // (against 19.3 in the interior). Writing that into the state NaNs the run
+    // at the xlo wall on step 1 -- measured, not hypothetical. The band is the
+    // lateral scheme's responsibility, so w stays at rest there: the same
+    // convention erf.hindcast_ic_frame_wind = 3 uses for u and v.
+    const int bw = (real_width > 0) ? real_width : 0;
+    Box keep = domain;
+    if (bw > 0) { keep.grow(0,-bw); keep.grow(1,-bw); }
+
+    // Magnitude guard. The driver's own w is O(0.02 m/s) median, O(1.5 m/s) max;
+    // far above that is the operator amplifying an interpolation artifact, not a
+    // vertical velocity. Clamped rather than dropped so the field stays
+    // continuous, and COUNTED so a large count shows up as a failed premise
+    // instead of being silently smoothed away.
+    static const Real s_wmax = [] {
+        Real d=Real(3.0); amrex::ParmParse pp("erf");
+        pp.query("hindcast_ic_diagnose_w_max", d); return d; }();
+    const Real l_wmax = s_wmax;   // plain local: a static cannot be captured by a device lambda
+    Gpu::Buffer<Long> nclamp_buf({0});
+    Long* nclamp_p = nclamp_buf.data();
+
+    bool z_split = false;
+    for (MFIter mfi(zvel); mfi.isValid(); ++mfi)
+    {
+        const Box& bx = mfi.validbox();
+        // The upward recursion needs the whole column on one box.
+        if (bx.smallEnd(2) != dom_lo.z || bx.bigEnd(2) > dom_hi.z + 1) { z_split = true; continue; }
+        Box bx2 = makeSlab(bx,2,bx.smallEnd(2));
+        bx2 &= makeSlab(keep,2,keep.smallEnd(2));
+        if (!bx2.ok()) { continue; }
+
+        const Array4<const Real>& r1  = fc1.const_array(mfi);
+        const Array4<const Real>& r2  = fc2.const_array(mfi);
+        const Array4<const Real>& rc_a = cons.const_array(mfi);
+        const Array4<const Real>& u   = xvel.const_array(mfi);
+        const Array4<const Real>& v   = yvel.const_array(mfi);
+        const Array4<Real>&       w   = zvel.array(mfi);
+        const Array4<const Real>& axa = ax[lev]->const_array(mfi);
+        const Array4<const Real>& aya = ay[lev]->const_array(mfi);
+        const Array4<const Real>& dJ  = detJ_cc[lev]->const_array(mfi);
+        const Array4<const Real>& mfx = mapfac[lev][MapFacType::m_x]->const_array(mfi);
+        const Array4<const Real>& mfy = mapfac[lev][MapFacType::m_y]->const_array(mfi);
+        const Array4<const Real>& mfu = mapfac[lev][MapFacType::u_y]->const_array(mfi);
+        const Array4<const Real>& mfv = mapfac[lev][MapFacType::v_x]->const_array(mfi);
+        const Array4<const Real>& z_nd = z_phys_nd[lev]->const_array(mfi);
+
+        const int klo = dom_lo.z, khi = dom_hi.z;
+
+        ParallelFor(bx2, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
+        {
+            auto rho_at = [=] (int ii, int jj, int kk) {
+                ii = amrex::min(amrex::max(ii,dom_lo.x),dom_hi.x);
+                jj = amrex::min(amrex::max(jj,dom_lo.y),dom_hi.y);
+                return rc_a(ii,jj,kk,Rho_comp);
+            };
+
+            const Real msq = mfx(i,j,0) * mfy(i,j,0);
+            Real Fz = Real(0.0);
+            w(i,j,klo) = Real(0.0);          // no flux through the terrain
+
+            for (int k = klo; k <= khi; ++k) {
+                const Real rc = rho_at(i,j,k);
+
+                const Real rux_lo = u(i  ,j,k) * myhalf*(rho_at(i-1,j,k) + rc);
+                const Real rux_hi = u(i+1,j,k) * myhalf*(rc + rho_at(i+1,j,k));
+                const Real rvy_lo = v(i,j  ,k) * myhalf*(rho_at(i,j-1,k) + rc);
+                const Real rvy_hi = v(i,j+1,k) * myhalf*(rc + rho_at(i,j+1,k));
+
+                const Real Fx_lo = axa(i  ,j,k) * rux_lo / mfu(i  ,j,0);
+                const Real Fx_hi = axa(i+1,j,k) * rux_hi / mfu(i+1,j,0);
+                const Real Fy_lo = aya(i,j  ,k) * rvy_lo / mfv(i,j  ,0);
+                const Real Fy_hi = aya(i,j+1,k) * rvy_hi / mfv(i,j+1,0);
+
+                const Real drdt = (r2(i,j,k,Rho_comp) - r1(i,j,k,Rho_comp)) / dT;
+
+                const Real res = dJ(i,j,k)/msq * drdt
+                               + (Fx_hi - Fx_lo) * dxInv[0]
+                               + (Fy_hi - Fy_lo) * dxInv[1];
+
+                Fz -= res * dzeta;
+
+                // Fz = az*Omega/m^2 with az = 1 on this grid; rho-weighted flux
+                // to velocity, then the terrain transform back to Cartesian w.
+                const Real rf    = myhalf * (rc + rho_at(i,j,amrex::min(k+1,khi)));
+                const Real omega = (Fz * msq) / amrex::max(rf, Real(1.e-6));
+                int ii = i, jj = j, kk = k+1;
+                Real wd = WFromOmega(ii,jj,kk,omega,u,v,mfu,mfv,z_nd,dxInv);
+                if (std::abs(wd) > l_wmax) {
+                    Gpu::Atomic::Add(nclamp_p, Long(1));
+                    wd = (wd > zero) ? l_wmax : -l_wmax;
+                }
+                w(i,j,k+1) = wd;
+            }
+        });
+    }
+    if (z_split) { Warning("hindcast_ic_diagnose_w skipped boxes split in z"); }
+
+    Long nclamped = *(nclamp_buf.copyToHost());
+    ParallelDescriptor::ReduceLongSum(nclamped);
+
+    zvel.FillBoundary(geom[lev].periodicity());
+    Print() << "HindCast IC: w DIAGNOSED from discrete continuity (interior only, band "
+            << bw << " left at rest) -- w " << zvel.min(0) << " to " << zvel.max(0)
+            << " m/s, " << nclamped << " cells clamped at +/-" << l_wmax << " m/s"
+            << std::endl;
 }
 
 /**
@@ -1551,6 +1863,8 @@ ERF::hindcast_check_mass_consistency (const int lev)
             << " m/s, max lid incompatibility = " << int_top << " m/s" << std::endl;
 }
 
+
+
 void
 ERF::WeatherDataInterpolation(const int lev,
                               const Real time,
@@ -1608,9 +1922,15 @@ ERF::WeatherDataInterpolation(const int lev,
 
         std::string filename1, filename2;
 
-        int idx1 = static_cast<int>(time / hindcast_data_interval);
-        int idx2 = static_cast<int>(time / hindcast_data_interval)+1;
-        Print() << "Reading weather data " << time << " " << idx1 << " " << idx2 <<" " << bin_files.size() << std::endl;
+        // Offset model time by the lead between the first frame and start_datetime,
+        // so the deck's declared start selects the frame that actually matches it.
+        const double t_eff = static_cast<double>(time) + hindcast_frame_offset(bin_files[0]);
+        int idx1 = static_cast<int>(t_eff / hindcast_data_interval);
+        int idx2 = idx1 + 1;
+        Print() << "Reading weather data t=" << time << " t_eff=" << t_eff
+                << " idx " << idx1 << "," << idx2 << " of " << bin_files.size()
+                << "  -> " << bin_files[idx1].substr(bin_files[idx1].find_last_of("/\\")+1)
+                << std::endl;
 
         if (idx2 >= static_cast<int>(bin_files.size())) {
             throw std::runtime_error("Error: Not enough .bin files to cover time " + std::to_string(time));

@@ -19,8 +19,13 @@ log.*
 
 /Exec/WORK/*
 ic.txt
-plt*
-chk*
+# plt*/chk* are AMReX OUTPUT DIRECTORIES, which are always plt<digits> /
+# chk<digits>. Anchor on the digits: the bare globs also matched
+# scoring/plt_guard.py, so that module was silently never tracked despite a
+# commit message describing it, and it survived only on the rented pod --
+# leaving seven scoring scripts unimportable on any fresh clone.
+plt[0-9]*
+chk[0-9]*
 tmp_build_dir
 .ccls-cache
 ERF*.ex
@@ -123,3 +128,11 @@ precip_check/cds_sfc.log
 /c404_invariant/
 /_archive/
 /.codegraph/
+
+# Derived data from the ChannelIslands campaign: regenerable from the frames and
+# wrfout by pod/make_window_refs.py etc. Large binaries, not source.
+refs/
+figs*/
+run_*/
+pbltest/
+ktest/

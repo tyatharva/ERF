@@ -68,19 +68,56 @@ for t in rrtmgp-cloud-optics-coeffs-sw.nc rrtmgp-cloud-optics-coeffs-lw.nc; do
 done
 
 # Refuse to run a pair that is not actually a pair.
-grep -q '^erf.anelastic = 1' inputs_c404 || die "deck is not anelastic"
-grep -q '^amrex.fpe_trap_invalid = 0' inputs_c404 \
-    || die "anelastic needs amrex.fpe_trap_invalid = 0 (PTX JIT raises FP exceptions)"
+# The pair is COMPRESSIBLE: NSCBC's LODI relations are built on an acoustic
+# sound speed that anelastic does not have (see the deck). Refuse the invalid
+# pairing rather than let it run and NaN at a wall 23 model minutes in.
+grep -q '^erf.anelastic = 0' inputs_c404 \
+    || die "deck is anelastic: NSCBC is a compressible-equations BC and fails at a wall"
 echo "deck sha256: $(sha256sum inputs_c404 | cut -c1-16)  <- must match the other arm"
 echo "arm flags  : ${ARM[*]}"
+
+# ------------------------------------------------------------ run_leg -------
+# Run one leg, restarting from a checkpoint if it dies.
+#
+# Two distinct failure modes are known and they need different responses:
+#   * NONDETERMINISTIC (measured today at max_dt 0.7): the same state can run
+#     clean on a second attempt, so retrying the SAME checkpoint is worthwhile.
+#   * PATH-DEPENDENT (UPSTREAM_ISSUES item 66): restarting from the checkpoint
+#     AT the failure reproduced it exactly, and only an EARLIER one cleared it.
+# So: retry the latest checkpoint once, then walk backwards. That is also why
+# amr.check_per is hourly -- each step back costs at most one model hour.
+run_leg () {                       # $1 = leg label, $2 = log, $3 = optional restart
+    local label=$1 log=$2 restart=${3:-}
+    local attempt=0 back=0
+    while [ $attempt -lt 5 ]; do
+        attempt=$((attempt+1))
+        local args=(inputs_c404 "${ARM[@]}")
+        [ -n "$restart" ] && args+=(amr.restart="$restart")
+        echo "  attempt $attempt${restart:+ (restart from $restart)}"
+        "$BIN" "${args[@]}" > "$log" 2>&1
+        local rc=$?
+        if [ $rc -eq 0 ] && ! grep -q 'contains NaNs' "$log"; then
+            return 0
+        fi
+        grep -q 'contains NaNs' "$log" && echo "  $label: NaN" || echo "  $label: exit $rc"
+        cp "$log" "$log.attempt$attempt"
+        # Choose the checkpoint to resume from, walking back one further each time.
+        mapfile -t CHKS < <(ls -d chk* 2>/dev/null | grep -E 'chk[0-9]+$' | sort)
+        local n=${#CHKS[@]}
+        [ $n -eq 0 ] && { tail -20 "$log"; die "$label failed with no checkpoint to resume from"; }
+        back=$((back+1))
+        local idx=$((n-back))
+        [ $idx -lt 0 ] && { tail -20 "$log"; die "$label: exhausted checkpoints"; }
+        restart=${CHKS[$idx]}
+        echo "  resuming from $restart"
+    done
+    die "$label: 5 attempts exhausted"
+}
 
 # ---------------------------------------------------------------- leg 1 -----
 say "leg 1 -> $LEG1_STOP"
 sed -i "s|^stop_datetime  = .*|stop_datetime  = \"$LEG1_STOP\"|" inputs_c404
-"$BIN" inputs_c404 "${ARM[@]}" > leg1.log 2>&1
-rc=$?
-grep -q 'contains NaNs' leg1.log && die "leg 1 produced NaNs -- see leg1.log"
-[ $rc -eq 0 ] || { tail -20 leg1.log; die "leg 1 exited $rc"; }
+run_leg "leg 1" leg1.log
 
 CHK=$(ls -d chk* 2>/dev/null | grep -E 'chk[0-9]+$' | sort | tail -1)
 [ -n "$CHK" ] || die "leg 1 wrote no checkpoint"
@@ -92,10 +129,7 @@ echo "leg 1 done, restarting from $CHK"
 # it disagrees with the checkpoint, so this is enforced rather than trusted.
 say "leg 2 -> $LEG2_STOP (restart from $CHK)"
 sed -i "s|^stop_datetime  = .*|stop_datetime  = \"$LEG2_STOP\"|" inputs_c404
-"$BIN" inputs_c404 "${ARM[@]}" amr.restart="$CHK" > leg2.log 2>&1
-rc=$?
-grep -q 'contains NaNs' leg2.log && die "leg 2 produced NaNs -- see leg2.log"
-[ $rc -eq 0 ] || { tail -20 leg2.log; die "leg 2 exited $rc"; }
+run_leg "leg 2" leg2.log "$CHK"
 
 say "ARM COMPLETE: $RUN ($SCHEME)"
 grep -a 'Coarse STEP' leg2.log | tail -1

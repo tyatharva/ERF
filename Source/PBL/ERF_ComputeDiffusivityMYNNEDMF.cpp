@@ -4247,13 +4247,46 @@ ComputeDiffusivityMYNNEDMF (const MultiFab& xvel,
         const Array4<Real> qint = qintegral.array();
         const Array4<Real> qvel = qturb.array();
 
+        // ---- TKE FLOOR (2026-08-04) --------------------------------------
+        // MYNN's master length scale is a HARMONIC blend of l_S, l_T and l_B
+        // (line ~4378), and the stable-branch buoyancy scale is
+        //     l_B = qvel / N
+        // i.e. DIRECTLY proportional to qvel. So qvel -> 0 forces Lm -> 0 no
+        // matter how healthy l_S (KAPPA*z ~ 20 m at 50 m AGL) and l_T are, and
+        // that closes a runaway with two mutually reinforcing branches:
+        //     TKE v -> qvel v -> l_B v -> Lm v -> Km v -> shear production v
+        //                                    `-> dissipation q^3/Lm ^^
+        // Zero TKE is therefore an ABSORBING state, not a marginal one. ERF
+        // initialises KE to zero by default (init_tke_from_ustar defaults
+        // false), so the boundary layer never forms: measured on the 29 h
+        // Domain A arm, TKE was identically 0 and Lturb 0.04-0.09 m through the
+        // whole PBL, Kmv was 0.000 at 50-3000 m, and the correctly-initialised
+        // sheared wind profile collapsed to the free-stream value within ONE
+        // hour (50 m AGL: 3.45 -> 13.8 m/s against d02's 4.88).
+        //
+        // Seeding alone does NOT fix it: with init_tke_from_ustar=true the seed
+        // (TKE = 0.291) was annihilated inside 45 min, because it was fed into
+        // the sink above rather than into a healthy closure.
+        //
+        // The floor is what the code already ASSUMES: line ~4257 asserts
+        // qvel > 0, but AMREX_ASSERT is compiled out in Release, so the
+        // violation is silent. This makes the assert true by construction.
+        // Default 1e-3 m^2/s^2 of QKE (= 2*TKE) matches WRF's MYNN minimum;
+        // erf.pbl_mynn_qke_min = 0 restores the old behaviour exactly.
+        static const Real qke_min = [] {
+            amrex::Real v = amrex::Real(1.0e-3);
+            amrex::ParmParse pp("erf"); pp.query("pbl_mynn_qke_min", v); return v;
+        }();
+        const Real qvel_min = std::sqrt(qke_min);
+
         // vertical integrals to compute lengthscale
         if (use_terrain_fitted_coords) {
             const Array4<Real const> &z_nd_arr = z_phys_nd->array(mfi);
             const auto invCellSize = geom.InvCellSizeArray();
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
-                qvel(i,j,k) = std::sqrt(two * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp));
+                qvel(i,j,k) = std::max(qvel_min,
+                    std::sqrt(two * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp)));
                 AMREX_ASSERT_WITH_MESSAGE(qvel(i,j,k) > zero, "KE must have a positive value");
 
                 Real fac = (sbx.contains(i,j,k)) ? one : zero;
@@ -4265,7 +4298,8 @@ ComputeDiffusivityMYNNEDMF (const MultiFab& xvel,
         } else {
             ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
-                qvel(i,j,k) = std::sqrt(two * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp));
+                qvel(i,j,k) = std::max(qvel_min,
+                    std::sqrt(two * cell_data(i,j,k,RhoKE_comp) / cell_data(i,j,k,Rho_comp)));
                 AMREX_ASSERT_WITH_MESSAGE(qvel(i,j,k) > zero, "KE must have a positive value");
 
                 // Not multiplying by dz: its constant and would fall out when we divide qint0/qint1 anyway

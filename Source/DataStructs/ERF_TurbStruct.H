@@ -147,6 +147,7 @@ public:
           pp, "pbl_mynn_SHmax", pbl_mynn.SHmax, lev, max_level);
         query_one_or_per_level(
           pp, "pbl_mynn_SQfactor", pbl_mynn.SQfac, lev, max_level);
+        pp.query("pbl_surface_tke_source", pbl_surface_tke_source);
       } else if (pbl_type == PBLType::YSU) {
         query_one_or_per_level(
           pp, "pbl_ysu_coriolis_freq", pbl_ysu_coriolis_freq, lev, max_level);
@@ -477,6 +478,15 @@ public:
 
   // This is the value of tke_min in WRF 4.5
   amrex::Real tke_min = amrex::Real(1.e-6);
+
+  // Inject WRF-MYNN's surface TKE production at the lowest cell. Without it the
+  // surface layer has NO path into the TKE budget at all: the bottom-face
+  // diffusive flux for RhoKE is hard-zeroed in DiffusionSrcForState_*, and the
+  // only remaining source, K_turb(Mom_v)*(dudz^2+dvdz^2), is itself
+  // proportional to qvel -- so TKE = 0 is an absorbing state and the boundary
+  // layer never forms. Set erf.pbl_surface_tke_source = 0 to reproduce the old
+  // behaviour exactly.
+  bool pbl_surface_tke_source = true;
 
   // Model coefficients - YSU
   // TODO: Add parmparse for all of these above
